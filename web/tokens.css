@@ -1,0 +1,28 @@
+:root {
+  --color-paper: oklch(96% 0.012 210);
+  --color-panel: oklch(99% 0.004 210);
+  --color-panel-2: oklch(93% 0.018 210);
+  --color-ink: oklch(22% 0.026 240);
+  --color-muted: oklch(50% 0.032 240);
+  --color-rule: oklch(84% 0.025 220);
+  --color-accent: oklch(54% 0.12 205);
+  --color-accent-strong: oklch(43% 0.14 205);
+  --color-warm: oklch(75% 0.08 75);
+  --color-danger: oklch(55% 0.18 25);
+  --font-display: Georgia, "Times New Roman", serif;
+  --font-body: "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, monospace;
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --text-sm: 12px;
+  --text-base: 14px;
+  --text-lg: 18px;
+  --text-xl: 24px;
+  --radius-sm: 6px;
+  --rule-sm: 1px;
+  --dur-fast: 120ms;
+  --ease-out: cubic-bezier(.16, 1, .3, 1);
+}

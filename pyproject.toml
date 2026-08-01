@@ -1,0 +1,27 @@
+[project]
+name = "ficframe"
+version = "0.1.0"
+description = "A local toolkit for turning fan-fiction chapters and character notes into consistent image prompts."
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.116",
+    "httpx>=0.28",
+    "python-dotenv>=1.2",
+    "python-multipart>=0.0.20",
+    "uvicorn[standard]>=0.35",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+ficframe = "ficframe.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["ficframe*"]
+
+[[tool.uv.index]]
+name = "tuna"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true

@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FicFrame</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar">
+        <div>
+          <h1>FicFrame</h1>
+          <p id="health">API 状态检查中</p>
+        </div>
+        <div class="top-actions">
+          <button id="configToggle" type="button">API 管理</button>
+          <button id="runBtn" class="primary" type="button">生成分镜</button>
+        </div>
+      </section>
+
+      <section id="configPanel" class="panel config-panel" hidden>
+        <div class="config-grid">
+          <fieldset>
+            <legend>LLM</legend>
+            <input id="llmKey" placeholder="API key，留空或保持脱敏值则不覆盖" autocomplete="off" />
+            <input id="llmBaseUrl" placeholder="Base URL" />
+            <input id="llmModel" placeholder="Model" />
+          </fieldset>
+          <fieldset>
+            <legend>图片</legend>
+            <input id="imageKey" placeholder="API key，留空或保持脱敏值则不覆盖" autocomplete="off" />
+            <input id="imageBaseUrl" placeholder="Base URL" />
+            <select id="imageProvider">
+              <option value="openai">openai</option>
+              <option value="grsai">grsai</option>
+              <option value="siliconflow">siliconflow</option>
+            </select>
+            <input id="imageModel" placeholder="Model" />
+            <div class="inline-fields">
+              <input id="imageSteps" placeholder="Steps" />
+              <input id="imageGuidance" placeholder="Guidance" />
+              <input id="imageBatch" placeholder="Batch" />
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>VLM</legend>
+            <input id="vlmKey" placeholder="API key，留空或保持脱敏值则不覆盖" autocomplete="off" />
+            <input id="vlmBaseUrl" placeholder="Base URL" />
+            <input id="vlmModel" placeholder="Model" />
+          </fieldset>
+        </div>
+        <div class="actions compact">
+          <button id="saveConfigBtn" type="button">保存配置</button>
+          <button id="refreshConfigBtn" type="button">刷新状态</button>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <aside class="panel inputs">
+          <label>
+            <span>小说 Markdown</span>
+            <input id="novelFile" type="file" accept=".md,.txt" />
+          </label>
+          <label>
+            <span>人物 Markdown</span>
+            <input id="charactersFile" type="file" accept=".md,.txt" />
+          </label>
+          <label>
+            <span>人设参考图</span>
+            <input id="referenceImages" type="file" accept="image/*" multiple />
+          </label>
+          <div class="reference-board">
+            <div class="section-head tight">
+              <h2>参考图绑定</h2>
+              <button id="previewCharactersBtn" type="button">识别角色</button>
+            </div>
+            <div id="referenceTable" class="reference-table"></div>
+          </div>
+          <label>
+            <span>分镜数量</span>
+            <input id="maxShots" type="number" min="1" max="24" value="8" />
+          </label>
+          <label class="toggle">
+            <input id="useLlm" type="checkbox" />
+            <span>LLM 增强</span>
+          </label>
+          <label>
+            <span>图片尺寸</span>
+            <select id="imageSize">
+              <option value="1024x1024">1024 x 1024</option>
+              <option value="1024x1536">1024 x 1536</option>
+              <option value="1536x1024">1536 x 1024</option>
+            </select>
+          </label>
+          <div id="charactersBox" class="readout"></div>
+        </aside>
+
+        <section class="panel shots">
+          <div class="section-head">
+            <h2>分镜</h2>
+            <span id="runId">未运行</span>
+          </div>
+          <div id="shotList" class="shot-list"></div>
+        </section>
+
+        <section class="panel detail">
+          <div class="section-head">
+            <h2>Prompt</h2>
+            <button id="copyBtn" type="button">复制</button>
+          </div>
+          <textarea id="promptBox" spellcheck="false"></textarea>
+          <div class="actions">
+            <button id="imageBtn" type="button">生成图片</button>
+            <button id="allImagesBtn" type="button">生成全部</button>
+            <button id="exportBtn" type="button">导出小说 MD</button>
+            <label class="file-action">
+              VLM 质检
+              <input id="qaImage" type="file" accept="image/*" />
+            </label>
+          </div>
+          <figure id="preview" class="preview"></figure>
+          <pre id="qaBox"></pre>
+        </section>
+      </section>
+    </main>
+    <script src="/assets/app.js"></script>
+  </body>
+</html>
