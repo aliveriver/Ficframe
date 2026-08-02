@@ -4,6 +4,7 @@ import base64
 import json
 import mimetypes
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,8 +12,11 @@ from typing import Any
 import httpx
 from dotenv import load_dotenv
 
+from .logging_utils import get_logger
+
 
 load_dotenv()
+logger = get_logger("providers")
 
 
 class ProviderError(RuntimeError):
@@ -70,9 +74,21 @@ class OpenAICompatibleProvider:
 
     def _post(self, endpoint: EndpointConfig, label: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         url = build_url(endpoint.base_url, path)
+        started = time.perf_counter()
         with httpx.Client(timeout=self.config.timeout) as client:
             response = client.post(url, headers=self._headers(endpoint, label), json=payload)
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        logger.info(
+            "provider post label=%s provider=%s path=%s status=%s duration_ms=%s model=%s",
+            label,
+            endpoint.provider,
+            path,
+            response.status_code,
+            duration_ms,
+            payload.get("model", ""),
+        )
         if response.status_code >= 400:
+            logger.warning("provider post failed label=%s path=%s status=%s body=%s", label, path, response.status_code, response.text[:500])
             raise ProviderError(f"{response.status_code} {url}: {response.text[:1000]}")
         return response.json()
 
@@ -87,9 +103,22 @@ class OpenAICompatibleProvider:
         url = build_url(endpoint.base_url, path)
         headers = self._headers(endpoint, label)
         headers.pop("Content-Type", None)
+        started = time.perf_counter()
         with httpx.Client(timeout=self.config.timeout) as client:
             response = client.post(url, headers=headers, data=data, files=files)
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        logger.info(
+            "provider multipart label=%s provider=%s path=%s status=%s duration_ms=%s model=%s file_count=%s",
+            label,
+            endpoint.provider,
+            path,
+            response.status_code,
+            duration_ms,
+            data.get("model", ""),
+            len(files),
+        )
         if response.status_code >= 400:
+            logger.warning("provider multipart failed label=%s path=%s status=%s body=%s", label, path, response.status_code, response.text[:500])
             raise ProviderError(f"{response.status_code} {url}: {response.text[:1000]}")
         return response.json()
 
@@ -134,6 +163,7 @@ class OpenAICompatibleProvider:
         endpoint = self.config.image
         references = reference_images or []
         provider = effective_image_provider(endpoint)
+        logger.info("image request provider=%s model=%s size=%s reference_count=%s", provider, model or endpoint.model, size, len(references))
 
         if provider == "grsai":
             payload = {
@@ -144,6 +174,19 @@ class OpenAICompatibleProvider:
                 "replyType": "json",
             }
             data = self._post(endpoint, "image", "api/generate", payload)
+        elif provider == "ark":
+            payload = {
+                "model": model or endpoint.model,
+                "prompt": reference_aware_prompt(prompt, bool(references)),
+                "sequential_image_generation": os.getenv("FICFRAME_IMAGE_SEQUENTIAL", "disabled"),
+                "response_format": os.getenv("FICFRAME_IMAGE_RESPONSE_FORMAT", "url"),
+                "size": size,
+                "stream": False,
+                "watermark": env_bool("FICFRAME_IMAGE_WATERMARK", True),
+            }
+            if references:
+                payload["images"] = [to_data_url(path) for path in references]
+            data = self._post(endpoint, "image", "images/generations", payload)
         elif provider == "siliconflow":
             payload = {
                 "model": model or endpoint.model,
@@ -192,14 +235,18 @@ class OpenAICompatibleProvider:
         target.parent.mkdir(parents=True, exist_ok=True)
         if item.get("b64_json"):
             target.write_bytes(base64.b64decode(item["b64_json"]))
+            logger.info("image saved path=%s source=b64", target)
             return target
         if item.get("url"):
             with httpx.Client(timeout=self.config.timeout) as client:
                 response = client.get(item["url"])
             if response.status_code >= 400:
+                logger.warning("image download failed status=%s", response.status_code)
                 raise ProviderError(f"图片下载失败：{response.status_code}")
             target.write_bytes(response.content)
+            logger.info("image saved path=%s source=url status=%s", target, response.status_code)
             return target
+        logger.warning("image response missing payload keys=%s", list(item.keys()))
         raise ProviderError("图片 API 没有返回 b64_json 或 url。")
 
 
@@ -214,7 +261,16 @@ def build_url(base_url: str, path: str) -> str:
 def effective_image_provider(endpoint: EndpointConfig) -> str:
     if endpoint.provider == "openai" and "grsai." in endpoint.base_url:
         return "grsai"
+    if endpoint.provider == "openai" and "ark.cn-" in endpoint.base_url:
+        return "ark"
     return endpoint.provider
+
+
+def env_bool(key: str, default: bool) -> bool:
+    value = os.getenv(key)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
 def reference_aware_prompt(prompt: str, has_references: bool) -> str:

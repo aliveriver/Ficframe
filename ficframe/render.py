@@ -111,9 +111,7 @@ def render_illustrated_novel(
             if image_ref:
                 lines.extend(
                     [
-                        f"![{shot.id} {shot.title}]({image_ref})",
-                        "",
-                        f"*{shot.visual_goal}*",
+                        f"![{shot.id}]({image_ref})",
                         "",
                     ]
                 )
@@ -127,7 +125,7 @@ def render_illustrated_novel(
             continue
         image_ref = image_markdown_ref(shot, run_id)
         if image_ref:
-            lines.extend([f"![{shot.id} {shot.title}]({image_ref})", "", shot.source_excerpt, ""])
+            lines.extend([f"![{shot.id}]({image_ref})", "", shot.source_excerpt, ""])
 
     return "\n".join(lines).strip() + "\n"
 
@@ -154,7 +152,7 @@ def insert_images_into_original_text(
         position = body.find(needle)
         if position < 0:
             continue
-        block = f"\n\n![{shot.id} {shot.title}]({image_ref})\n\n*{shot.visual_goal}*\n\n"
+        block = f"\n\n![{shot.id}]({image_ref})\n\n"
         insertions.append((position, block))
 
     if not insertions:

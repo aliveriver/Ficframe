@@ -15,44 +15,88 @@
         </div>
         <div class="top-actions">
           <button id="configToggle" type="button">API 管理</button>
+          <button id="logExportBtn" type="button">导出日志</button>
           <button id="runBtn" class="primary" type="button">生成分镜</button>
         </div>
       </section>
 
       <section id="configPanel" class="panel config-panel" hidden>
-        <div class="config-grid">
-          <fieldset>
-            <legend>LLM</legend>
-            <input id="llmKey" placeholder="API key，留空或保持脱敏值则不覆盖" autocomplete="off" />
-            <input id="llmBaseUrl" placeholder="Base URL" />
-            <input id="llmModel" placeholder="Model" />
-          </fieldset>
-          <fieldset>
-            <legend>图片</legend>
-            <input id="imageKey" placeholder="API key，留空或保持脱敏值则不覆盖" autocomplete="off" />
-            <input id="imageBaseUrl" placeholder="Base URL" />
-            <select id="imageProvider">
-              <option value="openai">openai</option>
-              <option value="grsai">grsai</option>
-              <option value="siliconflow">siliconflow</option>
-            </select>
-            <input id="imageModel" placeholder="Model" />
-            <div class="inline-fields">
-              <input id="imageSteps" placeholder="Steps" />
-              <input id="imageGuidance" placeholder="Guidance" />
-              <input id="imageBatch" placeholder="Batch" />
+        <div class="provider-manager">
+          <aside class="provider-sidebar">
+            <div class="section-head tight">
+              <h2>供应商</h2>
+              <button id="addProviderBtn" type="button">新增</button>
             </div>
-          </fieldset>
-          <fieldset>
-            <legend>VLM</legend>
-            <input id="vlmKey" placeholder="API key，留空或保持脱敏值则不覆盖" autocomplete="off" />
-            <input id="vlmBaseUrl" placeholder="Base URL" />
-            <input id="vlmModel" placeholder="Model" />
-          </fieldset>
-        </div>
-        <div class="actions compact">
-          <button id="saveConfigBtn" type="button">保存配置</button>
-          <button id="refreshConfigBtn" type="button">刷新状态</button>
+            <div id="providerList" class="provider-list"></div>
+          </aside>
+          <section class="provider-detail">
+            <div class="inline-fields">
+              <label>
+                <span>用途</span>
+                <select id="providerKind">
+                  <option value="llm">LLM</option>
+                  <option value="image">图片</option>
+                  <option value="vlm">VLM</option>
+                </select>
+              </label>
+              <label>
+                <span>供应商类型</span>
+                <select id="providerType">
+                  <option value="openai">OpenAI 兼容</option>
+                  <option value="ark">火山 Ark</option>
+                  <option value="siliconflow">SiliconFlow</option>
+                  <option value="grsai">Grsai</option>
+                </select>
+              </label>
+              <label>
+                <span>设为当前使用</span>
+                <select id="providerActive">
+                  <option value="false">否</option>
+                  <option value="true">是</option>
+                </select>
+              </label>
+            </div>
+            <label>
+              <span>显示名称</span>
+              <input id="providerLabel" placeholder="例如：豆包生图" />
+            </label>
+            <label>
+              <span>请求地址</span>
+              <input id="providerBaseUrl" placeholder="https://api.example.com/v1" />
+            </label>
+            <label>
+              <span>API key</span>
+              <input id="providerKey" placeholder="留空或保持脱敏值则不覆盖" autocomplete="off" />
+            </label>
+            <div class="models-head">
+              <span>模型昵称</span>
+              <button id="addModelBtn" type="button">添加模型</button>
+            </div>
+            <div id="modelTable" class="model-table"></div>
+            <fieldset id="imageOptions" class="image-options">
+              <legend>图片参数</legend>
+              <div class="inline-fields">
+                <input id="imageSteps" placeholder="Steps" />
+                <input id="imageGuidance" placeholder="Guidance" />
+                <input id="imageBatch" placeholder="Batch" />
+              </div>
+              <div class="inline-fields">
+                <input id="imageSequential" placeholder="Sequential，如 disabled" />
+                <input id="imageResponseFormat" placeholder="Response，如 url" />
+                <select id="imageWatermark">
+                  <option value="true">watermark true</option>
+                  <option value="false">watermark false</option>
+                </select>
+              </div>
+            </fieldset>
+            <div class="actions compact">
+              <button id="saveConfigBtn" type="button">保存供应商</button>
+              <button id="testProviderBtn" type="button">测试可达性</button>
+              <button id="deleteProviderBtn" type="button">删除</button>
+              <button id="refreshConfigBtn" type="button">刷新状态</button>
+            </div>
+            <pre id="providerTestResult"></pre>
+          </section>
         </div>
       </section>
 
@@ -87,11 +131,16 @@
           </label>
           <label>
             <span>图片尺寸</span>
-            <select id="imageSize">
-              <option value="1024x1024">1024 x 1024</option>
-              <option value="1024x1536">1024 x 1536</option>
-              <option value="1536x1024">1536 x 1024</option>
-            </select>
+            <div class="size-row">
+              <select id="imageSize">
+                <option value="2K">2K</option>
+                <option value="1024x1024">1024 x 1024</option>
+                <option value="1024x1536">1024 x 1536</option>
+                <option value="1536x1024">1536 x 1024</option>
+                <option value="2048x2048">2048 x 2048</option>
+              </select>
+              <input id="customImageSize" placeholder="自定义，如 2K 或 2048x2048" />
+            </div>
           </label>
           <div id="charactersBox" class="readout"></div>
         </aside>

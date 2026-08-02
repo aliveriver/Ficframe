@@ -3,7 +3,8 @@ const state = {
   shots: [],
   characters: [],
   selected: null,
-  config: {},
+  providerConfig: { active: {}, sources: [] },
+  selectedProviderId: null,
   referenceBindings: [],
 };
 
@@ -11,6 +12,7 @@ const el = {
   health: document.querySelector("#health"),
   runBtn: document.querySelector("#runBtn"),
   configToggle: document.querySelector("#configToggle"),
+  logExportBtn: document.querySelector("#logExportBtn"),
   configPanel: document.querySelector("#configPanel"),
   novelFile: document.querySelector("#novelFile"),
   charactersFile: document.querySelector("#charactersFile"),
@@ -20,6 +22,7 @@ const el = {
   maxShots: document.querySelector("#maxShots"),
   useLlm: document.querySelector("#useLlm"),
   imageSize: document.querySelector("#imageSize"),
+  customImageSize: document.querySelector("#customImageSize"),
   charactersBox: document.querySelector("#charactersBox"),
   shotList: document.querySelector("#shotList"),
   runId: document.querySelector("#runId"),
@@ -31,19 +34,28 @@ const el = {
   qaImage: document.querySelector("#qaImage"),
   preview: document.querySelector("#preview"),
   qaBox: document.querySelector("#qaBox"),
-  llmKey: document.querySelector("#llmKey"),
-  llmBaseUrl: document.querySelector("#llmBaseUrl"),
-  llmModel: document.querySelector("#llmModel"),
-  imageKey: document.querySelector("#imageKey"),
-  imageBaseUrl: document.querySelector("#imageBaseUrl"),
-  imageProvider: document.querySelector("#imageProvider"),
-  imageModel: document.querySelector("#imageModel"),
+  providerList: document.querySelector("#providerList"),
+  addProviderBtn: document.querySelector("#addProviderBtn"),
+  deleteProviderBtn: document.querySelector("#deleteProviderBtn"),
+  saveConfigBtn: document.querySelector("#saveConfigBtn"),
+  refreshConfigBtn: document.querySelector("#refreshConfigBtn"),
+  testProviderBtn: document.querySelector("#testProviderBtn"),
+  providerTestResult: document.querySelector("#providerTestResult"),
+  providerKind: document.querySelector("#providerKind"),
+  providerType: document.querySelector("#providerType"),
+  providerActive: document.querySelector("#providerActive"),
+  providerLabel: document.querySelector("#providerLabel"),
+  providerBaseUrl: document.querySelector("#providerBaseUrl"),
+  providerKey: document.querySelector("#providerKey"),
+  addModelBtn: document.querySelector("#addModelBtn"),
+  modelTable: document.querySelector("#modelTable"),
+  imageOptions: document.querySelector("#imageOptions"),
   imageSteps: document.querySelector("#imageSteps"),
   imageGuidance: document.querySelector("#imageGuidance"),
   imageBatch: document.querySelector("#imageBatch"),
-  vlmKey: document.querySelector("#vlmKey"),
-  vlmBaseUrl: document.querySelector("#vlmBaseUrl"),
-  vlmModel: document.querySelector("#vlmModel"),
+  imageSequential: document.querySelector("#imageSequential"),
+  imageResponseFormat: document.querySelector("#imageResponseFormat"),
+  imageWatermark: document.querySelector("#imageWatermark"),
 };
 
 async function api(path, options = {}) {
@@ -61,54 +73,6 @@ function setBusy(button, busy) {
   button.textContent = busy ? "处理中" : button.dataset.originalText;
 }
 
-function renderCharacters() {
-  if (!state.characters.length) {
-    el.charactersBox.textContent = "";
-    return;
-  }
-  el.charactersBox.textContent = state.characters
-    .map((character) => {
-      const refs = character.reference_images?.length ? `\n参考图：${character.reference_images.length} 张` : "\n参考图：无";
-      return `${character.name}\n${character.role}${refs}\n${(character.fixed_traits || []).join(" / ")}`;
-    })
-    .join("\n\n");
-}
-
-function selectShot(index) {
-  state.selected = state.shots[index];
-  el.promptBox.value = state.selected?.positive_prompt || "";
-  el.qaBox.textContent = (state.selected?.qa_notes || []).join("\n");
-  if (state.selected?.image_url) {
-    el.preview.innerHTML = `<img alt="${state.selected.id}" src="${state.selected.image_url}" />`;
-  } else {
-    el.preview.innerHTML = "";
-  }
-  document.querySelectorAll(".shot").forEach((node, nodeIndex) => {
-    node.classList.toggle("active", nodeIndex === index);
-  });
-}
-
-function renderShots(preferredId = null) {
-  el.shotList.innerHTML = "";
-  state.shots.forEach((shot, index) => {
-    const button = document.createElement("button");
-    button.className = "shot";
-    button.type = "button";
-    button.innerHTML = `
-      <strong>${shot.id} · ${shot.title}</strong>
-      <small>${shot.characters.join("、") || "无明确角色"} · ${shot.location} · ${shot.time}</small>
-      <small>${shot.image_url ? "已生成图片" : "未生成图片"}</small>
-      <small>${shot.visual_goal}</small>
-    `;
-    button.addEventListener("click", () => selectShot(index));
-    el.shotList.append(button);
-  });
-  if (state.shots.length) {
-    const index = Math.max(0, state.shots.findIndex((shot) => shot.id === preferredId));
-    selectShot(index);
-  }
-}
-
 async function checkHealth() {
   try {
     const data = await api("/api/health");
@@ -121,46 +85,243 @@ async function checkHealth() {
 }
 
 async function loadConfig() {
-  const data = await api("/api/config");
-  state.config = data.values || {};
-  el.llmKey.value = state.config.FICFRAME_LLM_API_KEY || "";
-  el.llmBaseUrl.value = state.config.FICFRAME_LLM_BASE_URL || "";
-  el.llmModel.value = state.config.FICFRAME_LLM_MODEL || "";
-  el.imageKey.value = state.config.FICFRAME_IMAGE_API_KEY || "";
-  el.imageBaseUrl.value = state.config.FICFRAME_IMAGE_BASE_URL || "";
-  el.imageProvider.value = state.config.FICFRAME_IMAGE_PROVIDER || "openai";
-  el.imageModel.value = state.config.FICFRAME_IMAGE_MODEL || "";
-  el.imageSteps.value = state.config.FICFRAME_IMAGE_STEPS || "";
-  el.imageGuidance.value = state.config.FICFRAME_IMAGE_GUIDANCE_SCALE || "";
-  el.imageBatch.value = state.config.FICFRAME_IMAGE_BATCH_SIZE || "";
-  el.vlmKey.value = state.config.FICFRAME_VLM_API_KEY || "";
-  el.vlmBaseUrl.value = state.config.FICFRAME_VLM_BASE_URL || "";
-  el.vlmModel.value = state.config.FICFRAME_VLM_MODEL || "";
+  const data = await api("/api/providers");
+  state.providerConfig = data.config || { active: {}, sources: [] };
+  if (!state.selectedProviderId || !findProvider(state.selectedProviderId)) {
+    state.selectedProviderId = state.providerConfig.sources[0]?.id || null;
+  }
+  renderProviderList();
+  renderProviderDetail();
 }
 
-async function saveConfig() {
-  const values = {
-    FICFRAME_LLM_API_KEY: el.llmKey.value,
-    FICFRAME_LLM_BASE_URL: el.llmBaseUrl.value,
-    FICFRAME_LLM_MODEL: el.llmModel.value,
-    FICFRAME_IMAGE_API_KEY: el.imageKey.value,
-    FICFRAME_IMAGE_BASE_URL: el.imageBaseUrl.value,
-    FICFRAME_IMAGE_PROVIDER: el.imageProvider.value,
-    FICFRAME_IMAGE_MODEL: el.imageModel.value,
-    FICFRAME_IMAGE_STEPS: el.imageSteps.value,
-    FICFRAME_IMAGE_GUIDANCE_SCALE: el.imageGuidance.value,
-    FICFRAME_IMAGE_BATCH_SIZE: el.imageBatch.value,
-    FICFRAME_VLM_API_KEY: el.vlmKey.value,
-    FICFRAME_VLM_BASE_URL: el.vlmBaseUrl.value,
-    FICFRAME_VLM_MODEL: el.vlmModel.value,
+function findProvider(id = state.selectedProviderId) {
+  return state.providerConfig.sources.find((source) => source.id === id);
+}
+
+function selectedProvider() {
+  syncProviderForm();
+  return findProvider();
+}
+
+function providerTemplate(kind = "image") {
+  const id = `${kind}-${Date.now()}`;
+  const defaults = {
+    llm: { label: "新 LLM", model: "gpt-5-mini", base_url: "https://api.openai.com/v1" },
+    image: { label: "新图片供应商", model: "doubao-seedream-5-0-260128", base_url: "https://ark.cn-beijing.volces.com/api/v3" },
+    vlm: { label: "新 VLM", model: "gpt-5-mini", base_url: "https://api.openai.com/v1" },
+  }[kind];
+  return {
+    id,
+    label: defaults.label,
+    kind,
+    provider: kind === "image" ? "ark" : "openai",
+    base_url: defaults.base_url,
+    api_key: "",
+    models: [{ nickname: "默认模型", model: defaults.model }],
+    active_model: defaults.model,
+    options: kind === "image" ? {
+      steps: "20",
+      guidance_scale: "7.5",
+      batch_size: "1",
+      sequential: "disabled",
+      response_format: "url",
+      watermark: "true",
+    } : {},
+    created_at: Math.floor(Date.now() / 1000),
   };
-  await api("/api/config", {
+}
+
+function renderProviderList() {
+  const active = state.providerConfig.active || {};
+  if (!state.providerConfig.sources.length) {
+    el.providerList.innerHTML = `<p class="muted">暂无供应商</p>`;
+    return;
+  }
+  el.providerList.innerHTML = state.providerConfig.sources.map((source) => {
+    const isActive = active[source.kind] === source.id;
+    const activeText = isActive ? "当前使用" : source.provider;
+    return `
+      <button class="provider-item ${source.id === state.selectedProviderId ? "active" : ""}" type="button" data-id="${escapeHtml(source.id)}">
+        <strong>${escapeHtml(source.label || source.id)}</strong>
+        <small>${kindLabel(source.kind)} · ${escapeHtml(activeText)}</small>
+      </button>
+    `;
+  }).join("");
+  el.providerList.querySelectorAll(".provider-item").forEach((button) => {
+    button.addEventListener("click", () => {
+      syncProviderForm();
+      state.selectedProviderId = button.dataset.id;
+      renderProviderList();
+      renderProviderDetail();
+    });
+  });
+}
+
+function renderProviderDetail() {
+  const source = findProvider();
+  const disabled = !source;
+  for (const node of [el.providerKind, el.providerType, el.providerActive, el.providerLabel, el.providerBaseUrl, el.providerKey, el.addModelBtn, el.deleteProviderBtn, el.testProviderBtn]) {
+    node.disabled = disabled;
+  }
+  if (!source) {
+    el.providerLabel.value = "";
+    el.providerBaseUrl.value = "";
+    el.providerKey.value = "";
+    el.modelTable.innerHTML = "";
+    return;
+  }
+  el.providerKind.value = source.kind || "image";
+  el.providerType.value = source.provider || "openai";
+  el.providerActive.value = state.providerConfig.active?.[source.kind] === source.id ? "true" : "false";
+  el.providerLabel.value = source.label || "";
+  el.providerBaseUrl.value = source.base_url || "";
+  el.providerKey.value = source.api_key || "";
+  const options = source.options || {};
+  el.imageSteps.value = options.steps || "";
+  el.imageGuidance.value = options.guidance_scale || "";
+  el.imageBatch.value = options.batch_size || "";
+  el.imageSequential.value = options.sequential || "";
+  el.imageResponseFormat.value = options.response_format || "";
+  el.imageWatermark.value = options.watermark || "true";
+  el.imageOptions.hidden = source.kind !== "image";
+  renderModelTable(source);
+}
+
+function renderModelTable(source) {
+  if (!source.models?.length) {
+    source.models = [{ nickname: "默认模型", model: source.active_model || "" }];
+  }
+  el.modelTable.innerHTML = source.models.map((model, index) => `
+    <div class="model-row" data-index="${index}">
+      <input data-field="nickname" value="${escapeHtml(model.nickname || "")}" placeholder="昵称，如 豆包 5.0" />
+      <input data-field="model" value="${escapeHtml(model.model || "")}" placeholder="模型 ID" />
+      <label class="mini-toggle">
+        <input data-field="active" type="radio" name="activeModel" ${source.active_model === model.model ? "checked" : ""} />
+        <span>使用</span>
+      </label>
+      <button data-action="remove-model" type="button">删除</button>
+    </div>
+  `).join("");
+  el.modelTable.querySelectorAll(".model-row").forEach((row) => {
+    row.addEventListener("input", () => syncProviderForm());
+    row.addEventListener("change", () => syncProviderForm());
+    row.querySelector('[data-action="remove-model"]').addEventListener("click", () => {
+      const item = findProvider();
+      if (!item || item.models.length <= 1) return;
+      item.models.splice(Number(row.dataset.index), 1);
+      item.active_model = item.models[0]?.model || "";
+      renderModelTable(item);
+    });
+  });
+}
+
+function syncProviderForm() {
+  const source = findProvider();
+  if (!source) return;
+  const previousKind = source.kind;
+  source.kind = el.providerKind.value;
+  source.provider = el.providerType.value;
+  source.label = el.providerLabel.value.trim() || source.id;
+  source.base_url = el.providerBaseUrl.value.trim();
+  source.api_key = el.providerKey.value;
+  source.models = Array.from(el.modelTable.querySelectorAll(".model-row")).map((row) => ({
+    nickname: row.querySelector('[data-field="nickname"]').value.trim(),
+    model: row.querySelector('[data-field="model"]').value.trim(),
+    active: row.querySelector('[data-field="active"]').checked,
+  })).filter((model) => model.model).map(({ nickname, model }) => ({ nickname: nickname || model, model }));
+  const activeIndex = Array.from(el.modelTable.querySelectorAll(".model-row")).findIndex((row) => row.querySelector('[data-field="active"]').checked);
+  source.active_model = source.models[Math.max(0, activeIndex)]?.model || source.models[0]?.model || "";
+  source.options = source.kind === "image" ? {
+    steps: el.imageSteps.value,
+    guidance_scale: el.imageGuidance.value,
+    batch_size: el.imageBatch.value,
+    sequential: el.imageSequential.value,
+    response_format: el.imageResponseFormat.value,
+    watermark: el.imageWatermark.value,
+  } : {};
+  if (previousKind !== source.kind && state.providerConfig.active?.[previousKind] === source.id) {
+    state.providerConfig.active[previousKind] = "";
+  }
+  if (el.providerActive.value === "true") {
+    state.providerConfig.active[source.kind] = source.id;
+  } else if (state.providerConfig.active?.[source.kind] === source.id) {
+    state.providerConfig.active[source.kind] = "";
+  }
+}
+
+async function saveProviders() {
+  syncProviderForm();
+  const data = await api("/api/providers", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ values }),
+    body: JSON.stringify({ config: state.providerConfig }),
   });
+  state.providerConfig = data.config;
+  renderProviderList();
+  renderProviderDetail();
   await checkHealth();
-  el.health.textContent = "API 配置已保存";
+  el.health.textContent = "供应商配置已保存";
+}
+
+async function testProvider() {
+  const source = selectedProvider();
+  if (!source) return;
+  setBusy(el.testProviderBtn, true);
+  el.providerTestResult.textContent = "测试中";
+  try {
+    const data = await api("/api/providers/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source }),
+    });
+    el.providerTestResult.textContent = JSON.stringify(data, null, 2);
+  } catch (error) {
+    el.providerTestResult.textContent = error.message;
+  } finally {
+    setBusy(el.testProviderBtn, false);
+  }
+}
+
+function renderCharacters() {
+  if (!state.characters.length) {
+    el.charactersBox.textContent = "";
+    return;
+  }
+  el.charactersBox.textContent = state.characters.map((character) => {
+    const refs = character.reference_images?.length ? `\n参考图：${character.reference_images.length} 张` : "\n参考图：无";
+    return `${character.name}\n${character.role}${refs}\n${(character.fixed_traits || []).join(" / ")}`;
+  }).join("\n\n");
+}
+
+function selectShot(index) {
+  state.selected = state.shots[index];
+  el.promptBox.value = state.selected?.positive_prompt || "";
+  el.qaBox.textContent = (state.selected?.qa_notes || []).join("\n");
+  el.preview.innerHTML = state.selected?.image_url ? `<img alt="${state.selected.id}" src="${state.selected.image_url}" />` : "";
+  document.querySelectorAll(".shot").forEach((node, nodeIndex) => {
+    node.classList.toggle("active", nodeIndex === index);
+  });
+}
+
+function renderShots(preferredId = null) {
+  el.shotList.innerHTML = "";
+  state.shots.forEach((shot, index) => {
+    const button = document.createElement("button");
+    button.className = "shot";
+    button.type = "button";
+    button.innerHTML = `
+      <strong>${escapeHtml(shot.id)} · ${escapeHtml(shot.title)}</strong>
+      <small>${escapeHtml(shot.characters.join("、") || "无明确角色")} · ${escapeHtml(shot.location)} · ${escapeHtml(shot.time)}</small>
+      <small>${shot.image_url ? "已生成图片" : "未生成图片"}</small>
+      <small>${escapeHtml(shot.visual_goal)}</small>
+    `;
+    button.addEventListener("click", () => selectShot(index));
+    el.shotList.append(button);
+  });
+  if (state.shots.length) {
+    const index = Math.max(0, state.shots.findIndex((shot) => shot.id === preferredId));
+    selectShot(index);
+  }
 }
 
 async function previewCharacters() {
@@ -220,24 +381,22 @@ function renderReferenceTable() {
     el.referenceTable.innerHTML = `<p class="muted">尚未选择参考图</p>`;
     return;
   }
-  const options = [`<option value="">未绑定</option>`]
-    .concat(state.characters.map((character) => `<option value="${escapeHtml(character.name)}">${escapeHtml(character.name)}</option>`))
-    .join("");
-  el.referenceTable.innerHTML = state.referenceBindings
-    .map((binding, index) => `
-      <div class="reference-row" data-index="${index}">
-        <img src="${binding.previewUrl}" alt="${escapeHtml(binding.filename)}" />
-        <div class="reference-name">${escapeHtml(binding.filename)}</div>
-        <select data-field="character">${options}</select>
-        <input data-field="type" value="${escapeHtml(binding.type)}" placeholder="类型" />
-        <input data-field="note" value="${escapeHtml(binding.note)}" placeholder="备注" />
-        <label class="mini-toggle">
-          <input data-field="enabled" type="checkbox" ${binding.enabled ? "checked" : ""} />
-          <span>启用</span>
-        </label>
-      </div>
-    `)
-    .join("");
+  const options = [`<option value="">未绑定</option>`].concat(
+    state.characters.map((character) => `<option value="${escapeHtml(character.name)}">${escapeHtml(character.name)}</option>`)
+  ).join("");
+  el.referenceTable.innerHTML = state.referenceBindings.map((binding, index) => `
+    <div class="reference-row" data-index="${index}">
+      <img src="${binding.previewUrl}" alt="${escapeHtml(binding.filename)}" />
+      <div class="reference-name">${escapeHtml(binding.filename)}</div>
+      <select data-field="character">${options}</select>
+      <input data-field="type" value="${escapeHtml(binding.type)}" placeholder="类型" />
+      <input data-field="note" value="${escapeHtml(binding.note)}" placeholder="备注" />
+      <label class="mini-toggle">
+        <input data-field="enabled" type="checkbox" ${binding.enabled ? "checked" : ""} />
+        <span>启用</span>
+      </label>
+    </div>
+  `).join("");
   el.referenceTable.querySelectorAll(".reference-row").forEach((row) => {
     const index = Number(row.dataset.index);
     row.querySelector('[data-field="character"]').value = state.referenceBindings[index].character;
@@ -265,14 +424,8 @@ function serializeReferenceBindings() {
   }));
 }
 
-function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, (char) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#039;",
-  })[char]);
+function selectedImageSize() {
+  return el.customImageSize.value.trim() || el.imageSize.value;
 }
 
 async function runPipeline() {
@@ -315,7 +468,7 @@ async function generateImage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         run_id: state.runId,
-        size: el.imageSize.value,
+        size: selectedImageSize(),
         shot: { ...state.selected, positive_prompt: el.promptBox.value },
       }),
     });
@@ -340,7 +493,7 @@ async function generateAllImages() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         run_id: state.runId,
-        size: el.imageSize.value,
+        size: selectedImageSize(),
         shots: state.shots.map((shot) => ({ ...shot, positive_prompt: shot === state.selected ? el.promptBox.value : shot.positive_prompt })),
       }),
     });
@@ -353,7 +506,12 @@ async function generateAllImages() {
       }
     }
     renderShots();
-    el.health.textContent = `批量生成完成：${(data.results || []).filter((item) => item.ok).length}/${state.shots.length}`;
+    const okCount = (data.results || []).filter((item) => item.ok).length;
+    const failures = (data.results || []).filter((item) => !item.ok);
+    el.health.textContent = `批量生成完成：${okCount}/${state.shots.length}`;
+    if (failures.length) {
+      el.qaBox.textContent = failures.map((item) => `${item.shot_id}: ${item.error}`).join("\n\n");
+    }
   } catch (error) {
     el.health.textContent = error.message;
   } finally {
@@ -363,20 +521,53 @@ async function generateAllImages() {
 
 async function exportMarkdown() {
   if (!state.runId) return;
-  const response = await fetch(`/api/export/${state.runId}.md`);
-  if (!response.ok) {
-    el.health.textContent = "导出失败";
-    return;
+  try {
+    const data = await api(`/api/export/${state.runId}`);
+    const response = await fetch(data.markdown_url);
+    const markdown = await response.text();
+    const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `illustrated_novel-${state.runId}.md`;
+    link.click();
+    URL.revokeObjectURL(url);
+    el.health.textContent = "配图小说 MD 已导出";
+    el.qaBox.textContent = `已保存到：${data.markdown_path}\n图片路径相对于该 Markdown 所在目录。`;
+  } catch (error) {
+    el.health.textContent = `导出失败：${error.message}`;
   }
-  const markdown = await response.text();
-  const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `ficframe-${state.runId}.md`;
-  link.click();
-  URL.revokeObjectURL(url);
-  el.health.textContent = "Markdown 已导出";
+}
+
+async function exportLogs() {
+  setBusy(el.logExportBtn, true);
+  try {
+    const response = await fetch("/api/logs/export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_id: state.runId }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || response.statusText);
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("content-disposition") || "";
+    const match = disposition.match(/filename="?([^"]+)"?/);
+    const filename = match?.[1] || `ficframe-logs-${Date.now()}.zip`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(url);
+    el.health.textContent = "日志包已导出";
+    el.qaBox.textContent = `已导出日志包：${filename}\n反馈 bug 时可以附带这个 zip。`;
+  } catch (error) {
+    el.health.textContent = `日志导出失败：${error.message}`;
+  } finally {
+    setBusy(el.logExportBtn, false);
+  }
 }
 
 async function runVlmCheck() {
@@ -392,26 +583,75 @@ async function runVlmCheck() {
   }
 }
 
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#039;",
+  })[char]);
+}
+
+function kindLabel(kind) {
+  return { llm: "LLM", image: "图片", vlm: "VLM" }[kind] || kind;
+}
+
 el.runBtn.addEventListener("click", runPipeline);
-el.charactersFile.addEventListener("change", () => {
-  previewCharacters().catch((error) => {
-    el.health.textContent = error.message;
-  });
-});
+el.charactersFile.addEventListener("change", () => previewCharacters().catch((error) => {
+  el.health.textContent = error.message;
+}));
 el.referenceImages.addEventListener("change", rebuildReferenceBindings);
-el.previewCharactersBtn.addEventListener("click", () => {
-  previewCharacters().catch((error) => {
-    el.health.textContent = error.message;
-  });
-});
+el.previewCharactersBtn.addEventListener("click", () => previewCharacters().catch((error) => {
+  el.health.textContent = error.message;
+}));
 el.configToggle.addEventListener("click", () => {
   el.configPanel.hidden = !el.configPanel.hidden;
 });
-document.querySelector("#saveConfigBtn").addEventListener("click", saveConfig);
-document.querySelector("#refreshConfigBtn").addEventListener("click", async () => {
+el.logExportBtn.addEventListener("click", exportLogs);
+el.addProviderBtn.addEventListener("click", () => {
+  syncProviderForm();
+  const source = providerTemplate(el.providerKind.value || "image");
+  state.providerConfig.sources.push(source);
+  state.selectedProviderId = source.id;
+  renderProviderList();
+  renderProviderDetail();
+});
+el.deleteProviderBtn.addEventListener("click", () => {
+  const source = findProvider();
+  if (!source) return;
+  state.providerConfig.sources = state.providerConfig.sources.filter((item) => item.id !== source.id);
+  if (state.providerConfig.active?.[source.kind] === source.id) {
+    state.providerConfig.active[source.kind] = "";
+  }
+  state.selectedProviderId = state.providerConfig.sources[0]?.id || null;
+  renderProviderList();
+  renderProviderDetail();
+});
+el.addModelBtn.addEventListener("click", () => {
+  const source = selectedProvider();
+  if (!source) return;
+  source.models.push({ nickname: "新模型", model: "" });
+  renderModelTable(source);
+});
+for (const node of [el.providerKind, el.providerType, el.providerActive, el.providerLabel, el.providerBaseUrl, el.providerKey, el.imageSteps, el.imageGuidance, el.imageBatch, el.imageSequential, el.imageResponseFormat, el.imageWatermark]) {
+  node.addEventListener("input", () => {
+    syncProviderForm();
+    renderProviderList();
+    el.imageOptions.hidden = findProvider()?.kind !== "image";
+  });
+  node.addEventListener("change", () => {
+    syncProviderForm();
+    renderProviderList();
+    el.imageOptions.hidden = findProvider()?.kind !== "image";
+  });
+}
+el.saveConfigBtn.addEventListener("click", saveProviders);
+el.refreshConfigBtn.addEventListener("click", async () => {
   await loadConfig();
   await checkHealth();
 });
+el.testProviderBtn.addEventListener("click", testProvider);
 el.imageBtn.addEventListener("click", generateImage);
 el.allImagesBtn.addEventListener("click", generateAllImages);
 el.exportBtn.addEventListener("click", exportMarkdown);

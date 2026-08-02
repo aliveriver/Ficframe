@@ -1,6 +1,7 @@
 .venv/
 .uv-cache/
 .env
+.ficframe/
 __pycache__/
 *.py[cod]
 *.egg-info/

@@ -6,18 +6,20 @@ import time
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+import httpx
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .characters import build_character_cards
-from .config_store import public_config, write_env_file
+from .config_store import public_config, public_provider_config, read_provider_config, write_env_file, write_provider_config
 from .continuity import initial_state
 from .io import read_text, write_json, write_text
 from .llm_pipeline import polish_shot_prompt, summarize_scene_with_llm
+from .logging_utils import build_log_bundle, get_logger, redact, setup_logging
 from .models import Shot, to_dict
-from .providers import OpenAICompatibleProvider, ProviderError, effective_image_provider
+from .providers import OpenAICompatibleProvider, ProviderError, build_url, effective_image_provider
 from .qa import annotate_shots
 from .render import render_illustrated_novel, render_prompts, render_storyboard
 from .segmenter import segment_novel
@@ -28,11 +30,34 @@ ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web"
 RUNS = ROOT / "outputs" / "web-runs"
 ENV_FILE = ROOT / ".env"
+PROVIDERS_FILE = ROOT / ".ficframe" / "providers.json"
 RUNS.mkdir(parents=True, exist_ok=True)
+LOGS = setup_logging(ROOT)
+logger = get_logger("api")
 
 app = FastAPI(title="FicFrame API")
 app.mount("/assets", StaticFiles(directory=WEB), name="assets")
 app.mount("/runs", StaticFiles(directory=RUNS), name="runs")
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception("request failed method=%s path=%s", request.method, request.url.path)
+        raise
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    if request.url.path.startswith("/api/"):
+        logger.info(
+            "request method=%s path=%s status=%s duration_ms=%s",
+            request.method,
+            request.url.path,
+            response.status_code,
+            duration_ms,
+        )
+    return response
 
 
 class ImageRequest(BaseModel):
@@ -50,8 +75,20 @@ class ConfigRequest(BaseModel):
     values: dict[str, str]
 
 
+class ProvidersRequest(BaseModel):
+    config: dict[str, Any]
+
+
+class ProviderTestRequest(BaseModel):
+    source: dict[str, Any]
+
+
 class CharacterPreviewRequest(BaseModel):
     text: str
+
+
+class LogBundleRequest(BaseModel):
+    run_id: str | None = None
 
 
 @app.get("/")
@@ -85,20 +122,120 @@ def health() -> dict[str, Any]:
     }
 
 
+@app.get("/api/logs")
+def get_logs() -> dict[str, Any]:
+    files = []
+    for path in sorted(LOGS.glob("*.log*"), key=lambda item: item.stat().st_mtime, reverse=True):
+        files.append(
+            {
+                "name": path.name,
+                "size": path.stat().st_size,
+                "modified_at": int(path.stat().st_mtime),
+            }
+        )
+    return {"files": files}
+
+
+@app.post("/api/logs/export")
+def export_logs(request: LogBundleRequest) -> FileResponse:
+    config = public_provider_config(PROVIDERS_FILE, ENV_FILE)
+    bundle = build_log_bundle(ROOT, config=config, active_run_id=request.run_id)
+    logger.info("log bundle exported path=%s run_id=%s", bundle, request.run_id or "")
+    return FileResponse(bundle, filename=bundle.name, media_type="application/zip")
+
+
 @app.get("/api/config")
 def get_config() -> dict[str, Any]:
-    return {"values": public_config(ENV_FILE, reveal_keys=False)}
+    return {
+        "values": public_config(ENV_FILE, reveal_keys=False),
+        "providers": public_provider_config(PROVIDERS_FILE, ENV_FILE),
+    }
 
 
 @app.post("/api/config")
 def save_config(request: ConfigRequest) -> dict[str, Any]:
     write_env_file(ENV_FILE, request.values)
+    logger.info("legacy config saved keys=%s", ",".join(sorted(request.values.keys())))
     return {"ok": True, "values": public_config(ENV_FILE, reveal_keys=False)}
+
+
+@app.get("/api/providers")
+def get_providers() -> dict[str, Any]:
+    return {"config": public_provider_config(PROVIDERS_FILE, ENV_FILE)}
+
+
+@app.post("/api/providers")
+def save_providers(request: ProvidersRequest) -> dict[str, Any]:
+    write_provider_config(PROVIDERS_FILE, ENV_FILE, request.config)
+    sources = request.config.get("sources", []) if isinstance(request.config, dict) else []
+    logger.info("providers saved source_count=%s active=%s", len(sources), redact(request.config.get("active", {})))
+    return {"ok": True, "config": public_provider_config(PROVIDERS_FILE, ENV_FILE)}
+
+
+@app.post("/api/providers/test")
+def test_provider(request: ProviderTestRequest) -> dict[str, Any]:
+    source = hydrate_provider_secret(request.source)
+    base_url = str(source.get("base_url") or "").strip().rstrip("/")
+    api_key = str(source.get("api_key") or "").strip()
+    if not base_url:
+        logger.warning("provider test failed reason=missing_base source=%s", redact(source))
+        raise HTTPException(status_code=400, detail="请先填写请求地址")
+    if not api_key:
+        logger.warning("provider test failed reason=missing_key source=%s", redact(source))
+        raise HTTPException(status_code=400, detail="请先填写 API key")
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+    started = time.perf_counter()
+    model_url = build_url(base_url, "models")
+    try:
+        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+            response = client.get(model_url, headers=headers)
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            if response.status_code < 400:
+                data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+                count = len(data.get("data", [])) if isinstance(data, dict) and isinstance(data.get("data"), list) else None
+                result = {
+                    "ok": True,
+                    "status_code": response.status_code,
+                    "latency_ms": latency_ms,
+                    "message": f"/models 可达{f'，模型数 {count}' if count is not None else ''}",
+                }
+                logger.info("provider test ok source_id=%s kind=%s provider=%s status=%s latency_ms=%s", source.get("id"), source.get("kind"), source.get("provider"), response.status_code, latency_ms)
+                return result
+            if response.status_code not in {404, 405}:
+                result = {
+                    "ok": False,
+                    "status_code": response.status_code,
+                    "latency_ms": latency_ms,
+                    "message": response.text[:500] or response.reason_phrase,
+                }
+                logger.warning("provider test http_error source_id=%s status=%s latency_ms=%s message=%s", source.get("id"), response.status_code, latency_ms, result["message"])
+                return result
+
+            fallback = client.get(base_url, headers=headers)
+            fallback_latency_ms = int((time.perf_counter() - started) * 1000)
+            result = {
+                "ok": fallback.status_code < 500,
+                "status_code": fallback.status_code,
+                "latency_ms": fallback_latency_ms,
+                "message": "服务可达，但该供应商可能不支持 /models" if fallback.status_code < 500 else fallback.text[:500],
+            }
+            logger.info("provider test fallback source_id=%s status=%s latency_ms=%s ok=%s", source.get("id"), fallback.status_code, fallback_latency_ms, result["ok"])
+            return result
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("provider test exception source_id=%s error=%s", source.get("id"), exc)
+        return {
+            "ok": False,
+            "status_code": None,
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+            "message": str(exc),
+        }
 
 
 @app.post("/api/characters/preview")
 def preview_characters(request: CharacterPreviewRequest) -> dict[str, Any]:
     cards = build_character_cards(request.text)
+    logger.info("characters preview character_count=%s text_length=%s", len(cards), len(request.text))
     return {"characters": to_dict(cards)}
 
 
@@ -116,6 +253,15 @@ async def pipeline(
     run_dir.mkdir(parents=True, exist_ok=True)
     novel_text = (await novel.read()).decode("utf-8-sig")
     character_text = (await characters.read()).decode("utf-8-sig")
+    logger.info(
+        "pipeline started run_id=%s novel=%s characters=%s reference_images=%s max_shots=%s use_llm=%s",
+        run_id,
+        novel.filename,
+        characters.filename,
+        len(reference_images or []),
+        max_shots,
+        use_llm,
+    )
     write_text(run_dir / "novel.md", novel_text)
     write_text(run_dir / "characters.md", character_text)
 
@@ -131,6 +277,7 @@ async def pipeline(
             url = f"/runs/{run_id}/references/{filename}"
             binding = bindings.get(filename, {})
             bind_reference_image(cards, filename, url, binding)
+            logger.info("reference image saved run_id=%s filename=%s binding=%s", run_id, filename, redact(binding))
     scenes = segment_novel(novel_text, cards)
     provider = OpenAICompatibleProvider() if use_llm else None
     if provider:
@@ -152,6 +299,7 @@ async def pipeline(
     write_json(run_dir / "continuity.json", payload["continuity"])
     write_text(run_dir / "storyboard.md", render_storyboard(shots))
     write_text(run_dir / "prompts.md", render_prompts(shots))
+    logger.info("pipeline completed run_id=%s character_count=%s scene_count=%s shot_count=%s", run_id, len(cards), len(scenes), len(shots))
     return payload
 
 
@@ -162,11 +310,14 @@ def generate_image(request: ImageRequest) -> dict[str, Any]:
     target = RUNS / request.run_id / "images" / f"{shot.id}.png"
     try:
         references = reference_paths_for_shot(request.run_id, shot)
+        logger.info("image generation started run_id=%s shot_id=%s size=%s reference_count=%s", request.run_id, shot.id, request.size, len(references))
         provider.image(shot.positive_prompt, target, size=request.size, reference_images=references)
     except ProviderError as exc:
+        logger.warning("image generation failed run_id=%s shot_id=%s error=%s", request.run_id, shot.id, exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     image_url = f"/runs/{request.run_id}/images/{shot.id}.png"
     update_shot_image(request.run_id, shot.id, str(target), image_url)
+    logger.info("image generation completed run_id=%s shot_id=%s path=%s", request.run_id, shot.id, target)
     return {"image_path": str(target), "image_url": image_url}
 
 
@@ -177,6 +328,7 @@ def generate_all_images(request: dict[str, Any]) -> dict[str, Any]:
     shots = [Shot(**shot) for shot in request.get("shots", [])]
     results = []
     provider = OpenAICompatibleProvider()
+    logger.info("batch image generation started run_id=%s shot_count=%s size=%s", run_id, len(shots), size)
     for shot in shots:
         target = RUNS / run_id / "images" / f"{shot.id}.png"
         try:
@@ -185,18 +337,38 @@ def generate_all_images(request: dict[str, Any]) -> dict[str, Any]:
             image_url = f"/runs/{run_id}/images/{shot.id}.png"
             update_shot_image(run_id, shot.id, str(target), image_url)
             results.append({"shot_id": shot.id, "ok": True, "image_path": str(target), "image_url": image_url})
+            logger.info("batch image item completed run_id=%s shot_id=%s reference_count=%s", run_id, shot.id, len(references))
         except ProviderError as exc:
             results.append({"shot_id": shot.id, "ok": False, "error": str(exc)})
+            logger.warning("batch image item failed run_id=%s shot_id=%s error=%s", run_id, shot.id, exc)
+    logger.info("batch image generation completed run_id=%s ok_count=%s total=%s", run_id, len([item for item in results if item["ok"]]), len(results))
     return {"results": results}
 
 
 @app.get("/api/export/{run_id}.md", response_class=PlainTextResponse)
 def export_markdown(run_id: str) -> str:
+    result = build_exported_novel(run_id)
+    return result["markdown"]
+
+
+@app.get("/api/export/{run_id}")
+def export_markdown_info(run_id: str) -> dict[str, Any]:
+    result = build_exported_novel(run_id)
+    return {
+        "ok": True,
+        "markdown_path": result["markdown_path"],
+        "markdown_url": result["markdown_url"],
+    }
+
+
+def build_exported_novel(run_id: str) -> dict[str, str]:
     pipeline_path = RUNS / run_id / "pipeline.json"
     novel_path = RUNS / run_id / "novel.md"
     if not pipeline_path.exists():
+        logger.warning("export failed run_id=%s reason=missing_pipeline", run_id)
         raise HTTPException(status_code=404, detail="run 不存在")
     if not novel_path.exists():
+        logger.warning("export failed run_id=%s reason=missing_novel", run_id)
         raise HTTPException(status_code=404, detail="小说原文不存在")
     payload = json.loads(read_text(pipeline_path))
     shots = [Shot(**shot) for shot in payload.get("shots", [])]
@@ -206,8 +378,14 @@ def export_markdown(run_id: str) -> str:
         shots,
         run_id,
     )
-    write_text(RUNS / run_id / "illustrated_novel.md", markdown)
-    return markdown
+    markdown_path = RUNS / run_id / "illustrated_novel.md"
+    write_text(markdown_path, markdown)
+    logger.info("export completed run_id=%s markdown_path=%s", run_id, markdown_path)
+    return {
+        "markdown": markdown,
+        "markdown_path": str(markdown_path),
+        "markdown_url": f"/runs/{run_id}/illustrated_novel.md",
+    }
 
 
 @app.post("/api/vlm")
@@ -227,7 +405,9 @@ async def vlm_check(
         raw = OpenAICompatibleProvider().vision(prompt, image_bytes, mime_type)
         data = json.loads(raw)
     except (ProviderError, json.JSONDecodeError, TypeError) as exc:
+        logger.warning("vlm check failed filename=%s error=%s", image.filename, exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    logger.info("vlm check completed filename=%s mime=%s", image.filename, mime_type)
     return data
 
 
@@ -302,3 +482,16 @@ def bind_reference_image(cards: list[Any], filename: str, url: str, binding: dic
             return
     if len(cards) == 1:
         cards[0].reference_images.append(value)
+
+
+def hydrate_provider_secret(source: dict[str, Any]) -> dict[str, Any]:
+    item = dict(source)
+    api_key = str(item.get("api_key") or "")
+    if api_key.strip() and "..." not in api_key and api_key != "****":
+        return item
+    source_id = str(item.get("id") or "")
+    for stored in read_provider_config(PROVIDERS_FILE, ENV_FILE).get("sources", []):
+        if str(stored.get("id") or "") == source_id:
+            item["api_key"] = stored.get("api_key") or ""
+            break
+    return item
