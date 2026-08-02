@@ -30,8 +30,10 @@ const el = {
   copyBtn: document.querySelector("#copyBtn"),
   imageBtn: document.querySelector("#imageBtn"),
   allImagesBtn: document.querySelector("#allImagesBtn"),
+  retryFailedBtn: document.querySelector("#retryFailedBtn"),
   exportBtn: document.querySelector("#exportBtn"),
-  qaImage: document.querySelector("#qaImage"),
+  skipExistingImages: document.querySelector("#skipExistingImages"),
+  imageRetryCount: document.querySelector("#imageRetryCount"),
   preview: document.querySelector("#preview"),
   qaBox: document.querySelector("#qaBox"),
   providerList: document.querySelector("#providerList"),
@@ -78,7 +80,7 @@ async function checkHealth() {
     const data = await api("/api/health");
     const keys = data.keys || {};
     const provider = data.providers?.image || "openai";
-    el.health.textContent = `LLM ${keys.llm ? "已配置" : "未配置"} · 图片 ${keys.image ? "已配置" : "未配置"} (${provider}) · VLM ${keys.vlm ? "已配置" : "未配置"}`;
+    el.health.textContent = `LLM ${keys.llm ? "已配置" : "未配置"} · 图片 ${keys.image ? "已配置" : "未配置"} (${provider})`;
   } catch (error) {
     el.health.textContent = error.message;
   }
@@ -108,7 +110,6 @@ function providerTemplate(kind = "image") {
   const defaults = {
     llm: { label: "新 LLM", model: "gpt-5-mini", base_url: "https://api.openai.com/v1" },
     image: { label: "新图片供应商", model: "doubao-seedream-5-0-260128", base_url: "https://ark.cn-beijing.volces.com/api/v3" },
-    vlm: { label: "新 VLM", model: "gpt-5-mini", base_url: "https://api.openai.com/v1" },
   }[kind];
   return {
     id,
@@ -488,27 +489,15 @@ async function generateAllImages() {
   if (!state.shots.length || !state.runId) return;
   setBusy(el.allImagesBtn, true);
   try {
-    const data = await api("/api/images/batch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        run_id: state.runId,
-        size: selectedImageSize(),
-        shots: state.shots.map((shot) => ({ ...shot, positive_prompt: shot === state.selected ? el.promptBox.value : shot.positive_prompt })),
-      }),
+    const data = await generateImageBatch(state.shots, {
+      skipExisting: el.skipExistingImages.checked,
+      retryCount: Number(el.imageRetryCount.value || 0),
     });
-    for (const result of data.results || []) {
-      if (!result.ok) continue;
-      const shot = state.shots.find((item) => item.id === result.shot_id);
-      if (shot) {
-        shot.image_url = result.image_url;
-        shot.image_path = result.image_path;
-      }
-    }
-    renderShots();
+    applyImageBatchResults(data.results || []);
     const okCount = (data.results || []).filter((item) => item.ok).length;
+    const skippedCount = (data.results || []).filter((item) => item.skipped).length;
     const failures = (data.results || []).filter((item) => !item.ok);
-    el.health.textContent = `批量生成完成：${okCount}/${state.shots.length}`;
+    el.health.textContent = `批量生成完成：${okCount}/${state.shots.length}${skippedCount ? `，跳过 ${skippedCount}` : ""}`;
     if (failures.length) {
       el.qaBox.textContent = failures.map((item) => `${item.shot_id}: ${item.error}`).join("\n\n");
     }
@@ -517,6 +506,57 @@ async function generateAllImages() {
   } finally {
     setBusy(el.allImagesBtn, false);
   }
+}
+
+async function retryFailedImages() {
+  if (!state.shots.length || !state.runId) return;
+  const failedShots = state.shots.filter((shot) => !shot.image_url && !shot.image_path);
+  if (!failedShots.length) {
+    el.health.textContent = "没有需要重试的失败分镜";
+    return;
+  }
+  setBusy(el.retryFailedBtn, true);
+  try {
+    const data = await generateImageBatch(failedShots, {
+      skipExisting: false,
+      retryCount: Number(el.imageRetryCount.value || 1),
+    });
+    applyImageBatchResults(data.results || []);
+    const okCount = (data.results || []).filter((item) => item.ok).length;
+    const failures = (data.results || []).filter((item) => !item.ok);
+    el.health.textContent = `失败重试完成：${okCount}/${failedShots.length}`;
+    el.qaBox.textContent = failures.length ? failures.map((item) => `${item.shot_id}: ${item.error}`).join("\n\n") : "失败项已全部重试成功";
+  } catch (error) {
+    el.health.textContent = error.message;
+  } finally {
+    setBusy(el.retryFailedBtn, false);
+  }
+}
+
+async function generateImageBatch(shots, { skipExisting, retryCount }) {
+  return api("/api/images/batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        run_id: state.runId,
+        size: selectedImageSize(),
+        skip_existing: skipExisting,
+        retry_count: retryCount,
+        shots: shots.map((shot) => ({ ...shot, positive_prompt: shot === state.selected ? el.promptBox.value : shot.positive_prompt })),
+      }),
+    });
+}
+
+function applyImageBatchResults(results) {
+  for (const result of results) {
+    if (!result.ok) continue;
+    const shot = state.shots.find((item) => item.id === result.shot_id);
+    if (shot) {
+      shot.image_url = result.image_url;
+      shot.image_path = result.image_path;
+    }
+  }
+  renderShots(state.selected?.id);
 }
 
 async function exportMarkdown() {
@@ -570,19 +610,6 @@ async function exportLogs() {
   }
 }
 
-async function runVlmCheck() {
-  if (!state.selected || !el.qaImage.files[0]) return;
-  const form = new FormData();
-  form.append("image", el.qaImage.files[0]);
-  form.append("shot_json", JSON.stringify({ ...state.selected, positive_prompt: el.promptBox.value }));
-  try {
-    const data = await api("/api/vlm", { method: "POST", body: form });
-    el.qaBox.textContent = JSON.stringify(data, null, 2);
-  } catch (error) {
-    el.qaBox.textContent = error.message;
-  }
-}
-
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
     "&": "&amp;",
@@ -594,7 +621,7 @@ function escapeHtml(value) {
 }
 
 function kindLabel(kind) {
-  return { llm: "LLM", image: "图片", vlm: "VLM" }[kind] || kind;
+  return { llm: "LLM", image: "图片" }[kind] || kind;
 }
 
 el.runBtn.addEventListener("click", runPipeline);
@@ -654,8 +681,8 @@ el.refreshConfigBtn.addEventListener("click", async () => {
 el.testProviderBtn.addEventListener("click", testProvider);
 el.imageBtn.addEventListener("click", generateImage);
 el.allImagesBtn.addEventListener("click", generateAllImages);
+el.retryFailedBtn.addEventListener("click", retryFailedImages);
 el.exportBtn.addEventListener("click", exportMarkdown);
-el.qaImage.addEventListener("change", runVlmCheck);
 el.copyBtn.addEventListener("click", async () => {
   await navigator.clipboard.writeText(el.promptBox.value);
   el.health.textContent = "Prompt 已复制";

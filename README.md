@@ -8,9 +8,8 @@ FicFrame 是一套本地运行的小说配图工具集，目标是把二创小�
 - 从人物 Markdown 中抽取角色卡、人设特征和参考图信息
 - 生成分镜、图片 prompt 和连续性提示
 - 在 Web 中绑定“角色 ↔ 参考图”，一个角色可以绑定多张图
-- 管理多套 LLM / 图片 / VLM API 供应商
+- 管理多套 LLM / 图片 API 供应商
 - 调用图片模型生成单张或批量图片
-- 使用 VLM 对生成图做基础质检
 - 导出“已经插入配图的完整小说 Markdown”
 - 从 Web 一键导出脱敏日志包，方便反馈 bug
 
@@ -18,11 +17,13 @@ FicFrame 适合想把长篇小说做成图文版、分镜版、视频前期素�
 
 ## 预览
 
+![预览](pic/image.png)
+
 目前 Web 是一个本地工作台，主要包含：
 
 - 左侧：小说、人物文件、人设参考图、参考图绑定表、分镜数量、图片尺寸
 - 中间：分镜列表
-- 右侧：当前分镜 prompt、图片预览、批量生成、VLM 质检、导出小说 MD
+- 右侧：当前分镜 prompt、图片预览、批量生成、导出小说 MD
 - 顶部 API 管理：供应商列表、请求地址、API key、模型昵称、可达性测试
 
 ## 快速开始
@@ -60,7 +61,22 @@ start.bat
 .\start.ps1 -Port 8788
 ```
 
-### 方式三：手动启动
+### 方式三：macOS / Linux 启动
+
+```bash
+chmod +x ./start.sh
+./start.sh
+```
+
+指定端口：
+
+```bash
+FICFRAME_PORT=8788 ./start.sh
+```
+
+`start.sh` 会优先使用 uv；如果没有 uv，会自动使用 Python venv + pip。
+
+### 方式四：手动启动
 
 使用 uv：
 
@@ -99,7 +115,7 @@ default = true
 ## Web 使用流程
 
 1. 打开 Web 页面。
-2. 点击顶部“API 管理”，配置 LLM、图片、VLM 供应商。
+2. 点击顶部“API 管理”，配置 LLM 和图片供应商。
 3. 上传小说 Markdown 或 TXT。
 4. 上传人物 Markdown 或 TXT。
 5. 上传人设参考图。
@@ -108,9 +124,10 @@ default = true
 8. 点击“生成分镜”。
 9. 检查或修改每个分镜的 prompt。
 10. 点击“生成图片”或“生成全部”。
-11. 可选：上传生成图做 VLM 质检。
-12. 点击“导出小说 MD”，得到插入图片后的完整小说 Markdown。
-13. 遇到问题时点击顶部“导出日志”，把 zip 日志包附在 issue 里。
+11. 批量生成时可以勾选“跳过已有图片”，用于断点续跑。
+12. 如果部分图片失败，调整“失败重试次数”后点击“重试失败”。
+13. 点击“导出小说 MD”，得到插入图片后的完整小说 Markdown。
+14. 遇到问题时点击顶部“导出日志”，把 zip 日志包附在 issue 里。
 
 导出的文件会保存到：
 
@@ -132,13 +149,13 @@ outputs/web-runs/<run_id>/images/
 
 ## API 供应商配置
 
-FicFrame 把 LLM、图片模型和 VLM 分开配置。它们可以使用完全不同的请求地址、API key 和模型。
+FicFrame 把 LLM 和图片模型分开配置。它们可以使用完全不同的请求地址、API key 和模型。
 
 Web 中的“API 管理”支持：
 
 - 添加多个供应商
 - 删除供应商
-- 切换当前使用的 LLM / 图片 / VLM
+- 切换当前使用的 LLM / 图片供应商
 - 为每个供应商维护多个“模型昵称”
 - 测试供应商是否可达
 - 为图片供应商设置 steps、guidance、batch、watermark 等参数
@@ -167,12 +184,46 @@ FICFRAME_IMAGE_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
 FICFRAME_IMAGE_PROVIDER=ark
 FICFRAME_IMAGE_MODEL=doubao-seedream-5-0-260128
 
-FICFRAME_VLM_API_KEY=sk-your-vlm-key
-FICFRAME_VLM_BASE_URL=https://api.openai.com/v1
-FICFRAME_VLM_MODEL=gpt-5-mini
 ```
 
-没有配置 API key 时，Web 仍然可以生成本地分镜和 prompt；LLM 增强、生图、VLM 质检会分别提示缺少对应 key。
+没有配置 API key 时，Web 仍然可以生成本地分镜和 prompt；LLM 增强和生图会分别提示缺少对应 key。
+
+## 示例
+
+仓库提供两组示例：
+
+| 路径 | 用途 |
+| --- | --- |
+| `examples/minimal/` | 极短 demo，适合首次验证安装和分镜流程 |
+
+快速跑最小示例：
+
+```powershell
+uv run ficframe run --novel "examples/minimal/novel.md" --characters "examples/minimal/characters.md" --out "outputs/minimal-demo" --max-shots 3
+```
+
+不使用 uv：
+
+```powershell
+.\.venv\Scripts\python.exe -m ficframe.cli run --novel "examples/minimal/novel.md" --characters "examples/minimal/characters.md" --out "outputs/minimal-demo" --max-shots 3
+```
+
+Web 中也可以直接上传 `examples/minimal/novel.md` 和 `examples/minimal/characters.md`。
+
+## 失败重试与断点续跑
+
+批量生图容易受到网络、限流、尺寸参数或供应商状态影响。FicFrame 做了几件事来减少重复工作：
+
+- “跳过已有图片”：再次批量生成时，已经存在的 `images/<shot_id>.png` 不会重复请求模型。
+- “失败重试次数”：每张失败图片会按设置自动重试。
+- “重试失败”：只对当前没有图片的分镜重新发起请求。
+- `image_results.json`：每次批量生成结果会写入 run 目录，方便查看失败原因。
+
+结果文件位置：
+
+```text
+outputs/web-runs/<run_id>/image_results.json
+```
 
 ## 日志与问题反馈
 
@@ -198,6 +249,8 @@ Web 顶部有“导出日志”按钮。日志包中包含：
 
 日志会尽量避免记录 API key 和完整 prompt。公开反馈前仍建议快速检查 zip 内容，确认没有你不想公开的小说正文或设定细节。
 
+更多隐私和内容边界说明见 [SECURITY.md](SECURITY.md)。
+
 ### 支持的图片供应商类型
 
 | 类型 | 用途 | 说明 |
@@ -214,7 +267,7 @@ Web 顶部有“导出日志”按钮。日志包中包含：
 人物 Markdown 可以写角色简介、外貌、服装、固定标志物、禁止变化项等信息。示例见：
 
 ```text
-人物示例.md
+examples/minimal/characters.md
 ```
 
 人设参考图有两种使用方式：
@@ -250,25 +303,25 @@ Web 上传参考图时，FicFrame 会根据文件名尝试自动匹配角色。�
 
 ```powershell
 $env:UV_CACHE_DIR=".uv-cache"
-uv run ficframe run --novel "小说示例.md" --characters "人物示例.md" --out "outputs/demo"
+uv run ficframe run --novel "examples/minimal/novel.md" --characters "examples/minimal/characters.md" --out "outputs/demo"
 ```
 
 启用 LLM 增强：
 
 ```powershell
-uv run ficframe run --novel "小说示例.md" --characters "人物示例.md" --out "outputs/demo" --use-llm
+uv run ficframe run --novel "examples/minimal/novel.md" --characters "examples/minimal/characters.md" --out "outputs/demo" --use-llm
 ```
 
 只分析小说场景：
 
 ```powershell
-uv run ficframe segment --novel "小说示例.md" --characters "人物示例.md"
+uv run ficframe segment --novel "examples/minimal/novel.md" --characters "examples/minimal/characters.md"
 ```
 
 只抽取角色卡：
 
 ```powershell
-uv run ficframe characters --characters "人物示例.md"
+uv run ficframe characters --characters "examples/minimal/characters.md"
 ```
 
 启动 Web：
@@ -299,7 +352,7 @@ uv run ficframe serve --host 127.0.0.1 --port 8787
 │  ├─ llm_pipeline.py         # LLM 增强分镜和 prompt
 │  ├─ models.py               # 数据模型
 │  ├─ pipeline.py             # 命令行完整流水线
-│  ├─ providers.py            # LLM / 图片 / VLM API 适配
+│  ├─ providers.py            # LLM / 图片 API 适配
 │  ├─ render.py               # Markdown 导出
 │  ├─ segmenter.py            # 小说切段
 │  └─ storyboard.py           # 分镜生成
@@ -314,13 +367,16 @@ uv run ficframe serve --host 127.0.0.1 --port 8787
 ├─ .ficframe/                 # 本地供应商配置，默认不提交
 ├─ .env                       # 本地 API key，默认不提交
 ├─ .env.example               # 环境变量示例
+├─ examples/                  # 可公开运行的示例输入
+├─ docs/screenshots/          # README 和发布页截图
+├─ LICENSE                    # MIT License
+├─ SECURITY.md                # 隐私、日志和内容边界说明
 ├─ pyproject.toml             # 项目配置和 uv 依赖入口
 ├─ requirements.txt           # pip / conda / 其他环境管理器可用的运行依赖
 ├─ uv.lock                    # 依赖锁定文件
 ├─ start.bat                  # Windows 一键启动脚本
 ├─ start.ps1                  # PowerShell 启动脚本
-├─ 小说示例.md                # 小说输入示例
-└─ 人物示例.md                # 人物输入示例
+└─ start.sh                   # macOS / Linux 启动脚本
 ```
 
 ## 常见问题
@@ -435,7 +491,7 @@ uv run ficframe serve --host 127.0.0.1 --port 8787 --reload
 
 ## 安全说明
 
-FicFrame 是本地应用，但当你启用 LLM、生图或 VLM 功能时，小说正文、人物设定、prompt、参考图或生成图可能会被发送到你配置的第三方 API。请确认你使用的供应商和模型符合自己的隐私要求。
+FicFrame 是本地应用，但当你启用 LLM 或生图功能时，小说正文、人物设定、prompt、参考图或生成图可能会被发送到你配置的第三方 API。请确认你使用的供应商和模型符合自己的隐私要求。详见 [SECURITY.md](SECURITY.md)。
 
 默认不会提交以下本地文件：
 
@@ -449,4 +505,4 @@ outputs/
 
 ## License
 
-开源前请在仓库中补充你选择的许可证文件，例如 MIT、Apache-2.0 或其他许可证。
+FicFrame is released under the MIT License. See [LICENSE](LICENSE).

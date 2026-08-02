@@ -404,6 +404,16 @@ textarea {
   margin-top: var(--space-md);
 }
 
+.batch-options {
+  align-items: end;
+  border-top: var(--rule-sm) solid var(--color-rule);
+  display: grid;
+  gap: var(--space-sm);
+  grid-template-columns: auto minmax(110px, 150px);
+  margin-top: var(--space-md);
+  padding-top: var(--space-md);
+}
+
 .file-action input {
   inline-size: 1px;
   opacity: 0;

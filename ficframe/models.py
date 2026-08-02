@@ -53,7 +53,6 @@ class Shot:
     qa_notes: list[str] = field(default_factory=list)
     image_path: str | None = None
     image_url: str | None = None
-    vlm_report: dict[str, Any] | None = None
 
 
 @dataclass

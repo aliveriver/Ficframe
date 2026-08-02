@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import mimetypes
 import time
 from pathlib import Path
 from typing import Annotated, Any
@@ -64,11 +63,7 @@ class ImageRequest(BaseModel):
     shot: dict[str, Any]
     run_id: str = "manual"
     size: str = "1024x1024"
-
-
-class VlmRequest(BaseModel):
-    image_path: str
-    shot: dict[str, Any]
+    overwrite: bool = True
 
 
 class ConfigRequest(BaseModel):
@@ -104,17 +99,14 @@ def health() -> dict[str, Any]:
         "keys": {
             "llm": bool(config.llm.api_key),
             "image": bool(config.image.api_key),
-            "vlm": bool(config.vlm.api_key),
         },
         "base_urls": {
             "llm": config.llm.base_url,
             "image": config.image.base_url,
-            "vlm": config.vlm.base_url,
         },
         "models": {
             "llm": config.llm.model,
             "image": config.image.model,
-            "vlm": config.vlm.model,
         },
         "providers": {
             "image": effective_image_provider(config.image),
@@ -308,6 +300,11 @@ def generate_image(request: ImageRequest) -> dict[str, Any]:
     shot = Shot(**request.shot)
     provider = OpenAICompatibleProvider()
     target = RUNS / request.run_id / "images" / f"{shot.id}.png"
+    if target.exists() and not request.overwrite:
+        image_url = f"/runs/{request.run_id}/images/{shot.id}.png"
+        update_shot_image(request.run_id, shot.id, str(target), image_url)
+        logger.info("image generation skipped existing run_id=%s shot_id=%s path=%s", request.run_id, shot.id, target)
+        return {"image_path": str(target), "image_url": image_url, "skipped": True}
     try:
         references = reference_paths_for_shot(request.run_id, shot)
         logger.info("image generation started run_id=%s shot_id=%s size=%s reference_count=%s", request.run_id, shot.id, request.size, len(references))
@@ -325,24 +322,50 @@ def generate_image(request: ImageRequest) -> dict[str, Any]:
 def generate_all_images(request: dict[str, Any]) -> dict[str, Any]:
     run_id = str(request.get("run_id", "manual"))
     size = str(request.get("size", "1024x1024"))
+    retry_count = max(0, int(request.get("retry_count", 0)))
+    skip_existing = bool(request.get("skip_existing", True))
     shots = [Shot(**shot) for shot in request.get("shots", [])]
     results = []
     provider = OpenAICompatibleProvider()
-    logger.info("batch image generation started run_id=%s shot_count=%s size=%s", run_id, len(shots), size)
+    logger.info("batch image generation started run_id=%s shot_count=%s size=%s retry_count=%s skip_existing=%s", run_id, len(shots), size, retry_count, skip_existing)
     for shot in shots:
         target = RUNS / run_id / "images" / f"{shot.id}.png"
+        if skip_existing and target.exists():
+            image_url = f"/runs/{run_id}/images/{shot.id}.png"
+            update_shot_image(run_id, shot.id, str(target), image_url)
+            results.append({"shot_id": shot.id, "ok": True, "skipped": True, "image_path": str(target), "image_url": image_url})
+            logger.info("batch image item skipped existing run_id=%s shot_id=%s", run_id, shot.id)
+            continue
+        result = generate_batch_image_item(provider, run_id, shot, target, size, retry_count)
+        results.append(result)
+    logger.info("batch image generation completed run_id=%s ok_count=%s total=%s", run_id, len([item for item in results if item["ok"]]), len(results))
+    write_json(RUNS / run_id / "image_results.json", {"run_id": run_id, "size": size, "retry_count": retry_count, "skip_existing": skip_existing, "results": results})
+    return {"results": results}
+
+
+def generate_batch_image_item(
+    provider: OpenAICompatibleProvider,
+    run_id: str,
+    shot: Shot,
+    target: Path,
+    size: str,
+    retry_count: int,
+) -> dict[str, Any]:
+    references = reference_paths_for_shot(run_id, shot)
+    last_error = ""
+    for attempt in range(retry_count + 1):
         try:
-            references = reference_paths_for_shot(run_id, shot)
             provider.image(shot.positive_prompt, target, size=size, reference_images=references)
             image_url = f"/runs/{run_id}/images/{shot.id}.png"
             update_shot_image(run_id, shot.id, str(target), image_url)
-            results.append({"shot_id": shot.id, "ok": True, "image_path": str(target), "image_url": image_url})
-            logger.info("batch image item completed run_id=%s shot_id=%s reference_count=%s", run_id, shot.id, len(references))
+            logger.info("batch image item completed run_id=%s shot_id=%s reference_count=%s attempt=%s", run_id, shot.id, len(references), attempt + 1)
+            return {"shot_id": shot.id, "ok": True, "attempts": attempt + 1, "image_path": str(target), "image_url": image_url}
         except ProviderError as exc:
-            results.append({"shot_id": shot.id, "ok": False, "error": str(exc)})
-            logger.warning("batch image item failed run_id=%s shot_id=%s error=%s", run_id, shot.id, exc)
-    logger.info("batch image generation completed run_id=%s ok_count=%s total=%s", run_id, len([item for item in results if item["ok"]]), len(results))
-    return {"results": results}
+            last_error = str(exc)
+            logger.warning("batch image item failed run_id=%s shot_id=%s attempt=%s error=%s", run_id, shot.id, attempt + 1, exc)
+            if attempt < retry_count:
+                time.sleep(min(2 * (attempt + 1), 6))
+    return {"shot_id": shot.id, "ok": False, "attempts": retry_count + 1, "error": last_error}
 
 
 @app.get("/api/export/{run_id}.md", response_class=PlainTextResponse)
@@ -386,29 +409,6 @@ def build_exported_novel(run_id: str) -> dict[str, str]:
         "markdown_path": str(markdown_path),
         "markdown_url": f"/runs/{run_id}/illustrated_novel.md",
     }
-
-
-@app.post("/api/vlm")
-async def vlm_check(
-    image: Annotated[UploadFile, File()],
-    shot_json: Annotated[str, Form()],
-) -> dict[str, Any]:
-    shot = json.loads(shot_json)
-    image_bytes = await image.read()
-    mime_type = image.content_type or mimetypes.guess_type(image.filename or "")[0] or "image/png"
-    prompt = (
-        "你是小说配图质检员。请检查这张图是否符合分镜。"
-        "输出 JSON，字段为 pass(boolean), score(0-100), issues(array), fixes(array), observed(string)。\n"
-        f"分镜：{json.dumps(shot, ensure_ascii=False)}"
-    )
-    try:
-        raw = OpenAICompatibleProvider().vision(prompt, image_bytes, mime_type)
-        data = json.loads(raw)
-    except (ProviderError, json.JSONDecodeError, TypeError) as exc:
-        logger.warning("vlm check failed filename=%s error=%s", image.filename, exc)
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    logger.info("vlm check completed filename=%s mime=%s", image.filename, mime_type)
-    return data
 
 
 def update_shot_image(run_id: str, shot_id: str, image_path: str, image_url: str) -> None:

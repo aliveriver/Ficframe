@@ -36,7 +36,6 @@
                 <select id="providerKind">
                   <option value="llm">LLM</option>
                   <option value="image">图片</option>
-                  <option value="vlm">VLM</option>
                 </select>
               </label>
               <label>
@@ -162,10 +161,17 @@
           <div class="actions">
             <button id="imageBtn" type="button">生成图片</button>
             <button id="allImagesBtn" type="button">生成全部</button>
+            <button id="retryFailedBtn" type="button">重试失败</button>
             <button id="exportBtn" type="button">导出小说 MD</button>
-            <label class="file-action">
-              VLM 质检
-              <input id="qaImage" type="file" accept="image/*" />
+          </div>
+          <div class="batch-options">
+            <label class="toggle">
+              <input id="skipExistingImages" type="checkbox" checked />
+              <span>跳过已有图片</span>
+            </label>
+            <label>
+              <span>失败重试次数</span>
+              <input id="imageRetryCount" type="number" min="0" max="5" value="1" />
             </label>
           </div>
           <figure id="preview" class="preview"></figure>

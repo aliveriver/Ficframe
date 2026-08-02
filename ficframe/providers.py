@@ -35,7 +35,6 @@ class EndpointConfig:
 class ProviderConfig:
     llm: EndpointConfig
     image: EndpointConfig
-    vlm: EndpointConfig
     timeout: float = 120.0
 
     @classmethod
@@ -54,11 +53,6 @@ class ProviderConfig:
                 base_url=os.getenv("FICFRAME_IMAGE_BASE_URL", legacy_base_url).rstrip("/"),
                 model=os.getenv("FICFRAME_IMAGE_MODEL", "gpt-image-1"),
                 provider=os.getenv("FICFRAME_IMAGE_PROVIDER", "openai").lower(),
-            ),
-            vlm=EndpointConfig(
-                api_key=os.getenv("FICFRAME_VLM_API_KEY") or legacy_key,
-                base_url=os.getenv("FICFRAME_VLM_BASE_URL", legacy_base_url).rstrip("/"),
-                model=os.getenv("FICFRAME_VLM_MODEL", llm_model),
             ),
         )
 
@@ -132,24 +126,6 @@ class OpenAICompatibleProvider:
             ],
         }
         data = self._post(endpoint, "llm", "responses", payload)
-        return extract_response_text(data)
-
-    def vision(self, prompt: str, image_bytes: bytes, mime_type: str, model: str | None = None) -> str:
-        endpoint = self.config.vlm
-        data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
-        payload = {
-            "model": model or endpoint.model,
-            "input": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": prompt},
-                        {"type": "input_image", "image_url": data_url},
-                    ],
-                }
-            ],
-        }
-        data = self._post(endpoint, "vlm", "responses", payload)
         return extract_response_text(data)
 
     def image(

@@ -23,9 +23,6 @@ CONFIG_KEYS = [
     "FICFRAME_IMAGE_SEQUENTIAL",
     "FICFRAME_IMAGE_RESPONSE_FORMAT",
     "FICFRAME_IMAGE_WATERMARK",
-    "FICFRAME_VLM_API_KEY",
-    "FICFRAME_VLM_BASE_URL",
-    "FICFRAME_VLM_MODEL",
 ]
 
 
@@ -41,8 +38,6 @@ DEFAULT_CONFIG = {
     "FICFRAME_IMAGE_SEQUENTIAL": "disabled",
     "FICFRAME_IMAGE_RESPONSE_FORMAT": "url",
     "FICFRAME_IMAGE_WATERMARK": "true",
-    "FICFRAME_VLM_BASE_URL": "https://api.openai.com/v1",
-    "FICFRAME_VLM_MODEL": "gpt-5-mini",
 }
 
 
@@ -51,7 +46,7 @@ def default_provider_config(env_path: str | Path) -> dict[str, Any]:
     now = int(time.time())
     return {
         "version": 1,
-        "active": {"llm": "llm-default", "image": "image-default", "vlm": "vlm-default"},
+        "active": {"llm": "llm-default", "image": "image-default"},
         "sources": [
             {
                 "id": "llm-default",
@@ -81,17 +76,6 @@ def default_provider_config(env_path: str | Path) -> dict[str, Any]:
                     "response_format": values.get("FICFRAME_IMAGE_RESPONSE_FORMAT", "url"),
                     "watermark": values.get("FICFRAME_IMAGE_WATERMARK", "true"),
                 },
-                "created_at": now,
-            },
-            {
-                "id": "vlm-default",
-                "label": "默认 VLM",
-                "kind": "vlm",
-                "provider": "openai",
-                "base_url": values.get("FICFRAME_VLM_BASE_URL", ""),
-                "api_key": values.get("FICFRAME_VLM_API_KEY", ""),
-                "models": [{"nickname": "默认模型", "model": values.get("FICFRAME_VLM_MODEL", "")}],
-                "active_model": values.get("FICFRAME_VLM_MODEL", ""),
                 "created_at": now,
             },
         ],
@@ -155,6 +139,8 @@ def read_provider_config(path: str | Path, env_path: str | Path) -> dict[str, An
         return default_provider_config(env_path)
     data.setdefault("version", 1)
     data.setdefault("active", {})
+    data["sources"] = [source for source in data["sources"] if isinstance(source, dict) and source.get("kind") in {"llm", "image"}]
+    data["active"] = {key: value for key, value in data["active"].items() if key in {"llm", "image"}}
     return data
 
 
@@ -197,6 +183,8 @@ def write_provider_config(path: str | Path, env_path: str | Path, incoming: dict
             "options": normalize_options(source.get("options")),
             "created_at": source.get("created_at") or int(time.time()),
         }
+        if item["kind"] not in {"llm", "image"}:
+            continue
         if is_masked_or_empty(item["api_key"]):
             item["api_key"] = str(current_by_id.get(source_id, {}).get("api_key") or "")
         if not item["active_model"] and item["models"]:
@@ -236,7 +224,7 @@ def normalize_options(value: Any) -> dict[str, str]:
 def normalize_active(value: Any, sources: list[dict[str, Any]]) -> dict[str, str]:
     active = value if isinstance(value, dict) else {}
     result: dict[str, str] = {}
-    for kind in ("llm", "image", "vlm"):
+    for kind in ("llm", "image"):
         selected = str(active.get(kind) or "")
         if not any(item.get("id") == selected and item.get("kind") == kind for item in sources):
             selected = next((str(item.get("id")) for item in sources if item.get("kind") == kind), "")
@@ -251,7 +239,6 @@ def sync_active_sources_to_env(env_path: str | Path, data: dict[str, Any]) -> No
     mappings = {
         "llm": ("FICFRAME_LLM", False),
         "image": ("FICFRAME_IMAGE", True),
-        "vlm": ("FICFRAME_VLM", False),
     }
     for kind, (prefix, has_provider) in mappings.items():
         source = sources.get(str(active.get(kind) or ""))
