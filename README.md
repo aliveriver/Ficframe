@@ -29,9 +29,7 @@ FicFrame 适合想把长篇小说做成图文版、分镜版、视频前期素�
 
 ### 方式一：Windows 双击启动
 
-确保电脑已经安装 [uv](https://docs.astral.sh/uv/)。
-
-然后双击项目根目录下的：
+双击项目根目录下的：
 
 ```text
 start.bat
@@ -40,13 +38,15 @@ start.bat
 脚本会自动：
 
 - 进入项目目录
-- 使用项目内 `.uv-cache` 作为 uv 缓存目录
+- 如果已安装 uv，则使用 uv 管理环境
+- 如果没有 uv，则自动使用 Python venv + pip
+- pip 和 uv 都默认使用清华 PyPI 镜像
 - 如果没有 `.env`，从 `.env.example` 复制一份
-- 执行 `uv sync` 安装依赖
+- 安装或检查依赖
 - 打开浏览器访问 `http://127.0.0.1:8787`
 - 启动 FicFrame Web 服务
 
-如果 Windows 阻止运行 `.ps1`，优先使用 `start.bat`。
+普通 Windows 用户优先使用 `start.bat`。如果 Windows 阻止运行 `.ps1`，也优先使用 `start.bat`。
 
 ### 方式二：PowerShell 启动
 
@@ -62,10 +62,21 @@ start.bat
 
 ### 方式三：手动启动
 
+使用 uv：
+
 ```powershell
 $env:UV_CACHE_DIR=".uv-cache"
 uv sync
 uv run ficframe serve --host 127.0.0.1 --port 8787
+```
+
+不使用 uv，只用 Python + pip：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -U pip -i https://pypi.tuna.tsinghua.edu.cn/simple
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+.\.venv\Scripts\python.exe -m ficframe.cli serve --host 127.0.0.1 --port 8787
 ```
 
 打开：
@@ -82,6 +93,8 @@ name = "tuna"
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 default = true
 ```
+
+如果使用 `requirements.txt`，请在 pip 命令里加 `-i https://pypi.tuna.tsinghua.edu.cn/simple`，或自行配置 pip 全局镜像。
 
 ## Web 使用流程
 
@@ -301,7 +314,8 @@ uv run ficframe serve --host 127.0.0.1 --port 8787
 ├─ .ficframe/                 # 本地供应商配置，默认不提交
 ├─ .env                       # 本地 API key，默认不提交
 ├─ .env.example               # 环境变量示例
-├─ pyproject.toml             # 项目和 uv 配置
+├─ pyproject.toml             # 项目配置和 uv 依赖入口
+├─ requirements.txt           # pip / conda / 其他环境管理器可用的运行依赖
 ├─ uv.lock                    # 依赖锁定文件
 ├─ start.bat                  # Windows 一键启动脚本
 ├─ start.ps1                  # PowerShell 启动脚本
@@ -313,7 +327,15 @@ uv run ficframe serve --host 127.0.0.1 --port 8787
 
 ### 1. `uv` 命令不存在
 
-需要先安装 uv。安装方式见 uv 官方文档：
+先直接运行 `start.bat`。启动脚本会检查 uv 是否存在；如果没有，会自动改用 Python venv + pip。
+
+如果你想安装 uv，可以用：
+
+```powershell
+winget install --id astral-sh.uv -e
+```
+
+如果系统没有 winget，或自动安装失败，再按 uv 官方文档手动安装：
 
 ```text
 https://docs.astral.sh/uv/
@@ -321,7 +343,17 @@ https://docs.astral.sh/uv/
 
 安装后重新打开终端，再运行 `start.bat`。
 
-### 2. 端口 `8787` 被占用
+### 2. 没有 uv，也不想安装 uv
+
+可以，只要有 Python 3.10+ 即可：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+.\.venv\Scripts\python.exe -m ficframe.cli serve --host 127.0.0.1 --port 8787
+```
+
+### 3. 端口 `8787` 被占用
 
 PowerShell 启动时可以换端口：
 
@@ -336,7 +368,7 @@ netstat -ano | Select-String ':8787'
 Stop-Process -Id <PID> -Force
 ```
 
-### 3. 图片生成失败，提示图片尺寸不支持
+### 4. 图片生成失败，提示图片尺寸不支持
 
 不同供应商支持的尺寸不同。比如部分 Ark 图片模型要求至少 2K。可以在 Web 左侧“图片尺寸”里选择 `2K`，或填写自定义尺寸，例如：
 
@@ -344,7 +376,7 @@ Stop-Process -Id <PID> -Force
 2048x2048
 ```
 
-### 4. 人设参考图没有生效
+### 5. 人设参考图没有生效
 
 请检查：
 
@@ -355,7 +387,7 @@ Stop-Process -Id <PID> -Force
 
 目前 `grsai`、`ark` 和 OpenAI 兼容的编辑接口会尝试发送参考图。某些供应商虽然接口兼容，但模型本身可能不强遵循参考图。
 
-### 5. 导出的 Markdown 里图片打不开
+### 6. 导出的 Markdown 里图片打不开
 
 导出的小说 Markdown 位于：
 
@@ -367,17 +399,31 @@ outputs/web-runs/<run_id>/illustrated_novel.md
 
 ## 开发
 
-安装依赖：
+推荐使用 uv 安装依赖：
 
 ```powershell
 $env:UV_CACHE_DIR=".uv-cache"
 uv sync
 ```
 
+也可以使用 pip：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
 编译检查：
 
 ```powershell
 uv run python -m compileall ficframe
+node --check web/app.js
+```
+
+如果使用 pip 环境：
+
+```powershell
+.\.venv\Scripts\python.exe -m compileall ficframe
 node --check web/app.js
 ```
 
