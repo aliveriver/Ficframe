@@ -2,17 +2,24 @@ const state = {
   runId: null,
   shots: [],
   characters: [],
+  originalShots: [],
+  originalCharacters: [],
   differenceAnalysis: null,
   selected: null,
+  selectedCharacterIndex: 0,
   providerConfig: { active: {}, sources: [] },
   selectedProviderId: null,
   referenceBindings: [],
 };
 
+const WORKSPACE_KEY = "ficframe.workspace.v1";
+let draftTimer = null;
+
 const el = {
   health: document.querySelector("#health"),
   runBtn: document.querySelector("#runBtn"),
   configToggle: document.querySelector("#configToggle"),
+  restoreRunBtn: document.querySelector("#restoreRunBtn"),
   logExportBtn: document.querySelector("#logExportBtn"),
   configPanel: document.querySelector("#configPanel"),
   novelFile: document.querySelector("#novelFile"),
@@ -30,6 +37,14 @@ const el = {
   runId: document.querySelector("#runId"),
   promptBox: document.querySelector("#promptBox"),
   copyBtn: document.querySelector("#copyBtn"),
+  restorePromptBtn: document.querySelector("#restorePromptBtn"),
+  rebuildPromptBtn: document.querySelector("#rebuildPromptBtn"),
+  characterEditorSelect: document.querySelector("#characterEditorSelect"),
+  identityPromptBox: document.querySelector("#identityPromptBox"),
+  appearanceStatesBox: document.querySelector("#appearanceStatesBox"),
+  negativeIdentityPromptBox: document.querySelector("#negativeIdentityPromptBox"),
+  restoreCharacterBtn: document.querySelector("#restoreCharacterBtn"),
+  rebuildAllPromptsBtn: document.querySelector("#rebuildAllPromptsBtn"),
   imageBtn: document.querySelector("#imageBtn"),
   allImagesBtn: document.querySelector("#allImagesBtn"),
   retryFailedBtn: document.querySelector("#retryFailedBtn"),
@@ -71,6 +86,68 @@ async function api(path, options = {}) {
   return response.json();
 }
 
+function saveWorkspaceDraft() {
+  saveSelectedPrompt();
+  saveCharacterEditor();
+  if (!state.runId) return;
+  localStorage.setItem(WORKSPACE_KEY, JSON.stringify({
+    runId: state.runId,
+    shots: state.shots,
+    characters: state.characters,
+    originalShots: state.originalShots,
+    originalCharacters: state.originalCharacters,
+    differenceAnalysis: state.differenceAnalysis,
+    selectedShotId: state.selected?.id || null,
+    selectedCharacterIndex: state.selectedCharacterIndex,
+    savedAt: Date.now(),
+  }));
+}
+
+function scheduleWorkspaceDraftSave() {
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(saveWorkspaceDraft, 400);
+}
+
+function restoreWorkspaceDraft() {
+  const raw = localStorage.getItem(WORKSPACE_KEY);
+  if (!raw) return false;
+  try {
+    const draft = JSON.parse(raw);
+    if (!draft?.runId || !Array.isArray(draft.shots)) return false;
+    hydrateWorkspace(draft, draft.selectedShotId);
+    el.health.textContent = `已恢复浏览器草稿 run ${state.runId}`;
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function hydrateWorkspace(payload, preferredShotId = null) {
+  state.runId = payload.runId || payload.run_id;
+  state.shots = payload.shots || [];
+  state.characters = payload.characters || [];
+  state.originalShots = payload.originalShots || clone(state.shots);
+  state.originalCharacters = payload.originalCharacters || clone(state.characters);
+  state.differenceAnalysis = payload.differenceAnalysis || payload.difference_analysis || null;
+  state.selectedCharacterIndex = Math.min(payload.selectedCharacterIndex || 0, Math.max(0, state.characters.length - 1));
+  el.runId.textContent = `run ${state.runId}`;
+  renderCharacters();
+  renderShots(preferredShotId || state.shots[0]?.id);
+}
+
+async function restoreLatestRun() {
+  const data = await api("/api/runs");
+  const latest = data.runs?.[0];
+  if (!latest) {
+    el.health.textContent = "没有可恢复的历史 run";
+    return;
+  }
+  const payload = await api(`/api/runs/${encodeURIComponent(latest.run_id)}`);
+  hydrateWorkspace(payload);
+  saveWorkspaceDraft();
+  el.health.textContent = `已恢复最近 run ${state.runId}，${state.shots.length} 张分镜`;
+}
+
 function setBusy(button, busy) {
   button.disabled = busy;
   button.dataset.originalText ||= button.textContent;
@@ -82,7 +159,7 @@ async function checkHealth() {
     const data = await api("/api/health");
     const keys = data.keys || {};
     const provider = data.providers?.image || "openai";
-    el.health.textContent = `LLM ${keys.llm ? "已配置" : "未配置"} · 图片 ${keys.image ? "已配置" : "未配置"} (${provider})`;
+    el.health.textContent = `LLM ${keys.llm ? "已配置" : "未配置"} · VLM ${keys.vlm ? "已配置" : "未配置"} · 图片 ${keys.image ? "已配置" : "未配置"} (${provider})`;
   } catch (error) {
     el.health.textContent = error.message;
   }
@@ -111,8 +188,9 @@ function providerTemplate(kind = "image") {
   const id = `${kind}-${Date.now()}`;
   const defaults = {
     llm: { label: "新 LLM", model: "gpt-5-mini", base_url: "https://api.openai.com/v1" },
+    vlm: { label: "新 VLM", model: "gpt-5-mini", base_url: "https://api.openai.com/v1" },
     image: { label: "新图片供应商", model: "doubao-seedream-5-0-260128", base_url: "https://ark.cn-beijing.volces.com/api/v3" },
-  }[kind];
+  }[kind] || { label: "新供应商", model: "", base_url: "" };
   return {
     id,
     label: defaults.label,
@@ -289,13 +367,63 @@ function renderCharacters() {
   if (!state.characters.length) {
     el.charactersBox.textContent = "";
     el.characterDiffBox.textContent = "";
+    el.characterEditorSelect.innerHTML = "";
+    el.identityPromptBox.value = "";
+    el.appearanceStatesBox.value = "";
+    el.negativeIdentityPromptBox.value = "";
     return;
   }
   el.charactersBox.textContent = state.characters.map((character) => {
     const refs = character.reference_images?.length ? `\n参考图：${character.reference_images.length} 张` : "\n参考图：无";
-    return `${character.name}\n${character.role}${refs}\n${(character.fixed_traits || []).join(" / ")}`;
+    const bank = character.identity_prompt ? "\nPrompt Bank：已生成" : "\nPrompt Bank：未生成";
+    return `${character.name}\n${character.role}${refs}${bank}\n${(character.fixed_traits || []).join(" / ")}`;
   }).join("\n\n");
+  renderCharacterEditor();
   renderCharacterDiff();
+}
+
+function renderCharacterEditor() {
+  const currentName = state.characters[state.selectedCharacterIndex]?.name;
+  el.characterEditorSelect.innerHTML = state.characters.map((character, index) => (
+    `<option value="${index}">${escapeHtml(character.name)}</option>`
+  )).join("");
+  if (currentName) {
+    const nextIndex = state.characters.findIndex((character) => character.name === currentName);
+    state.selectedCharacterIndex = Math.max(0, nextIndex);
+  }
+  el.characterEditorSelect.value = String(state.selectedCharacterIndex);
+  loadCharacterEditor();
+}
+
+function loadCharacterEditor() {
+  const character = state.characters[state.selectedCharacterIndex];
+  if (!character) return;
+  el.identityPromptBox.value = character.identity_prompt || character.prompt_en || "";
+  el.appearanceStatesBox.value = JSON.stringify(character.appearance_states || [], null, 2);
+  el.negativeIdentityPromptBox.value = character.negative_identity_prompt || "";
+}
+
+function saveCharacterEditor() {
+  const character = state.characters[state.selectedCharacterIndex];
+  if (!character) return;
+  character.identity_prompt = el.identityPromptBox.value;
+  character.negative_identity_prompt = el.negativeIdentityPromptBox.value;
+  try {
+    character.appearance_states = JSON.parse(el.appearanceStatesBox.value || "[]");
+  } catch (error) {
+    el.health.textContent = `外貌状态计划 JSON 格式错误：${error.message}`;
+  }
+}
+
+function restoreSelectedCharacter() {
+  const current = state.characters[state.selectedCharacterIndex];
+  if (!current) return;
+  const original = state.originalCharacters.find((character) => character.name === current.name);
+  if (!original) return;
+  state.characters[state.selectedCharacterIndex] = clone(original);
+  loadCharacterEditor();
+  renderCharacters();
+  el.health.textContent = `${current.name} 已恢复到初始角色文本`;
 }
 
 function renderCharacterDiff() {
@@ -321,6 +449,8 @@ function renderCharacterDiff() {
 }
 
 function selectShot(index) {
+  saveSelectedPrompt();
+  saveCharacterEditor();
   state.selected = state.shots[index];
   el.promptBox.value = state.selected?.positive_prompt || "";
   el.qaBox.textContent = (state.selected?.qa_notes || []).join("\n");
@@ -328,6 +458,89 @@ function selectShot(index) {
   document.querySelectorAll(".shot").forEach((node, nodeIndex) => {
     node.classList.toggle("active", nodeIndex === index);
   });
+}
+
+function saveSelectedPrompt() {
+  if (!state.selected) return;
+  state.selected.positive_prompt = el.promptBox.value;
+}
+
+function restoreSelectedPrompt() {
+  if (!state.selected) return;
+  const original = state.originalShots.find((shot) => shot.id === state.selected.id);
+  if (!original) return;
+  state.selected.positive_prompt = original.positive_prompt || "";
+  el.promptBox.value = state.selected.positive_prompt;
+  el.health.textContent = `${state.selected.id} prompt 已恢复到初始文本`;
+  saveWorkspaceDraft();
+}
+
+function rebuildSelectedPrompt() {
+  if (!state.selected) return;
+  saveCharacterEditor();
+  state.selected.positive_prompt = buildPromptFromShot(state.selected);
+  el.promptBox.value = state.selected.positive_prompt;
+  el.health.textContent = `${state.selected.id} prompt 已根据角色库重建`;
+  saveWorkspaceDraft();
+}
+
+function rebuildAllPrompts() {
+  saveSelectedPrompt();
+  saveCharacterEditor();
+  for (const shot of state.shots) {
+    shot.positive_prompt = buildPromptFromShot(shot);
+  }
+  if (state.selected) {
+    el.promptBox.value = state.selected.positive_prompt;
+  }
+  el.health.textContent = "全部 prompt 已根据角色库重建";
+  saveWorkspaceDraft();
+}
+
+function buildPromptFromShot(shot) {
+  const characters = (shot.characters || []).map((name, index) => {
+    const character = state.characters.find((item) => item.name === name);
+    if (!character) return `Character ${index + 1}: ${name}`;
+    return [
+      `Character ${index + 1}: ${character.identity_prompt || character.prompt_en || character.name}`,
+      `Current visible state: ${currentAppearanceState(character, shot)}`,
+    ].join("\n");
+  }).join("\n");
+  const negativeConstraints = (shot.characters || []).map((name) => {
+    const character = state.characters.find((item) => item.name === name);
+    return character?.negative_identity_prompt || "";
+  }).filter(Boolean).join(", ");
+  return [
+    "high quality anime light novel illustration, cinematic composition",
+    "",
+    "Scene:",
+    `${shot.location || "unspecified location"}, ${shot.time || "unspecified time"}. ${shot.visual_goal || shot.source_excerpt || ""}`,
+    `Mood: ${(shot.mood || []).join(", ") || "calm"}.`,
+    "",
+    "Composition:",
+    `${shot.camera || "cinematic shot"}. ${shot.composition || "clear readable composition"}.`,
+    `${shot.characters?.length || 0 ? `exactly ${shot.characters.length} visible characters, no extra people.` : "no extra people unless explicitly required by the story."}`,
+    "",
+    "Characters:",
+    characters,
+    "",
+    "Relationships:",
+    "Keep each named character individually recognizable. Preserve identity, silhouette, hairstyle, outfit logic, props, and emotional function.",
+    "",
+    "Style:",
+    "soft volumetric light, gentle rim light, natural skin tones, restrained teal and amber accents, clean detailed linework, subtle painterly texture, quiet emotional storytelling, detailed character design.",
+    "",
+    "Negative constraints:",
+    ["extra people, duplicate character, same face between different characters, merged characters, wrong character identity", negativeConstraints].filter(Boolean).join(", "),
+  ].join("\n");
+}
+
+function currentAppearanceState(character, shot) {
+  const states = Array.isArray(character.appearance_states) ? character.appearance_states : [];
+  const matched = states.find((stateItem) => Array.isArray(stateItem.scene_ids) && stateItem.scene_ids.includes(shot.scene_id));
+  const fallback = matched || states[0];
+  if (!fallback) return "default visible state from character profile";
+  return fallback.prompt || fallback.label || "default visible state from character profile";
 }
 
 function renderShots(preferredId = null) {
@@ -363,6 +576,7 @@ async function previewCharacters() {
     body: JSON.stringify({ text, use_llm: el.useLlm.checked }),
   });
   state.characters = data.characters || [];
+  state.originalCharacters = clone(state.characters);
   state.differenceAnalysis = data.difference_analysis || null;
   renderCharacters();
   rebuildReferenceBindings();
@@ -476,10 +690,13 @@ async function runPipeline() {
     state.runId = data.run_id;
     state.shots = data.shots;
     state.characters = data.characters;
+    state.originalShots = clone(state.shots);
+    state.originalCharacters = clone(state.characters);
     state.differenceAnalysis = data.difference_analysis || null;
     el.runId.textContent = `run ${state.runId}`;
     renderCharacters();
     renderShots(state.selected?.id);
+    saveWorkspaceDraft();
     el.health.textContent = `已生成 ${state.shots.length} 张分镜`;
   } catch (error) {
     el.health.textContent = error.message;
@@ -490,6 +707,8 @@ async function runPipeline() {
 
 async function generateImage() {
   if (!state.selected || !state.runId) return;
+  saveSelectedPrompt();
+  saveCharacterEditor();
   setBusy(el.imageBtn, true);
   try {
     const data = await api("/api/images", {
@@ -506,6 +725,7 @@ async function generateImage() {
     state.selected.image_path = data.image_path;
     el.preview.innerHTML = `<img alt="${state.selected.id}" src="${data.image_url}" />`;
     renderShots(state.selected?.id);
+    saveWorkspaceDraft();
     el.health.textContent = "图片已生成";
   } catch (error) {
     el.health.textContent = error.message;
@@ -516,6 +736,8 @@ async function generateImage() {
 
 async function generateAllImages() {
   if (!state.shots.length || !state.runId) return;
+  saveSelectedPrompt();
+  saveCharacterEditor();
   setBusy(el.allImagesBtn, true);
   try {
     const results = await generateImagesSequential(state.shots, {
@@ -541,6 +763,8 @@ async function generateAllImages() {
 
 async function retryFailedImages() {
   if (!state.shots.length || !state.runId) return;
+  saveSelectedPrompt();
+  saveCharacterEditor();
   const failedShots = state.shots.filter((shot) => !shot.image_url && !shot.image_path);
   if (!failedShots.length) {
     el.health.textContent = "没有需要重试的失败分镜";
@@ -653,10 +877,13 @@ function applyImageResult(result) {
     el.preview.innerHTML = `<img alt="${result.shot_id}" src="${result.image_url}" />`;
   }
   renderShots(state.selected?.id);
+  saveWorkspaceDraft();
 }
 
 async function exportMarkdown() {
   if (!state.runId) return;
+  saveSelectedPrompt();
+  saveCharacterEditor();
   try {
     const data = await api(`/api/export/${state.runId}`);
     const response = await fetch(data.markdown_url);
@@ -716,8 +943,12 @@ function escapeHtml(value) {
   })[char]);
 }
 
+function clone(value) {
+  return JSON.parse(JSON.stringify(value ?? null));
+}
+
 function kindLabel(kind) {
-  return { llm: "LLM", image: "图片" }[kind] || kind;
+  return { llm: "LLM", image: "图片", vlm: "VLM" }[kind] || kind;
 }
 
 el.runBtn.addEventListener("click", runPipeline);
@@ -731,6 +962,9 @@ el.previewCharactersBtn.addEventListener("click", () => previewCharacters().catc
 el.configToggle.addEventListener("click", () => {
   el.configPanel.hidden = !el.configPanel.hidden;
 });
+el.restoreRunBtn.addEventListener("click", () => restoreLatestRun().catch((error) => {
+  el.health.textContent = `恢复失败：${error.message}`;
+}));
 el.logExportBtn.addEventListener("click", exportLogs);
 el.addProviderBtn.addEventListener("click", () => {
   syncProviderForm();
@@ -775,16 +1009,42 @@ el.refreshConfigBtn.addEventListener("click", async () => {
   await checkHealth();
 });
 el.testProviderBtn.addEventListener("click", testProvider);
+el.promptBox.addEventListener("input", () => {
+  saveSelectedPrompt();
+  scheduleWorkspaceDraftSave();
+});
+el.characterEditorSelect.addEventListener("change", () => {
+  saveCharacterEditor();
+  state.selectedCharacterIndex = Number(el.characterEditorSelect.value || 0);
+  loadCharacterEditor();
+});
+for (const node of [el.identityPromptBox, el.appearanceStatesBox, el.negativeIdentityPromptBox]) {
+  node.addEventListener("input", () => {
+    saveCharacterEditor();
+    saveWorkspaceDraft();
+  });
+}
+el.restorePromptBtn.addEventListener("click", restoreSelectedPrompt);
+el.rebuildPromptBtn.addEventListener("click", rebuildSelectedPrompt);
+el.restoreCharacterBtn.addEventListener("click", restoreSelectedCharacter);
+el.rebuildAllPromptsBtn.addEventListener("click", rebuildAllPrompts);
 el.imageBtn.addEventListener("click", generateImage);
 el.allImagesBtn.addEventListener("click", generateAllImages);
 el.retryFailedBtn.addEventListener("click", retryFailedImages);
 el.exportBtn.addEventListener("click", exportMarkdown);
 el.copyBtn.addEventListener("click", async () => {
+  saveSelectedPrompt();
   await navigator.clipboard.writeText(el.promptBox.value);
   el.health.textContent = "Prompt 已复制";
 });
 
+window.addEventListener("beforeunload", saveWorkspaceDraft);
+
 loadConfig().catch((error) => {
   el.health.textContent = error.message;
 });
-checkHealth();
+checkHealth().then(() => {
+  if (!restoreWorkspaceDraft()) {
+    restoreLatestRun().catch(() => {});
+  }
+});

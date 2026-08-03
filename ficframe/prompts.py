@@ -16,12 +16,32 @@ CAMERA_BY_TYPE = {
 }
 
 COMPOSITION_BY_TYPE = {
-    "双人情绪特写": "两人距离很近，表情和手部动作是画面中心",
-    "双人对话中景": "人物分居画面两侧，中间保留情绪张力",
-    "多人关系中景": "多名角色形成清晰的三角或层次构图，每个人都有独立轮廓、动作和视线方向",
-    "剧情动作瞬间": "动作发生在画面中央，装置警报或道具作为视觉焦点",
-    "环境氛围图": "环境占主要面积，人物较小但情绪清晰",
-    "单人氛围图": "角色位于三分线附近，背景服务于情绪",
+    "双人情绪特写": "close two-character framing; faces and hands are the emotional focus",
+    "双人对话中景": "two characters staged on opposite sides of the frame, leaving emotional tension in the space between them",
+    "多人关系中景": "clear triangular or layered group composition; every character has a readable silhouette, action, and gaze direction",
+    "剧情动作瞬间": "the key action happens at the center of the frame; the device, warning light, prop, or gesture is the visual focus",
+    "环境氛围图": "the environment occupies most of the frame while the character remains emotionally readable",
+    "单人氛围图": "the character is placed near a rule-of-thirds point, with the background supporting the emotion",
+}
+
+EN_LABELS = {
+    "实验室": "laboratory",
+    "走廊": "corridor",
+    "休息区": "rest area",
+    "观景台": "observation deck",
+    "宿舍门口": "dormitory doorway",
+    "未明确地点": "unspecified location",
+    "清晨": "early morning",
+    "傍晚": "dusk",
+    "下午": "afternoon",
+    "夜晚": "night",
+    "未明确时间": "unspecified time",
+    "温柔": "gentle",
+    "亲密": "intimate",
+    "不安": "uneasy",
+    "疲惫": "tired",
+    "希望": "hopeful",
+    "平静": "calm",
 }
 
 
@@ -31,11 +51,9 @@ def character_prompt(names: list[str], cards: list[CharacterCard]) -> str:
     for index, name in enumerate(names, start=1):
         card = by_name.get(name)
         if card:
-            prompt = f"Character {index}: {card.prompt_en}"
-            if card.role:
-                prompt += f"; role: {card.role}"
-            if card.fixed_traits:
-                prompt += f"; fixed traits: {'; '.join(card.fixed_traits)}"
+            prompt = f"Character {index}: {card.identity_prompt or card.prompt_en}"
+            if card.source_text:
+                prompt += f"; source profile notes: {compact(card.source_text, 420)}"
             prompts.append(prompt)
             if card.reference_images:
                 prompts.append(f"visual reference images for Character {index} {card.name}: {', '.join(card.reference_images)}")
@@ -79,8 +97,8 @@ def build_positive_prompt(
         style["medium"],
         "",
         "Scene:",
-        f"{scene.location}, {scene.time}. {compact(scene.summary, 220)}",
-        f"Mood: {', '.join(scene.mood)}.",
+        f"{en_label(scene.location)}, {en_label(scene.time)}. Story moment from source text: {compact(scene.summary, 260)}",
+        f"Mood: {', '.join(en_label(item) for item in scene.mood)}.",
         "",
         "Composition:",
         f"{CAMERA_BY_TYPE.get(scene.visual_type, 'cinematic shot')}. {COMPOSITION_BY_TYPE.get(scene.visual_type, 'clear readable composition')}.",
@@ -99,13 +117,17 @@ def build_positive_prompt(
         pieces.append("Continuity notes: " + " | ".join(notes))
     pieces.extend(
         [
-            "",
-            "Lighting and style:",
-            f"{style['lighting']}, {style['palette']}, {style['line']}.",
-            "quiet emotional storytelling, professional science fiction atmosphere, detailed character design",
+        "",
+        "Lighting and style:",
+        f"{style['lighting']}, {style['palette']}, {style['line']}.",
+            "quiet emotional storytelling, professional science fiction atmosphere, detailed character design, high quality anime light novel illustration",
         ]
     )
     return "\n".join(piece for piece in pieces if piece is not None)
+
+
+def en_label(value: str) -> str:
+    return EN_LABELS.get(value, value)
 
 
 def build_negative_prompt(style: dict | None = None) -> str:
@@ -127,4 +149,9 @@ def build_negative_prompt_for_scene(
     diff_rules = difference_rules_for_names(scene.characters, cards, difference_analysis)
     pieces = [build_negative_prompt(style)]
     pieces.extend(diff_rules["negative"])
+    by_name = {card.name: card for card in cards}
+    for name in scene.characters:
+        card = by_name.get(name)
+        if card and card.negative_identity_prompt:
+            pieces.append(card.negative_identity_prompt)
     return ", ".join(piece for piece in pieces if piece)

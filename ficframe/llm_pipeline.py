@@ -14,7 +14,8 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
     system = (
         "你是小说插画分镜与文生图提示词专家。你的任务是把已有 prompt 精修得更适合生图，"
         "重点保持角色一致性、剧情准确、相邻画面连续。"
-        "必须按“场景、构图、角色、关系、风格、负面约束”的结构输出。"
+        "positive_prompt 和 negative_prompt 必须主要使用英文，只有角色名、地名、作品内专有名词可以保留原文或中英并列。"
+        "必须按 Scene, Composition, Characters, Relationships, Style, Negative constraints 的结构输出。"
         "如果画面有多名角色，必须明确 exactly N visible characters，并为每个角色写清楚独立身份、外观差异、动作和情绪功能。"
         "如果存在双胞胎、姐妹、相似角色，必须强化“相似但可区分”：不同发型、眼神、姿态、道具、气质，禁止同脸和角色复制。"
         "只根据传入的人设文本和当前分镜写，不要引入外部作品设定或默认角色印象。"
@@ -49,8 +50,8 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
                 for card in cards
             ],
             "required_schema": {
-                "positive_prompt": "string",
-                "negative_prompt": "string，必须包含 extra people、duplicate character、same face between different characters、merged characters、wrong character identity 等身份错误约束",
+                "positive_prompt": "English string, structured with Scene, Composition, Characters, Relationships, Style",
+                "negative_prompt": "English string, must include extra people, duplicate character, same face between different characters, merged characters, wrong character identity",
                 "visual_goal": "string",
                 "qa_notes": ["string"],
             },
@@ -64,15 +65,157 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
         shot.qa_notes.append(f"LLM 增强失败，已保留本地 prompt：{exc}")
         return shot
 
-    shot.positive_prompt = data.get("positive_prompt") or shot.positive_prompt
-    shot.negative_prompt = data.get("negative_prompt") or shot.negative_prompt
+    positive_prompt = data.get("positive_prompt") or shot.positive_prompt
+    negative_prompt = data.get("negative_prompt") or shot.negative_prompt
+    if not is_english_structured_prompt(positive_prompt):
+        repaired = repair_prompt_with_llm(shot, cards, provider, positive_prompt, negative_prompt)
+        if repaired:
+            positive_prompt = repaired.get("positive_prompt") or positive_prompt
+            negative_prompt = repaired.get("negative_prompt") or negative_prompt
+            shot.qa_notes.append("LLM prompt 已二次统一为英文结构化格式。")
+        else:
+            shot.qa_notes.append("LLM 返回了可解析 JSON，但 prompt 未完全符合英文结构化格式，已保留返回内容。")
+
+    shot.positive_prompt = positive_prompt
+    shot.negative_prompt = negative_prompt
     shot.visual_goal = data.get("visual_goal") or shot.visual_goal
     shot.qa_notes.extend(data.get("qa_notes") or [])
     return shot
 
 
+def enhance_character_cards_with_llm(cards: list[CharacterCard], provider: OpenAICompatibleProvider) -> list[CharacterCard]:
+    system = (
+        "You are a character profile extraction assistant for image generation. "
+        "Use only the supplied character profile text. Extract stable identity, appearance, personality, fixed traits, "
+        "variable visible states, relationships, and English prompt fragments. Do not add outside canon. "
+        "Return JSON only."
+    )
+    user = json.dumps(
+        {
+            "characters": [
+                {
+                    "name": card.name,
+                    "aliases": card.aliases,
+                    "role": card.role,
+                    "source_text": compact(card.source_text, 2600),
+                    "local_visual_traits": card.visual_traits,
+                    "local_personality_traits": card.personality_traits,
+                    "local_fixed_traits": card.fixed_traits,
+                    "local_variable_states": card.variable_states,
+                    "local_relationships": card.relationships,
+                }
+                for card in cards
+            ],
+            "required_schema": {
+                "characters": [
+                    {
+                        "name": "string",
+                        "aliases": ["string"],
+                        "role": "string",
+                        "visual_traits": ["string"],
+                        "personality_traits": ["string"],
+                        "fixed_traits": ["string"],
+                        "variable_states": {"outfit": "string", "emotion": "string", "props": "string"},
+                        "relationships": {"name or relation": "description"},
+                        "prompt_en": "English image-generation character description",
+                    }
+                ]
+            },
+        },
+        ensure_ascii=False,
+    )
+    try:
+        data = json.loads(provider.text(system, user))
+    except (ProviderError, json.JSONDecodeError, TypeError):
+        return cards
+    by_name = {card.name: card for card in cards}
+    for item in data.get("characters", []):
+        if not isinstance(item, dict):
+            continue
+        card = by_name.get(str(item.get("name") or ""))
+        if not card:
+            continue
+        if isinstance(item.get("aliases"), list):
+            card.aliases = [str(value) for value in item["aliases"] if str(value).strip()]
+        for field in ["role", "prompt_en"]:
+            value = item.get(field)
+            if isinstance(value, str) and value.strip():
+                setattr(card, field, value.strip())
+        for field in ["visual_traits", "personality_traits", "fixed_traits"]:
+            value = item.get(field)
+            if isinstance(value, list):
+                setattr(card, field, [str(part) for part in value if str(part).strip()])
+        for field in ["variable_states", "relationships"]:
+            value = item.get(field)
+            if isinstance(value, dict):
+                setattr(card, field, {str(key): str(val) for key, val in value.items() if str(val).strip()})
+    return cards
+
+
+def repair_prompt_with_llm(
+    shot: Shot,
+    cards: list[CharacterCard],
+    provider: OpenAICompatibleProvider,
+    positive_prompt: str,
+    negative_prompt: str,
+) -> dict | None:
+    system = (
+        "Rewrite this image-generation prompt into a consistent English prompt. "
+        "Keep all story facts and character identities. Use exactly these sections: "
+        "Scene, Composition, Characters, Relationships, Style. "
+        "Use English for all descriptive text; character names and proper nouns may remain unchanged. "
+        "Return JSON only."
+    )
+    user = json.dumps(
+        {
+            "shot": {
+                "id": shot.id,
+                "excerpt": shot.source_excerpt,
+                "characters": shot.characters,
+                "positive_prompt": positive_prompt,
+                "negative_prompt": negative_prompt,
+            },
+            "characters": [
+                {
+                    "name": card.name,
+                    "role": card.role,
+                    "source_text": compact(card.source_text, 1000),
+                    "prompt_en": card.prompt_en,
+                }
+                for card in cards
+            ],
+            "required_schema": {
+                "positive_prompt": "English string with Scene, Composition, Characters, Relationships, Style sections",
+                "negative_prompt": "English negative prompt string",
+            },
+        },
+        ensure_ascii=False,
+    )
+    try:
+        data = json.loads(provider.text(system, user))
+    except (ProviderError, json.JSONDecodeError, TypeError):
+        return None
+    if is_english_structured_prompt(str(data.get("positive_prompt") or "")):
+        return data
+    return None
+
+
+def is_english_structured_prompt(prompt: str) -> bool:
+    text = prompt or ""
+    required_sections = ["Scene", "Composition", "Characters"]
+    if not all(section in text for section in required_sections):
+        return False
+    letters = sum(1 for char in text if char.isascii() and char.isalpha())
+    cjk = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
+    return letters >= max(80, cjk * 3)
+
+
 def summarize_scene_with_llm(scene: Scene, provider: OpenAICompatibleProvider) -> Scene:
-    system = "你是小说章节分析工具。提取这个场景的可视化摘要、地点、时间、情绪和镜头类型。" + JSON_RULE
+    system = (
+        "你是小说章节分析工具。提取这个场景的可视化摘要、地点、时间、情绪和镜头类型。"
+        "summary、location、time、mood 请优先输出英文，角色名和专有名词可以保留原文。"
+        + JSON_RULE
+    )
     user = json.dumps(
         {
             "scene_id": scene.id,
@@ -82,7 +225,7 @@ def summarize_scene_with_llm(scene: Scene, provider: OpenAICompatibleProvider) -
                 "location": "string",
                 "time": "string",
                 "mood": ["string"],
-                "visual_type": "双人情绪特写 | 双人对话中景 | 剧情动作瞬间 | 环境氛围图 | 单人氛围图",
+                "visual_type": "双人情绪特写 | 双人对话中景 | 多人关系中景 | 剧情动作瞬间 | 环境氛围图 | 单人氛围图",
             },
         },
         ensure_ascii=False,
@@ -98,3 +241,69 @@ def summarize_scene_with_llm(scene: Scene, provider: OpenAICompatibleProvider) -
         scene.mood = [str(item) for item in data["mood"]]
     scene.visual_type = data.get("visual_type") or scene.visual_type
     return scene
+
+
+def refine_scenes_with_llm(scenes: list[Scene], cards: list[CharacterCard], provider: OpenAICompatibleProvider) -> list[Scene]:
+    by_id = {scene.id: scene for scene in scenes}
+    system = (
+        "You are a story structure analyzer for illustrated fiction. "
+        "Given rule-based scene chunks, improve each scene's visual summary, character list, location, time, mood, "
+        "visual type, and visual priority. Preserve the original scene ids and do not invent new scene ids. "
+        "Return JSON only."
+    )
+    user = json.dumps(
+        {
+            "characters": [{"name": card.name, "aliases": card.aliases, "role": card.role} for card in cards],
+            "scenes": [
+                {
+                    "id": scene.id,
+                    "chapter": scene.chapter,
+                    "index": scene.index,
+                    "text": compact(scene.text, 1200),
+                    "local_characters": scene.characters,
+                }
+                for scene in scenes
+            ],
+            "required_schema": {
+                "scenes": [
+                    {
+                        "id": "existing scene id",
+                        "summary": "English visual summary",
+                        "characters": ["names from provided character list"],
+                        "location": "English location",
+                        "time": "English time",
+                        "mood": ["English mood tags"],
+                        "visual_type": "双人情绪特写 | 双人对话中景 | 多人关系中景 | 剧情动作瞬间 | 环境氛围图 | 单人氛围图",
+                        "visual_priority": "1-5 integer",
+                    }
+                ]
+            },
+        },
+        ensure_ascii=False,
+    )
+    try:
+        data = json.loads(provider.text(system, user))
+    except (ProviderError, json.JSONDecodeError, TypeError):
+        return scenes
+    valid_names = {card.name for card in cards}
+    for item in data.get("scenes", []):
+        if not isinstance(item, dict):
+            continue
+        scene = by_id.get(str(item.get("id") or ""))
+        if not scene:
+            continue
+        scene.summary = str(item.get("summary") or scene.summary)
+        scene.location = str(item.get("location") or scene.location)
+        scene.time = str(item.get("time") or scene.time)
+        if isinstance(item.get("mood"), list):
+            scene.mood = [str(value) for value in item["mood"] if str(value).strip()]
+        if isinstance(item.get("characters"), list):
+            names = [str(value) for value in item["characters"] if str(value) in valid_names]
+            if names:
+                scene.characters = names
+        scene.visual_type = str(item.get("visual_type") or scene.visual_type)
+        try:
+            scene.visual_priority = max(1, min(5, int(item.get("visual_priority"))))
+        except (TypeError, ValueError):
+            pass
+    return scenes

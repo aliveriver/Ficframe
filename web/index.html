@@ -15,6 +15,7 @@
         </div>
         <div class="top-actions">
           <button id="configToggle" type="button">API 管理</button>
+          <button id="restoreRunBtn" type="button">恢复最近</button>
           <button id="logExportBtn" type="button">导出日志</button>
           <button id="runBtn" class="primary" type="button">生成分镜</button>
         </div>
@@ -35,6 +36,7 @@
                 <span>用途</span>
                 <select id="providerKind">
                   <option value="llm">LLM</option>
+                  <option value="vlm">VLM</option>
                   <option value="image">图片</option>
                 </select>
               </label>
@@ -156,9 +158,36 @@
         <section class="panel detail">
           <div class="section-head">
             <h2>Prompt</h2>
-            <button id="copyBtn" type="button">复制</button>
+            <div class="head-actions">
+              <button id="restorePromptBtn" type="button">恢复</button>
+              <button id="rebuildPromptBtn" type="button">重建当前</button>
+              <button id="copyBtn" type="button">复制</button>
+            </div>
           </div>
           <textarea id="promptBox" spellcheck="false"></textarea>
+          <fieldset class="prompt-bank">
+            <legend>角色 Prompt Bank</legend>
+            <label>
+              <span>角色</span>
+              <select id="characterEditorSelect"></select>
+            </label>
+            <label>
+              <span>Identity prompt</span>
+              <textarea id="identityPromptBox" spellcheck="false"></textarea>
+            </label>
+            <label>
+              <span>外貌状态计划 JSON</span>
+              <textarea id="appearanceStatesBox" spellcheck="false"></textarea>
+            </label>
+            <label>
+              <span>Negative identity prompt</span>
+              <textarea id="negativeIdentityPromptBox" spellcheck="false"></textarea>
+            </label>
+            <div class="actions compact">
+              <button id="restoreCharacterBtn" type="button">恢复角色原文</button>
+              <button id="rebuildAllPromptsBtn" type="button">重建全部 Prompt</button>
+            </div>
+          </fieldset>
           <div class="actions">
             <button id="imageBtn" type="button">生成图片</button>
             <button id="allImagesBtn" type="button">生成全部</button>

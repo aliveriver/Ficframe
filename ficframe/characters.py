@@ -49,12 +49,12 @@ PERSONALITY_WORDS = [
     "锐利",
 ]
 
-ROLE_HINTS = ["身份", "职业", "职位", "阵营", "所属", "角色", "定位", "代号"]
-APPEARANCE_HINTS = ["外貌", "发型", "发色", "眼睛", "服装", "穿着", "体型", "身高", "标志"]
-PERSONALITY_HINTS = ["性格", "气质", "说话", "口吻", "习惯", "态度"]
-FIXED_HINTS = ["固定", "禁止变化", "不能变", "必须", "始终", "保持"]
-PROP_HINTS = ["道具", "武器", "装备", "工具", "随身", "拿着", "持有"]
-RELATION_HINTS = ["关系", "亲属", "朋友", "同事", "恋人", "姐姐", "妹妹", "哥哥", "弟弟", "双胞胎", "搭档"]
+ROLE_HINTS = ["身份", "职业", "职位", "阵营", "所属", "角色", "定位", "代号", "role", "job", "class", "faction"]
+APPEARANCE_HINTS = ["外貌", "发型", "发色", "眼睛", "服装", "穿着", "体型", "身高", "标志", "appearance", "visual", "outfit", "clothing"]
+PERSONALITY_HINTS = ["性格", "气质", "说话", "口吻", "习惯", "态度", "personality", "temperament", "manner"]
+FIXED_HINTS = ["固定", "禁止变化", "不能变", "必须", "始终", "保持", "fixed", "must", "always", "never change"]
+PROP_HINTS = ["道具", "武器", "装备", "工具", "随身", "拿着", "持有", "props", "weapon", "equipment", "tool"]
+RELATION_HINTS = ["关系", "亲属", "朋友", "同事", "恋人", "姐姐", "妹妹", "哥哥", "弟弟", "双胞胎", "搭档", "relationship", "sibling", "twin", "partner"]
 
 
 def infer_primary_name(text: str) -> str:
@@ -162,6 +162,8 @@ def extract_role(lines: list[str], name: str) -> str:
     if role_parts:
         return " / ".join(unique_keep_order(role_parts)[:4])
     for line in lines[:3]:
+        if line.lstrip().startswith("#"):
+            continue
         if name in line and len(line) <= 160:
             return compact(line.replace(name, "").strip(" ，,:：-"), 80)
     return f"{name} 的角色卡"
@@ -233,13 +235,14 @@ def build_prompt_en(
     variable_states: dict[str, str],
 ) -> str:
     parts = [
-        name,
+        f"{name}, named fictional character",
         f"role: {role}" if role else "",
         "visual traits: " + ", ".join(visual_traits[:8]) if visual_traits else "",
         "personality: " + ", ".join(personality_traits[:6]) if personality_traits else "",
         "fixed design: " + ", ".join(fixed_traits[:5]) if fixed_traits else "",
         "state details: " + "; ".join(variable_states.values()) if variable_states else "",
-        "consistent individual character design",
+        "use the source profile notes as semantic reference",
+        "consistent individual character design, distinct from other named characters",
     ]
     return "; ".join(part for part in parts if part)
 

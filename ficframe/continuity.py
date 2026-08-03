@@ -10,6 +10,8 @@ def initial_state(cards: list[CharacterCard], style: dict | None = None) -> Cont
         characters[card.name] = {
             "fixed_traits": card.fixed_traits,
             "reference_images": card.reference_images,
+            "identity_prompt": card.identity_prompt,
+            "appearance_states": card.appearance_states,
             "current_outfit": card.variable_states.get("outfit", "未指定"),
             "current_emotion": card.variable_states.get("emotion", "未指定"),
             "current_props": card.variable_states.get("props", "未指定"),
@@ -26,6 +28,8 @@ def notes_for_scene(scene: Scene, state: ContinuityState) -> list[str]:
         if name in state.characters:
             data = state.characters[name]
             notes.append(f"{name}：保持 {', '.join(data.get('fixed_traits', []))}")
+            if data.get("identity_prompt"):
+                notes.append(f"{name} reusable identity prompt: {data.get('identity_prompt')}")
             notes.append(f"{name} 当前服装/道具不得无故脱离：{data.get('current_outfit')}；{data.get('current_props')}")
     if state.scenes:
         previous = state.scenes[-1]

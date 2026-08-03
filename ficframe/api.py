@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Annotated, Any
@@ -16,10 +17,11 @@ from .character_diff import analyze_character_differences
 from .config_store import public_config, public_provider_config, read_provider_config, write_env_file, write_provider_config
 from .continuity import initial_state
 from .io import read_text, write_json, write_text
-from .llm_pipeline import polish_shot_prompt, summarize_scene_with_llm
+from .llm_pipeline import enhance_character_cards_with_llm, polish_shot_prompt, refine_scenes_with_llm
 from .logging_utils import build_log_bundle, get_logger, redact, setup_logging
 from .models import Shot, to_dict
 from .providers import OpenAICompatibleProvider, ProviderError, build_url, effective_image_provider
+from .prompt_bank import analyze_reference_visuals, build_character_prompt_bank
 from .qa import annotate_shots
 from .render import render_illustrated_novel, render_prompts, render_storyboard
 from .segmenter import segment_novel
@@ -35,9 +37,20 @@ RUNS.mkdir(parents=True, exist_ok=True)
 LOGS = setup_logging(ROOT)
 logger = get_logger("api")
 
+RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+
 app = FastAPI(title="FicFrame API")
 app.mount("/assets", StaticFiles(directory=WEB), name="assets")
 app.mount("/runs", StaticFiles(directory=RUNS), name="runs")
+
+
+def run_directory(run_id: str) -> Path:
+    if not RUN_ID_PATTERN.fullmatch(run_id):
+        raise HTTPException(status_code=400, detail="非法 run_id")
+    path = (RUNS / run_id).resolve()
+    if RUNS.resolve() not in path.parents and path != RUNS.resolve():
+        raise HTTPException(status_code=400, detail="非法 run_id")
+    return path
 
 
 @app.middleware("http")
@@ -101,14 +114,17 @@ def health() -> dict[str, Any]:
         "keys": {
             "llm": bool(config.llm.api_key),
             "image": bool(config.image.api_key),
+            "vlm": bool(config.vlm.api_key),
         },
         "base_urls": {
             "llm": config.llm.base_url,
             "image": config.image.base_url,
+            "vlm": config.vlm.base_url,
         },
         "models": {
             "llm": config.llm.model,
             "image": config.image.model,
+            "vlm": config.vlm.model,
         },
         "providers": {
             "image": effective_image_provider(config.image),
@@ -128,6 +144,40 @@ def get_logs() -> dict[str, Any]:
             }
         )
     return {"files": files}
+
+
+@app.get("/api/runs")
+def list_runs() -> dict[str, Any]:
+    runs = []
+    for path in sorted(RUNS.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True):
+        if not path.is_dir():
+            continue
+        pipeline_path = path / "pipeline.json"
+        if not pipeline_path.exists():
+            continue
+        try:
+            payload = json.loads(read_text(pipeline_path))
+        except (json.JSONDecodeError, OSError):
+            continue
+        runs.append(
+            {
+                "run_id": path.name,
+                "modified_at": int(pipeline_path.stat().st_mtime),
+                "shot_count": len(payload.get("shots", [])),
+                "character_count": len(payload.get("characters", [])),
+            }
+        )
+    return {"runs": runs[:20]}
+
+
+@app.get("/api/runs/{run_id}")
+def get_run(run_id: str) -> dict[str, Any]:
+    pipeline_path = run_directory(run_id) / "pipeline.json"
+    if not pipeline_path.exists():
+        raise HTTPException(status_code=404, detail="未找到该 run")
+    payload = json.loads(read_text(pipeline_path))
+    payload.setdefault("run_id", run_id)
+    return payload
 
 
 @app.post("/api/logs/export")
@@ -230,6 +280,9 @@ def test_provider(request: ProviderTestRequest) -> dict[str, Any]:
 def preview_characters(request: CharacterPreviewRequest) -> dict[str, Any]:
     cards = build_character_cards(request.text)
     provider = OpenAICompatibleProvider() if request.use_llm else None
+    if provider:
+        cards = enhance_character_cards_with_llm(cards, provider)
+        build_character_prompt_bank(cards, [], provider)
     difference_analysis = analyze_character_differences(cards, provider)
     logger.info(
         "characters preview character_count=%s text_length=%s difference_pair_count=%s",
@@ -268,7 +321,8 @@ async def pipeline(
 
     cards = build_character_cards(character_text)
     provider = OpenAICompatibleProvider() if use_llm else None
-    difference_analysis = analyze_character_differences(cards, provider)
+    if provider:
+        cards = enhance_character_cards_with_llm(cards, provider)
     bindings = parse_reference_bindings(reference_bindings)
     if reference_images:
         refs_dir = run_dir / "references"
@@ -281,9 +335,14 @@ async def pipeline(
             binding = bindings.get(filename, {})
             bind_reference_image(cards, filename, url, binding)
             logger.info("reference image saved run_id=%s filename=%s binding=%s", run_id, filename, redact(binding))
+    vlm_provider = OpenAICompatibleProvider()
+    if reference_images and vlm_provider.config.vlm.api_key:
+        analyze_reference_visuals(cards, run_dir, vlm_provider)
     scenes = segment_novel(novel_text, cards)
     if provider:
-        scenes = [summarize_scene_with_llm(scene, provider) for scene in scenes]
+        scenes = refine_scenes_with_llm(scenes, cards, provider)
+    build_character_prompt_bank(cards, scenes, provider)
+    difference_analysis = analyze_character_differences(cards, provider)
     state = initial_state(cards)
     shots, state = build_storyboard(scenes, cards, state, max_shots=max_shots, difference_analysis=difference_analysis)
     annotate_shots(shots, cards)
@@ -310,7 +369,8 @@ async def pipeline(
 def generate_image(request: ImageRequest) -> dict[str, Any]:
     shot = Shot(**request.shot)
     provider = OpenAICompatibleProvider()
-    target = RUNS / request.run_id / "images" / f"{shot.id}.png"
+    run_dir = run_directory(request.run_id)
+    target = run_dir / "images" / f"{shot.id}.png"
     if target.exists() and not request.overwrite:
         image_url = clean_image_url(request.run_id, shot.id)
         update_shot_image(request.run_id, shot.id, str(target), image_url)
@@ -319,7 +379,7 @@ def generate_image(request: ImageRequest) -> dict[str, Any]:
     try:
         references = reference_paths_for_shot(request.run_id, shot)
         logger.info("image generation started run_id=%s shot_id=%s size=%s reference_count=%s", request.run_id, shot.id, request.size, len(references))
-        provider.image(shot.positive_prompt, target, size=request.size, reference_images=references)
+        provider.image(image_prompt_for_shot(shot), target, size=request.size, reference_images=references)
     except ProviderError as exc:
         logger.warning("image generation failed run_id=%s shot_id=%s error=%s", request.run_id, shot.id, exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -332,6 +392,7 @@ def generate_image(request: ImageRequest) -> dict[str, Any]:
 @app.post("/api/images/batch")
 def generate_all_images(request: dict[str, Any]) -> dict[str, Any]:
     run_id = str(request.get("run_id", "manual"))
+    run_dir = run_directory(run_id)
     size = str(request.get("size", "1024x1024"))
     retry_count = max(0, int(request.get("retry_count", 0)))
     skip_existing = bool(request.get("skip_existing", True))
@@ -340,7 +401,7 @@ def generate_all_images(request: dict[str, Any]) -> dict[str, Any]:
     provider = OpenAICompatibleProvider()
     logger.info("batch image generation started run_id=%s shot_count=%s size=%s retry_count=%s skip_existing=%s", run_id, len(shots), size, retry_count, skip_existing)
     for shot in shots:
-        target = RUNS / run_id / "images" / f"{shot.id}.png"
+        target = run_dir / "images" / f"{shot.id}.png"
         if skip_existing and target.exists():
             image_url = clean_image_url(run_id, shot.id)
             update_shot_image(run_id, shot.id, str(target), image_url)
@@ -350,7 +411,7 @@ def generate_all_images(request: dict[str, Any]) -> dict[str, Any]:
         result = generate_batch_image_item(provider, run_id, shot, target, size, retry_count)
         results.append(result)
     logger.info("batch image generation completed run_id=%s ok_count=%s total=%s", run_id, len([item for item in results if item["ok"]]), len(results))
-    write_json(RUNS / run_id / "image_results.json", {"run_id": run_id, "size": size, "retry_count": retry_count, "skip_existing": skip_existing, "results": results})
+    write_json(run_dir / "image_results.json", {"run_id": run_id, "size": size, "retry_count": retry_count, "skip_existing": skip_existing, "results": results})
     return {"results": results}
 
 
@@ -366,7 +427,7 @@ def generate_batch_image_item(
     last_error = ""
     for attempt in range(retry_count + 1):
         try:
-            provider.image(shot.positive_prompt, target, size=size, reference_images=references)
+            provider.image(image_prompt_for_shot(shot), target, size=size, reference_images=references)
             image_url = clean_image_url(run_id, shot.id)
             update_shot_image(run_id, shot.id, str(target), image_url)
             logger.info("batch image item completed run_id=%s shot_id=%s reference_count=%s attempt=%s", run_id, shot.id, len(references), attempt + 1)
@@ -396,8 +457,9 @@ def export_markdown_info(run_id: str) -> dict[str, Any]:
 
 
 def build_exported_novel(run_id: str) -> dict[str, str]:
-    pipeline_path = RUNS / run_id / "pipeline.json"
-    novel_path = RUNS / run_id / "novel.md"
+    run_dir = run_directory(run_id)
+    pipeline_path = run_dir / "pipeline.json"
+    novel_path = run_dir / "novel.md"
     if not pipeline_path.exists():
         logger.warning("export failed run_id=%s reason=missing_pipeline", run_id)
         raise HTTPException(status_code=404, detail="run 不存在")
@@ -412,7 +474,7 @@ def build_exported_novel(run_id: str) -> dict[str, str]:
         shots,
         run_id,
     )
-    markdown_path = RUNS / run_id / "illustrated_novel.md"
+    markdown_path = run_dir / "illustrated_novel.md"
     write_text(markdown_path, markdown)
     logger.info("export completed run_id=%s markdown_path=%s", run_id, markdown_path)
     return {
@@ -423,7 +485,7 @@ def build_exported_novel(run_id: str) -> dict[str, str]:
 
 
 def update_shot_image(run_id: str, shot_id: str, image_path: str, image_url: str) -> None:
-    pipeline_path = RUNS / run_id / "pipeline.json"
+    pipeline_path = run_directory(run_id) / "pipeline.json"
     if not pipeline_path.exists():
         return
     payload = json.loads(read_text(pipeline_path))
@@ -432,6 +494,12 @@ def update_shot_image(run_id: str, shot_id: str, image_path: str, image_url: str
             shot["image_path"] = image_path
             shot["image_url"] = image_url
     write_json(pipeline_path, payload)
+
+
+def image_prompt_for_shot(shot: Shot) -> str:
+    if not shot.negative_prompt:
+        return shot.positive_prompt
+    return f"{shot.positive_prompt}\n\nNegative constraints:\n{shot.negative_prompt}"
 
 
 def clean_image_url(run_id: str, shot_id: str) -> str:
@@ -444,7 +512,8 @@ def versioned_image_url(run_id: str, shot_id: str, target: Path) -> str:
 
 
 def reference_paths_for_shot(run_id: str, shot: Shot) -> list[Path]:
-    pipeline_path = RUNS / run_id / "pipeline.json"
+    run_dir = run_directory(run_id)
+    pipeline_path = run_dir / "pipeline.json"
     if not pipeline_path.exists():
         return []
     payload = json.loads(read_text(pipeline_path))
@@ -456,8 +525,8 @@ def reference_paths_for_shot(run_id: str, shot: Shot) -> list[Path]:
             url = str(reference).split(" (", 1)[0]
             prefix = f"/runs/{run_id}/"
             if url.startswith(prefix):
-                local_path = RUNS / run_id / url.removeprefix(prefix)
-                if local_path.exists():
+                local_path = (run_dir / url.removeprefix(prefix)).resolve()
+                if run_dir.resolve() in local_path.parents and local_path.exists():
                     paths.append(local_path)
     return list(dict.fromkeys(paths))
 

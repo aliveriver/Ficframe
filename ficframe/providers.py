@@ -35,6 +35,7 @@ class EndpointConfig:
 class ProviderConfig:
     llm: EndpointConfig
     image: EndpointConfig
+    vlm: EndpointConfig
     timeout: float = 300.0
     image_timeout: float = 900.0
 
@@ -54,6 +55,12 @@ class ProviderConfig:
                 base_url=os.getenv("FICFRAME_IMAGE_BASE_URL", legacy_base_url).rstrip("/"),
                 model=os.getenv("FICFRAME_IMAGE_MODEL", "gpt-image-1"),
                 provider=os.getenv("FICFRAME_IMAGE_PROVIDER", "openai").lower(),
+            ),
+            vlm=EndpointConfig(
+                api_key=os.getenv("FICFRAME_VLM_API_KEY"),
+                base_url=os.getenv("FICFRAME_VLM_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
+                model=os.getenv("FICFRAME_VLM_MODEL", llm_model),
+                provider=os.getenv("FICFRAME_VLM_PROVIDER", "openai").lower(),
             ),
             timeout=env_float("FICFRAME_TIMEOUT", 300.0),
             image_timeout=env_float("FICFRAME_IMAGE_TIMEOUT", env_float("FICFRAME_TIMEOUT", 900.0)),
@@ -141,6 +148,21 @@ class OpenAICompatibleProvider:
             ],
         }
         data = self._post(endpoint, "llm", "responses", payload)
+        return extract_response_text(data)
+
+    def vision(self, system: str, prompt: str, image_paths: list[Path], model: str | None = None) -> str:
+        endpoint = self.config.vlm
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+        for path in image_paths:
+            content.append({"type": "input_image", "image_url": to_data_url(path)})
+        payload = {
+            "model": model or endpoint.model,
+            "input": [
+                {"role": "system", "content": [{"type": "input_text", "text": system}]},
+                {"role": "user", "content": content},
+            ],
+        }
+        data = self._post(endpoint, "vlm", "responses", payload)
         return extract_response_text(data)
 
     def _timeout_for(self, label: str) -> float:

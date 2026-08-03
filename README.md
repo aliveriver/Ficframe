@@ -7,9 +7,11 @@ FicFrame 是一套本地运行的小说配图工具集，目标是把二创小�
 - 解析小说章节，把正文切分成适合出图的剧情段落
 - 从人物 Markdown 中抽取角色卡、人设特征和参考图信息
 - 分析相似角色的混淆风险，自动生成角色差异约束
+- 使用 VLM 提取参考图中的稳定视觉事实
+- 生成可复用的角色 identity prompt 和外貌状态计划
 - 按章节均衡生成分镜、图片 prompt 和连续性提示
 - 在 Web 中绑定“角色 ↔ 参考图”，一个角色可以绑定多张图
-- 管理多套 LLM / 图片 API 供应商
+- 管理多套 LLM / VLM / 图片 API 供应商
 - 调用图片模型生成单张或批量图片
 - 导出“已经插入配图的完整小说 Markdown”
 - 从 Web 一键导出脱敏日志包，方便反馈 bug
@@ -116,7 +118,7 @@ default = true
 ## Web 使用流程
 
 1. 打开 Web 页面。
-2. 点击顶部“API 管理”，配置 LLM 和图片供应商。
+2. 点击顶部“API 管理”，配置 LLM、VLM 和图片供应商。
 3. 上传小说 Markdown 或 TXT。
 4. 上传人物 Markdown 或 TXT。
 5. 上传人设参考图。
@@ -150,13 +152,13 @@ outputs/web-runs/<run_id>/images/
 
 ## API 供应商配置
 
-FicFrame 把 LLM 和图片模型分开配置。它们可以使用完全不同的请求地址、API key 和模型。
+FicFrame 把 LLM、VLM 和图片模型分开配置。它们可以使用完全不同的请求地址、API key 和模型。
 
 Web 中的“API 管理”支持：
 
 - 添加多个供应商
 - 删除供应商
-- 切换当前使用的 LLM / 图片供应商
+- 切换当前使用的 LLM / VLM / 图片供应商
 - 为每个供应商维护多个“模型昵称”
 - 测试供应商是否可达
 - 为图片供应商设置 steps、guidance、batch、watermark 等参数
@@ -182,6 +184,11 @@ FICFRAME_LLM_MODEL=gpt-5-mini
 FICFRAME_TIMEOUT=300
 FICFRAME_IMAGE_TIMEOUT=900
 
+FICFRAME_VLM_API_KEY=sk-your-vlm-key
+FICFRAME_VLM_BASE_URL=https://api.openai.com/v1
+FICFRAME_VLM_PROVIDER=openai
+FICFRAME_VLM_MODEL=gpt-5-mini
+
 FICFRAME_IMAGE_API_KEY=sk-your-image-key
 FICFRAME_IMAGE_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
 FICFRAME_IMAGE_PROVIDER=ark
@@ -189,7 +196,7 @@ FICFRAME_IMAGE_MODEL=doubao-seedream-5-0-260128
 
 ```
 
-没有配置 API key 时，Web 仍然可以生成本地分镜和 prompt；LLM 增强和生图会分别提示缺少对应 key。
+没有配置 API key 时，Web 仍然可以生成本地分镜和 prompt；LLM 增强、VLM 参考图分析和生图会分别使用各自配置。VLM 没有配置时会跳过参考图视觉提取，不影响普通流程。
 
 `FICFRAME_TIMEOUT` 是普通第三方 API 请求超时时间，单位为秒。`FICFRAME_IMAGE_TIMEOUT` 是图片生成和图片下载的超时时间，默认更长，因为图片模型经常需要排队。图片模型排队较久时可以调大，例如 `1200`。
 
@@ -224,6 +231,17 @@ Web 中也可以直接上传 `examples/minimal/novel.md` 和 `examples/minimal/c
 - “重试失败”：只对当前没有图片的分镜重新发起请求。
 - Web 的“生成全部”会逐张请求、逐张返回；每完成一张图片就会立刻刷新预览和分镜状态。
 - `image_results.json`：每次批量生成结果会写入 run 目录，方便查看失败原因。
+
+## 刷新恢复
+
+Web 会尽量避免因为误刷新丢失慢生成出来的分镜和 prompt：
+
+- 分镜、角色 Prompt Bank、用户手动修改过的 prompt、图片状态会自动保存到浏览器 `localStorage`。
+- 刷新页面后会优先恢复浏览器草稿，并回到刷新前选中的分镜。
+- 如果浏览器草稿不存在，顶部“恢复最近”会从 `outputs/web-runs/<run_id>/pipeline.json` 读取最近一次 Web 运行结果。
+- 每次 Web 生成分镜都会写入 `pipeline.json`，即使后续图片还没全部完成，也可以从该文件恢复分镜。
+
+注意：浏览器草稿只保存在当前浏览器和当前站点地址下。换浏览器、清理站点数据或更换端口后，可以使用“恢复最近”从后端输出目录恢复。
 
 ## 分镜规则
 
@@ -333,6 +351,20 @@ Web 上传参考图时，FicFrame 会根据文件名尝试自动匹配角色。�
 
 如果启用了 LLM 增强，角色差异分析器会优先让 LLM 阅读人设文档并提取语义差异；如果未配置 LLM 或调用失败，则回落到本地规则分析。
 
+## Prompt Bank 与 VLM
+
+生成分镜时，FicFrame 会为每个角色生成一份可复用的 Prompt Bank：
+
+- `identity_prompt`：角色固定身份、外貌、体型、核心气质和参考图视觉事实。
+- `negative_identity_prompt`：防止角色漂移、同脸、错服装、错身份的负面词。
+- `appearance_states`：外貌状态计划，例如默认服装、任务后疲惫、受伤、换装、携带特定道具等。
+
+如果配置了 VLM，并且上传了参考图，VLM 只负责提取参考图中的稳定视觉事实，例如发型、发色、眼睛、服装轮廓、标志物和不确定项。它不会直接决定最终 prompt，也不会替代人设文档。
+
+如果同时启用了 LLM 增强，LLM 会合并人设文档、VLM 提取的参考图视觉事实，以及小说场景中的外貌变化线索，判断角色外貌状态是否需要变化、变化几次，并生成更短、更稳定的生图 prompt。没有明确变化时，每张图会复用同一个 `identity_prompt`，只替换当前分镜的动作、表情、道具和场景。
+
+Web 右侧可以直接编辑当前角色的 `identity_prompt`、`appearance_states` 和 `negative_identity_prompt`。这些修改不会因为切换分镜丢失；也可以点击“恢复角色原文”回到本次生成后的初始文本。
+
 ## 命令行用法
 
 跑完整流水线：
@@ -388,6 +420,7 @@ uv run ficframe serve --host 127.0.0.1 --port 8787
 │  ├─ llm_pipeline.py         # LLM 增强分镜和 prompt
 │  ├─ models.py               # 数据模型
 │  ├─ pipeline.py             # 命令行完整流水线
+│  ├─ prompt_bank.py          # 角色 identity prompt 和外貌状态计划
 │  ├─ providers.py            # LLM / 图片 API 适配
 │  ├─ render.py               # Markdown 导出
 │  ├─ segmenter.py            # 小说切段

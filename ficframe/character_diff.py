@@ -10,40 +10,40 @@ from .text_utils import compact, unique_keep_order
 
 FEATURE_BUCKETS = {
     "身份": {
-        "工程师": ["工程师", "engineer", "技术"],
-        "研究员": ["研究员", "研究者", "scientist", "researcher"],
-        "学者": ["学者", "scholar"],
-        "指挥者": ["指挥", "strategist", "commander"],
-        "战斗者": ["战士", "护卫", "骑士", "guard", "fighter", "operator"],
-        "学生": ["学生", "student"],
+        "engineer": ["工程师", "engineer", "技术"],
+        "researcher": ["研究员", "研究者", "scientist", "researcher"],
+        "scholar": ["学者", "scholar"],
+        "commander or strategist": ["指挥", "strategist", "commander"],
+        "fighter or guard": ["战士", "护卫", "骑士", "guard", "fighter", "operator"],
+        "student": ["学生", "student"],
     },
     "气质": {
-        "锐利行动派": ["锐利", "行动派", "直接", "固执", "sharper", "action-oriented", "stubborn", "direct"],
-        "温柔照顾型": ["温柔", "照顾", "gentle", "warm", "caretaker"],
-        "优雅安静": ["优雅", "安静", "graceful", "composed", "quiet"],
-        "冷静克制": ["冷静", "克制", "calm", "restrained"],
-        "活泼外向": ["活泼", "外向", "cheerful", "outgoing"],
+        "sharp action-oriented temperament": ["锐利", "行动派", "直接", "固执", "sharper", "action-oriented", "stubborn", "direct"],
+        "gentle caretaker temperament": ["温柔", "照顾", "gentle", "warm", "caretaker"],
+        "graceful quiet temperament": ["优雅", "安静", "graceful", "composed", "quiet"],
+        "calm restrained temperament": ["冷静", "克制", "calm", "restrained"],
+        "cheerful outgoing temperament": ["活泼", "外向", "cheerful", "outgoing"],
     },
     "外观": {
-        "短发": ["短发", "short hair", "shorter hairstyle"],
-        "长发": ["长发", "long hair", "longer hairstyle"],
-        "锐利眼神": ["锐利眼神", "sharper eyes"],
-        "柔和眼神": ["柔和眼神", "soft eyes"],
-        "白大褂": ["白大褂", "laboratory coat", "lab outfit"],
-        "兜帽": ["兜帽", "hood"],
-        "制服": ["制服", "uniform"],
+        "short hair": ["短发", "short hair", "shorter hairstyle"],
+        "long hair": ["长发", "long hair", "longer hairstyle"],
+        "sharp eyes": ["锐利眼神", "sharper eyes", "sharp eyes"],
+        "soft eyes": ["柔和眼神", "soft eyes"],
+        "laboratory coat": ["白大褂", "laboratory coat", "lab outfit"],
+        "hood": ["兜帽", "hood"],
+        "uniform": ["制服", "uniform"],
     },
     "道具": {
-        "工具": ["工具", "tools"],
-        "数据设备": ["数据板", "终端", "tablet", "terminal"],
-        "饮品": ["咖啡", "茶", "coffee", "tea"],
-        "武器": ["剑", "枪", "刀", "weapon", "sword", "gun"],
-        "书本记录": ["书", "笔记", "记录", "book", "notes"],
+        "tools": ["工具", "tools"],
+        "data device": ["数据板", "终端", "tablet", "terminal"],
+        "drink prop": ["咖啡", "茶", "coffee", "tea"],
+        "weapon": ["剑", "枪", "刀", "weapon", "sword", "gun"],
+        "book or notes": ["书", "笔记", "记录", "book", "notes"],
     },
     "关系": {
-        "双胞胎": ["双胞胎", "双生", "twin", "twins"],
-        "兄弟姐妹": ["姐姐", "妹妹", "哥哥", "弟弟", "sister", "brother", "sibling"],
-        "搭档": ["搭档", "伙伴", "partner"],
+        "twins": ["双胞胎", "双生", "twin", "twins"],
+        "siblings": ["姐姐", "妹妹", "哥哥", "弟弟", "sister", "brother", "sibling"],
+        "partners": ["搭档", "伙伴", "partner"],
     },
 }
 
@@ -63,6 +63,7 @@ def analyze_character_differences_with_llm(cards: list[CharacterCard], provider:
         "你是通用角色差异分析器，服务于小说配图和文生图 prompt。"
         "请只根据用户提供的人设文本分析，不要引入任何外部作品设定或默认角色印象。"
         "目标是找出容易被生图模型画混的角色，并给出可直接写入 prompt 的差异约束。"
+        "positive_rule、negative_rule、prompt_rules 必须使用英文；角色名和专有名词可以保留原文或中英并列。"
         "只输出 JSON，不要 Markdown，不要解释。"
     )
     user = json.dumps(
@@ -233,9 +234,9 @@ def risk_reason(left: dict[str, Any], right: dict[str, Any], shared: list[str]) 
     reasons: list[str] = []
     if shared:
         reasons.append("共享特征：" + "、".join(shared[:6]))
-    if "双胞胎" in shared or "兄弟姐妹" in shared:
+    if "twins" in shared or "siblings" in shared:
         reasons.append("亲缘或相似关系容易导致同脸、同发型、同气质")
-    if "白大褂" in shared or "制服" in shared:
+    if "laboratory coat" in shared or "uniform" in shared:
         reasons.append("服装语境接近，模型可能复用同一套造型")
     if not left["features"] or not right["features"]:
         reasons.append("角色差异信息不足，建议补充外观、道具、姿态或气质差异")
@@ -250,8 +251,8 @@ def positive_tags(card: CharacterCard, buckets: dict[str, list[str]]) -> list[st
 
 
 def build_pair_positive_rule(left: str, right: str, left_unique: list[str], right_unique: list[str]) -> str:
-    left_tags = "、".join(left_unique[:5]) or "independent identity, appearance, props, and emotional function"
-    right_tags = "、".join(right_unique[:5]) or "independent identity, appearance, props, and emotional function"
+    left_tags = ", ".join(left_unique[:5]) or "independent identity, appearance, props, and emotional function"
+    right_tags = ", ".join(right_unique[:5]) or "independent identity, appearance, props, and emotional function"
     return (
         f"{left} and {right} must be clearly distinguishable. "
         f"{left}: {left_tags}. {right}: {right_tags}. "

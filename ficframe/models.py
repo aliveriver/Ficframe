@@ -16,6 +16,10 @@ class CharacterCard:
     variable_states: dict[str, str] = field(default_factory=dict)
     relationships: dict[str, str] = field(default_factory=dict)
     reference_images: list[str] = field(default_factory=list)
+    reference_visuals: list[dict[str, Any]] = field(default_factory=list)
+    identity_prompt: str = ""
+    negative_identity_prompt: str = ""
+    appearance_states: list[dict[str, Any]] = field(default_factory=list)
     prompt_cn: str = ""
     prompt_en: str = ""
 

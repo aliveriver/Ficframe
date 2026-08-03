@@ -358,6 +358,13 @@ textarea {
   margin-bottom: var(--space-md);
 }
 
+.head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  justify-content: end;
+}
+
 .shot-list {
   display: grid;
   gap: var(--space-sm);
@@ -392,7 +399,7 @@ textarea {
 
 .detail {
   display: grid;
-  grid-template-rows: auto minmax(220px, 1fr) auto auto auto;
+  grid-template-rows: auto minmax(180px, .8fr) auto auto auto auto;
   min-height: 0;
 }
 
@@ -405,8 +412,21 @@ textarea {
 
 .actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-sm);
   margin-top: var(--space-md);
+}
+
+.prompt-bank {
+  margin-top: var(--space-md);
+}
+
+.prompt-bank textarea {
+  min-height: 90px;
+}
+
+#appearanceStatesBox {
+  min-height: 120px;
 }
 
 .batch-options {
