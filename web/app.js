@@ -489,17 +489,19 @@ async function generateAllImages() {
   if (!state.shots.length || !state.runId) return;
   setBusy(el.allImagesBtn, true);
   try {
-    const data = await generateImageBatch(state.shots, {
+    const results = await generateImagesSequential(state.shots, {
       skipExisting: el.skipExistingImages.checked,
       retryCount: Number(el.imageRetryCount.value || 0),
+      label: "批量生成",
     });
-    applyImageBatchResults(data.results || []);
-    const okCount = (data.results || []).filter((item) => item.ok).length;
-    const skippedCount = (data.results || []).filter((item) => item.skipped).length;
-    const failures = (data.results || []).filter((item) => !item.ok);
+    const okCount = results.filter((item) => item.ok).length;
+    const skippedCount = results.filter((item) => item.skipped).length;
+    const failures = results.filter((item) => !item.ok);
     el.health.textContent = `批量生成完成：${okCount}/${state.shots.length}${skippedCount ? `，跳过 ${skippedCount}` : ""}`;
     if (failures.length) {
       el.qaBox.textContent = failures.map((item) => `${item.shot_id}: ${item.error}`).join("\n\n");
+    } else {
+      el.qaBox.textContent = "全部图片已生成完成";
     }
   } catch (error) {
     el.health.textContent = error.message;
@@ -517,13 +519,13 @@ async function retryFailedImages() {
   }
   setBusy(el.retryFailedBtn, true);
   try {
-    const data = await generateImageBatch(failedShots, {
+    const results = await generateImagesSequential(failedShots, {
       skipExisting: false,
       retryCount: Number(el.imageRetryCount.value || 1),
+      label: "失败重试",
     });
-    applyImageBatchResults(data.results || []);
-    const okCount = (data.results || []).filter((item) => item.ok).length;
-    const failures = (data.results || []).filter((item) => !item.ok);
+    const okCount = results.filter((item) => item.ok).length;
+    const failures = results.filter((item) => !item.ok);
     el.health.textContent = `失败重试完成：${okCount}/${failedShots.length}`;
     el.qaBox.textContent = failures.length ? failures.map((item) => `${item.shot_id}: ${item.error}`).join("\n\n") : "失败项已全部重试成功";
   } catch (error) {
@@ -533,28 +535,93 @@ async function retryFailedImages() {
   }
 }
 
-async function generateImageBatch(shots, { skipExisting, retryCount }) {
-  return api("/api/images/batch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        run_id: state.runId,
-        size: selectedImageSize(),
-        skip_existing: skipExisting,
-        retry_count: retryCount,
-        shots: shots.map((shot) => ({ ...shot, positive_prompt: shot === state.selected ? el.promptBox.value : shot.positive_prompt })),
-      }),
-    });
+async function generateImagesSequential(shots, { skipExisting, retryCount, label }) {
+  const results = [];
+  const failures = [];
+  for (let index = 0; index < shots.length; index += 1) {
+    const shot = shots[index];
+    const current = `${index + 1}/${shots.length}`;
+    if (skipExisting && shot.image_url) {
+      const result = {
+        shot_id: shot.id,
+        ok: true,
+        skipped: true,
+        image_url: shot.image_url,
+        image_path: shot.image_path,
+      };
+      results.push(result);
+      el.health.textContent = `${label}：${current}，跳过 ${shot.id}`;
+      renderShots(state.selected?.id);
+      await waitForPaint();
+      continue;
+    }
+    el.health.textContent = `${label}：${current}，正在生成 ${shot.id}`;
+    await waitForPaint();
+    const result = await generateOneImageWithRetry(shot, retryCount, !skipExisting);
+    results.push(result);
+    if (result.ok) {
+      applyImageResult(result);
+      const status = result.skipped ? "跳过" : "完成";
+      el.health.textContent = `${label}：${current}，${status} ${shot.id}`;
+      el.qaBox.textContent = `${label}进度：${index + 1}/${shots.length}\n${result.shot_id} 已返回图片`;
+    } else {
+      failures.push(result);
+      el.health.textContent = `${label}：${current}，失败 ${shot.id}`;
+      el.qaBox.textContent = failures.map((item) => `${item.shot_id}: ${item.error}`).join("\n\n");
+    }
+    await waitForPaint();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  }
+  return results;
 }
 
-function applyImageBatchResults(results) {
-  for (const result of results) {
-    if (!result.ok) continue;
-    const shot = state.shots.find((item) => item.id === result.shot_id);
-    if (shot) {
-      shot.image_url = result.image_url;
-      shot.image_path = result.image_path;
+function waitForPaint() {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  });
+}
+
+async function generateOneImageWithRetry(shot, retryCount, overwrite) {
+  let lastError = "";
+  for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+    try {
+      const data = await api("/api/images", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          run_id: state.runId,
+          size: selectedImageSize(),
+          overwrite,
+          shot: { ...shot, positive_prompt: shot === state.selected ? el.promptBox.value : shot.positive_prompt },
+        }),
+      });
+      return {
+        shot_id: shot.id,
+        ok: true,
+        attempts: attempt + 1,
+        skipped: Boolean(data.skipped),
+        image_path: data.image_path,
+        image_url: data.image_url,
+      };
+    } catch (error) {
+      lastError = error.message;
+      if (attempt < retryCount) {
+        el.health.textContent = `${shot.id} 失败，正在重试 ${attempt + 1}/${retryCount}`;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(2000 * (attempt + 1), 6000)));
+      }
     }
+  }
+  return { shot_id: shot.id, ok: false, attempts: retryCount + 1, error: lastError };
+}
+
+function applyImageResult(result) {
+  const shot = state.shots.find((item) => item.id === result.shot_id);
+  if (shot) {
+    shot.image_url = result.image_url;
+    shot.image_path = result.image_path;
+  }
+  if (state.selected?.id === result.shot_id && result.image_url) {
+    el.preview.innerHTML = `<img alt="${result.shot_id}" src="${result.image_url}" />`;
   }
   renderShots(state.selected?.id);
 }

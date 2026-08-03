@@ -6,7 +6,7 @@ FicFrame 是一套本地运行的小说配图工具集，目标是把二创小�
 
 - 解析小说章节，把正文切分成适合出图的剧情段落
 - 从人物 Markdown 中抽取角色卡、人设特征和参考图信息
-- 生成分镜、图片 prompt 和连续性提示
+- 按章节均衡生成分镜、图片 prompt 和连续性提示
 - 在 Web 中绑定“角色 ↔ 参考图”，一个角色可以绑定多张图
 - 管理多套 LLM / 图片 API 供应商
 - 调用图片模型生成单张或批量图片
@@ -178,6 +178,8 @@ Web 中的“API 管理”支持：
 FICFRAME_LLM_API_KEY=sk-your-llm-key
 FICFRAME_LLM_BASE_URL=https://api.openai.com/v1
 FICFRAME_LLM_MODEL=gpt-5-mini
+FICFRAME_TIMEOUT=300
+FICFRAME_IMAGE_TIMEOUT=900
 
 FICFRAME_IMAGE_API_KEY=sk-your-image-key
 FICFRAME_IMAGE_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
@@ -187,6 +189,8 @@ FICFRAME_IMAGE_MODEL=doubao-seedream-5-0-260128
 ```
 
 没有配置 API key 时，Web 仍然可以生成本地分镜和 prompt；LLM 增强和生图会分别提示缺少对应 key。
+
+`FICFRAME_TIMEOUT` 是普通第三方 API 请求超时时间，单位为秒。`FICFRAME_IMAGE_TIMEOUT` 是图片生成和图片下载的超时时间，默认更长，因为图片模型经常需要排队。图片模型排队较久时可以调大，例如 `1200`。
 
 ## 示例
 
@@ -217,7 +221,20 @@ Web 中也可以直接上传 `examples/minimal/novel.md` 和 `examples/minimal/c
 - “跳过已有图片”：再次批量生成时，已经存在的 `images/<shot_id>.png` 不会重复请求模型。
 - “失败重试次数”：每张失败图片会按设置自动重试。
 - “重试失败”：只对当前没有图片的分镜重新发起请求。
+- Web 的“生成全部”会逐张请求、逐张返回；每完成一张图片就会立刻刷新预览和分镜状态。
 - `image_results.json`：每次批量生成结果会写入 run 目录，方便查看失败原因。
+
+## 分镜规则
+
+FicFrame 会先识别小说里已有的章节标题，再把每章正文切成适合生图的剧情段落。
+
+当前支持的章节标题包括：
+
+- Markdown 标题：`# 第一章`、`## 第二章`
+- 中文章节：`第一章`、`第十二节`、`第三卷`、`第四幕`
+- 英文章节：`Chapter 1`、`CHAPTER 2`
+
+生成分镜时不会简单地从全文前面开始取，也不会只按“画面优先级”全局排序。它会先按章节数量和每章段落数量分配镜头额度，再在每个章节内部按剧情位置分桶，优先选择更适合画面的段落。这样长篇小说的前、中、后段都会有镜头覆盖。
 
 结果文件位置：
 
@@ -432,7 +449,17 @@ Stop-Process -Id <PID> -Force
 2048x2048
 ```
 
-### 5. 人设参考图没有生效
+### 5. 图片生成失败，提示请求超时
+
+生图服务排队、网络代理或模型响应慢时，可能出现请求超时。可以在 `.env` 中调大：
+
+```env
+FICFRAME_IMAGE_TIMEOUT=1200
+```
+
+批量生图时，超时会记录为单张图片失败，不会让整个批量接口变成 500。可以稍后点击“重试失败”继续。
+
+### 6. 人设参考图没有生效
 
 请检查：
 
@@ -443,7 +470,7 @@ Stop-Process -Id <PID> -Force
 
 目前 `grsai`、`ark` 和 OpenAI 兼容的编辑接口会尝试发送参考图。某些供应商虽然接口兼容，但模型本身可能不强遵循参考图。
 
-### 6. 导出的 Markdown 里图片打不开
+### 7. 导出的 Markdown 里图片打不开
 
 导出的小说 Markdown 位于：
 

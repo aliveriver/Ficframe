@@ -6,6 +6,14 @@ from .models import CharacterCard, Scene
 from .text_utils import clean_lines, compact, split_sentences, unique_keep_order
 
 
+CHAPTER_HEADING_RE = re.compile(
+    r"^(?:#{1,6}\s*)?(?:"
+    r"第[一二三四五六七八九十百千万零〇两\d]+[章节卷回幕部篇].*"
+    r"|Chapter\s+\d+.*"
+    r"|CHAPTER\s+\d+.*"
+    r")$"
+)
+
 LOCATION_HINTS = {
     "实验室": ["实验室", "实验台", "源石技艺应用科"],
     "罗德岛走廊": ["走廊", "本舰"],
@@ -30,11 +38,16 @@ MOOD_HINTS = {
 }
 
 
-def split_chapter(raw_text: str) -> tuple[str, list[str]]:
-    lines = clean_lines(raw_text)
-    if not lines:
-        return "未命名章节", []
-    title = lines[0].strip("《》")
+def is_chapter_heading(line: str) -> bool:
+    text = line.strip()
+    return bool(text and CHAPTER_HEADING_RE.match(text))
+
+
+def normalize_heading(line: str) -> str:
+    return line.strip().lstrip("#").strip(" 《》")
+
+
+def split_chunks(lines: list[str], target_chars: int = 900) -> list[str]:
     chunks: list[str] = []
     current: list[str] = []
 
@@ -43,15 +56,57 @@ def split_chapter(raw_text: str) -> tuple[str, list[str]]:
             chunks.append("\n".join(current).strip())
             current.clear()
 
-    for line in lines[1:]:
-        if re.fullmatch(r"——+", line):
+    for line in lines:
+        if re.fullmatch(r"[-—=]{3,}", line):
             flush()
             continue
         current.append(line)
-        if sum(len(item) for item in current) >= 900:
+        if sum(len(item) for item in current) >= target_chars:
             flush()
     flush()
-    return title, chunks
+    return chunks
+
+
+def split_novel_chapters(raw_text: str) -> list[tuple[str, list[str]]]:
+    lines = clean_lines(raw_text)
+    if not lines:
+        return []
+
+    chapters: list[tuple[str, list[str]]] = []
+    current_title = "未命名章节"
+    current_lines: list[str] = []
+    found_heading = False
+
+    def flush() -> None:
+        nonlocal current_lines
+        if current_lines:
+            chapters.append((current_title, split_chunks(current_lines)))
+            current_lines = []
+
+    for line in lines:
+        if is_chapter_heading(line):
+            if found_heading:
+                flush()
+            elif current_lines:
+                chapters.append(("序章", split_chunks(current_lines)))
+                current_lines = []
+            current_title = normalize_heading(line)
+            found_heading = True
+            continue
+        current_lines.append(line)
+
+    if found_heading:
+        flush()
+        return chapters
+
+    return [(normalize_heading(lines[0]), split_chunks(lines[1:]))]
+
+
+def split_chapter(raw_text: str) -> tuple[str, list[str]]:
+    chapters = split_novel_chapters(raw_text)
+    if not chapters:
+        return "未命名章节", []
+    return chapters[0]
 
 
 def detect_characters(text: str, cards: list[CharacterCard]) -> list[str]:
@@ -98,7 +153,7 @@ def visual_type(text: str, characters: list[str]) -> str:
 
 def priority(text: str) -> int:
     score = 1
-    for word in ["闭上眼睛", "早餐", "急停", "银鞋子", "家", "靠在他的肩膀", "灯火"]:
+    for word in ["闭上眼睛", "早餐", "急停", "银靴子", "家", "靠在他的肩膀", "灯火"]:
         if word in text:
             score += 1
     return min(score, 5)
@@ -112,23 +167,25 @@ def make_summary(text: str) -> str:
 
 
 def segment_novel(raw_text: str, cards: list[CharacterCard]) -> list[Scene]:
-    chapter, chunks = split_chapter(raw_text)
     scenes: list[Scene] = []
-    for index, chunk in enumerate(chunks, start=1):
-        chars = detect_characters(chunk, cards)
-        scenes.append(
-            Scene(
-                id=f"ch01_scene_{index:02d}",
-                chapter=chapter,
-                index=index,
-                text=chunk,
-                summary=make_summary(chunk),
-                characters=chars,
-                location=detect_location(chunk),
-                time=detect_time(chunk),
-                mood=detect_mood(chunk),
-                visual_type=visual_type(chunk, chars),
-                visual_priority=priority(chunk),
+    scene_index = 1
+    for chapter_index, (chapter, chunks) in enumerate(split_novel_chapters(raw_text), start=1):
+        for chunk_index, chunk in enumerate(chunks, start=1):
+            chars = detect_characters(chunk, cards)
+            scenes.append(
+                Scene(
+                    id=f"ch{chapter_index:02d}_scene_{chunk_index:02d}",
+                    chapter=chapter,
+                    index=scene_index,
+                    text=chunk,
+                    summary=make_summary(chunk),
+                    characters=chars,
+                    location=detect_location(chunk),
+                    time=detect_time(chunk),
+                    mood=detect_mood(chunk),
+                    visual_type=visual_type(chunk, chars),
+                    visual_priority=priority(chunk),
+                )
             )
-        )
+            scene_index += 1
     return scenes

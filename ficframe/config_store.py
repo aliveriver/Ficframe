@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 
 
 CONFIG_KEYS = [
+    "FICFRAME_TIMEOUT",
+    "FICFRAME_IMAGE_TIMEOUT",
     "FICFRAME_LLM_API_KEY",
     "FICFRAME_LLM_BASE_URL",
     "FICFRAME_LLM_MODEL",
@@ -27,6 +29,8 @@ CONFIG_KEYS = [
 
 
 DEFAULT_CONFIG = {
+    "FICFRAME_TIMEOUT": "300",
+    "FICFRAME_IMAGE_TIMEOUT": "900",
     "FICFRAME_LLM_BASE_URL": "https://api.openai.com/v1",
     "FICFRAME_LLM_MODEL": "gpt-5-mini",
     "FICFRAME_IMAGE_BASE_URL": "https://api.siliconflow.cn/v1",

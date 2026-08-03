@@ -35,7 +35,8 @@ class EndpointConfig:
 class ProviderConfig:
     llm: EndpointConfig
     image: EndpointConfig
-    timeout: float = 120.0
+    timeout: float = 300.0
+    image_timeout: float = 900.0
 
     @classmethod
     def from_env(cls) -> "ProviderConfig":
@@ -54,6 +55,8 @@ class ProviderConfig:
                 model=os.getenv("FICFRAME_IMAGE_MODEL", "gpt-image-1"),
                 provider=os.getenv("FICFRAME_IMAGE_PROVIDER", "openai").lower(),
             ),
+            timeout=env_float("FICFRAME_TIMEOUT", 300.0),
+            image_timeout=env_float("FICFRAME_IMAGE_TIMEOUT", env_float("FICFRAME_TIMEOUT", 900.0)),
         )
 
 
@@ -68,9 +71,15 @@ class OpenAICompatibleProvider:
 
     def _post(self, endpoint: EndpointConfig, label: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         url = build_url(endpoint.base_url, path)
+        timeout = self._timeout_for(label)
         started = time.perf_counter()
-        with httpx.Client(timeout=self.config.timeout) as client:
-            response = client.post(url, headers=self._headers(endpoint, label), json=payload)
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                response = client.post(url, headers=self._headers(endpoint, label), json=payload)
+        except httpx.HTTPError as exc:
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            logger.warning("provider post exception label=%s path=%s duration_ms=%s error=%s", label, path, duration_ms, exc)
+            raise ProviderError(provider_exception_message(label, exc, timeout)) from exc
         duration_ms = int((time.perf_counter() - started) * 1000)
         logger.info(
             "provider post label=%s provider=%s path=%s status=%s duration_ms=%s model=%s",
@@ -97,9 +106,15 @@ class OpenAICompatibleProvider:
         url = build_url(endpoint.base_url, path)
         headers = self._headers(endpoint, label)
         headers.pop("Content-Type", None)
+        timeout = self._timeout_for(label)
         started = time.perf_counter()
-        with httpx.Client(timeout=self.config.timeout) as client:
-            response = client.post(url, headers=headers, data=data, files=files)
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                response = client.post(url, headers=headers, data=data, files=files)
+        except httpx.HTTPError as exc:
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            logger.warning("provider multipart exception label=%s path=%s duration_ms=%s error=%s", label, path, duration_ms, exc)
+            raise ProviderError(provider_exception_message(label, exc, timeout)) from exc
         duration_ms = int((time.perf_counter() - started) * 1000)
         logger.info(
             "provider multipart label=%s provider=%s path=%s status=%s duration_ms=%s model=%s file_count=%s",
@@ -127,6 +142,9 @@ class OpenAICompatibleProvider:
         }
         data = self._post(endpoint, "llm", "responses", payload)
         return extract_response_text(data)
+
+    def _timeout_for(self, label: str) -> float:
+        return self.config.image_timeout if label.startswith("image") else self.config.timeout
 
     def image(
         self,
@@ -214,8 +232,12 @@ class OpenAICompatibleProvider:
             logger.info("image saved path=%s source=b64", target)
             return target
         if item.get("url"):
-            with httpx.Client(timeout=self.config.timeout) as client:
-                response = client.get(item["url"])
+            try:
+                with httpx.Client(timeout=self.config.image_timeout) as client:
+                    response = client.get(item["url"])
+            except httpx.HTTPError as exc:
+                logger.warning("image download exception error=%s", exc)
+                raise ProviderError(provider_exception_message("image download", exc, self.config.image_timeout)) from exc
             if response.status_code >= 400:
                 logger.warning("image download failed status=%s", response.status_code)
                 raise ProviderError(f"图片下载失败：{response.status_code}")
@@ -247,6 +269,25 @@ def env_bool(key: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def env_float(key: str, default: float) -> float:
+    value = os.getenv(key)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        logger.warning("invalid float env key=%s value=%s", key, value)
+        return default
+
+
+def provider_exception_message(label: str, exc: httpx.HTTPError, timeout: float) -> str:
+    if isinstance(exc, httpx.TimeoutException):
+        return f"{label} 请求超时（{timeout:.0f}s）。服务商可能排队较久，可以增大 FICFRAME_TIMEOUT，或稍后重试。"
+    if isinstance(exc, httpx.ConnectError):
+        return f"{label} 连接失败：{exc}"
+    return f"{label} 网络请求失败：{exc}"
 
 
 def reference_aware_prompt(prompt: str, has_references: bool) -> str:
