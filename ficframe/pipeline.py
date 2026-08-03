@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .characters import build_character_cards
+from .character_diff import analyze_character_differences
 from .continuity import initial_state
 from .io import read_text, write_json, write_text
 from .llm_pipeline import polish_shot_prompt, summarize_scene_with_llm
@@ -26,16 +27,18 @@ def run_pipeline(
     cards = build_character_cards(character_notes)
     scenes = segment_novel(novel, cards)
     provider = OpenAICompatibleProvider() if use_llm else None
+    difference_analysis = analyze_character_differences(cards, provider)
     if provider:
         scenes = [summarize_scene_with_llm(scene, provider) for scene in scenes]
     state = initial_state(cards)
-    shots, state = build_storyboard(scenes, cards, state, max_shots=max_shots)
+    shots, state = build_storyboard(scenes, cards, state, max_shots=max_shots, difference_analysis=difference_analysis)
     annotate_shots(shots, cards)
     if provider:
         shots = [polish_shot_prompt(shot, cards, provider) for shot in shots]
 
     payload = {
         "characters": to_dict(cards),
+        "difference_analysis": difference_analysis,
         "scenes": to_dict(scenes),
         "shots": to_dict(shots),
         "continuity": to_dict(state),

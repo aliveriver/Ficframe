@@ -2,6 +2,7 @@ const state = {
   runId: null,
   shots: [],
   characters: [],
+  differenceAnalysis: null,
   selected: null,
   providerConfig: { active: {}, sources: [] },
   selectedProviderId: null,
@@ -24,6 +25,7 @@ const el = {
   imageSize: document.querySelector("#imageSize"),
   customImageSize: document.querySelector("#customImageSize"),
   charactersBox: document.querySelector("#charactersBox"),
+  characterDiffBox: document.querySelector("#characterDiffBox"),
   shotList: document.querySelector("#shotList"),
   runId: document.querySelector("#runId"),
   promptBox: document.querySelector("#promptBox"),
@@ -286,12 +288,36 @@ async function testProvider() {
 function renderCharacters() {
   if (!state.characters.length) {
     el.charactersBox.textContent = "";
+    el.characterDiffBox.textContent = "";
     return;
   }
   el.charactersBox.textContent = state.characters.map((character) => {
     const refs = character.reference_images?.length ? `\n参考图：${character.reference_images.length} 张` : "\n参考图：无";
     return `${character.name}\n${character.role}${refs}\n${(character.fixed_traits || []).join(" / ")}`;
   }).join("\n\n");
+  renderCharacterDiff();
+}
+
+function renderCharacterDiff() {
+  const analysis = state.differenceAnalysis;
+  if (!analysis?.pairs?.length) {
+    el.characterDiffBox.textContent = state.characters.length > 1 ? "角色差异分析：暂无明显混淆风险" : "";
+    return;
+  }
+  const riskyPairs = analysis.pairs.filter((pair) => pair.risk_score >= 30).slice(0, 6);
+  if (!riskyPairs.length) {
+    el.characterDiffBox.textContent = "角色差异分析：暂无明显混淆风险";
+    return;
+  }
+  el.characterDiffBox.textContent = [
+    "角色差异分析",
+    ...riskyPairs.map((pair) => {
+      const shared = pair.shared_features?.length ? `共享：${pair.shared_features.join("、")}` : "共享：较少";
+      const left = pair.left_unique?.length ? `${pair.left}：${pair.left_unique.join("、")}` : `${pair.left}：建议补充差异点`;
+      const right = pair.right_unique?.length ? `${pair.right}：${pair.right_unique.join("、")}` : `${pair.right}：建议补充差异点`;
+      return `\n${pair.left} / ${pair.right} · 风险${pair.risk_level}(${pair.risk_score})\n${shared}\n${left}\n${right}`;
+    }),
+  ].join("\n");
 }
 
 function selectShot(index) {
@@ -334,9 +360,10 @@ async function previewCharacters() {
   const data = await api("/api/characters/preview", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, use_llm: el.useLlm.checked }),
   });
   state.characters = data.characters || [];
+  state.differenceAnalysis = data.difference_analysis || null;
   renderCharacters();
   rebuildReferenceBindings();
   el.health.textContent = `识别到 ${state.characters.length} 个角色`;
@@ -449,6 +476,7 @@ async function runPipeline() {
     state.runId = data.run_id;
     state.shots = data.shots;
     state.characters = data.characters;
+    state.differenceAnalysis = data.difference_analysis || null;
     el.runId.textContent = `run ${state.runId}`;
     renderCharacters();
     renderShots(state.selected?.id);
@@ -470,6 +498,7 @@ async function generateImage() {
       body: JSON.stringify({
         run_id: state.runId,
         size: selectedImageSize(),
+        overwrite: true,
         shot: { ...state.selected, positive_prompt: el.promptBox.value },
       }),
     });

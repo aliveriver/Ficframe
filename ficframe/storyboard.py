@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from .continuity import notes_for_scene, update_state_from_shot
 from .models import CharacterCard, ContinuityState, Scene, Shot
-from .prompts import CAMERA_BY_TYPE, COMPOSITION_BY_TYPE, build_negative_prompt, build_positive_prompt
+from .prompts import CAMERA_BY_TYPE, COMPOSITION_BY_TYPE, build_negative_prompt_for_scene, build_positive_prompt
 from .text_utils import compact
 
 
-def scene_to_shot(scene: Scene, cards: list[CharacterCard], state: ContinuityState, shot_number: int) -> Shot:
+def scene_to_shot(
+    scene: Scene,
+    cards: list[CharacterCard],
+    state: ContinuityState,
+    shot_number: int,
+    difference_analysis: dict | None = None,
+) -> Shot:
     notes = notes_for_scene(scene, state)
     title = f"{scene.time} - {scene.location} - {scene.visual_type}"
     return Shot(
@@ -22,8 +28,8 @@ def scene_to_shot(scene: Scene, cards: list[CharacterCard], state: ContinuitySta
         composition=COMPOSITION_BY_TYPE.get(scene.visual_type, "清晰稳定构图"),
         visual_goal=scene.summary,
         continuity_notes=notes,
-        positive_prompt=build_positive_prompt(scene, cards, notes, state.style),
-        negative_prompt=build_negative_prompt(state.style),
+        positive_prompt=build_positive_prompt(scene, cards, notes, state.style, difference_analysis),
+        negative_prompt=build_negative_prompt_for_scene(scene, cards, state.style, difference_analysis),
     )
 
 
@@ -117,11 +123,12 @@ def build_storyboard(
     cards: list[CharacterCard],
     state: ContinuityState,
     max_shots: int = 8,
+    difference_analysis: dict | None = None,
 ) -> tuple[list[Shot], ContinuityState]:
     selected = select_balanced_scenes(scenes, max_shots)
     shots: list[Shot] = []
     for shot_number, scene in enumerate(selected, start=1):
-        shot = scene_to_shot(scene, cards, state, shot_number)
+        shot = scene_to_shot(scene, cards, state, shot_number, difference_analysis)
         shots.append(shot)
         update_state_from_shot(state, shot)
     return shots, state

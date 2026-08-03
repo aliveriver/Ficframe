@@ -15,8 +15,8 @@ CHAPTER_HEADING_RE = re.compile(
 )
 
 LOCATION_HINTS = {
-    "实验室": ["实验室", "实验台", "源石技艺应用科"],
-    "罗德岛走廊": ["走廊", "本舰"],
+    "实验室": ["实验室", "实验台", "研究室", "工作台"],
+    "走廊": ["走廊", "过道"],
     "休息区": ["休息区", "舰桥"],
     "观景台": ["观景台", "舰尾", "夜风", "星云", "栏杆"],
     "宿舍门口": ["门外", "敲门声"],
@@ -115,8 +115,6 @@ def detect_characters(text: str, cards: list[CharacterCard]) -> list[str]:
         names = [card.name, *card.aliases]
         if any(name and name in text for name in names):
             found.append(card.name)
-    if "博士" in text:
-        found.append("博士")
     return unique_keep_order(found)
 
 
@@ -144,6 +142,8 @@ def visual_type(text: str, characters: list[str]) -> str:
         return "剧情动作瞬间"
     if "星云" in text or "灯火" in text or "舷窗" in text:
         return "环境氛围图"
+    if len(characters) >= 3:
+        return "多人关系中景"
     if len(characters) >= 2 and any(word in text for word in ["靠", "指尖", "闭上眼睛", "拉住"]):
         return "双人情绪特写"
     if len(characters) >= 2:

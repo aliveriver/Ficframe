@@ -9,6 +9,7 @@ class CharacterCard:
     name: str
     aliases: list[str] = field(default_factory=list)
     role: str = ""
+    source_text: str = ""
     visual_traits: list[str] = field(default_factory=list)
     personality_traits: list[str] = field(default_factory=list)
     fixed_traits: list[str] = field(default_factory=list)

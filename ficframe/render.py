@@ -185,10 +185,11 @@ def extract_title(novel_text: str) -> str:
 
 def image_markdown_ref(shot: Shot, run_id: str) -> str:
     if shot.image_url:
+        image_url = shot.image_url.split("?", 1)[0]
         prefix = f"/runs/{run_id}/"
-        if shot.image_url.startswith(prefix):
-            return shot.image_url.removeprefix(prefix)
-        return shot.image_url
+        if image_url.startswith(prefix):
+            return image_url.removeprefix(prefix)
+        return image_url
     if shot.image_path:
         return shot.image_path
     return ""

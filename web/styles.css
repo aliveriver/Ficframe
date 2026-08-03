@@ -283,6 +283,11 @@ textarea {
   white-space: pre-wrap;
 }
 
+.diff-readout {
+  max-height: 260px;
+  overflow: auto;
+}
+
 .reference-board {
   border-top: var(--rule-sm) solid var(--color-rule);
   display: grid;

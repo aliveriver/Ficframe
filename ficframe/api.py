@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .characters import build_character_cards
+from .character_diff import analyze_character_differences
 from .config_store import public_config, public_provider_config, read_provider_config, write_env_file, write_provider_config
 from .continuity import initial_state
 from .io import read_text, write_json, write_text
@@ -80,6 +81,7 @@ class ProviderTestRequest(BaseModel):
 
 class CharacterPreviewRequest(BaseModel):
     text: str
+    use_llm: bool = False
 
 
 class LogBundleRequest(BaseModel):
@@ -227,8 +229,15 @@ def test_provider(request: ProviderTestRequest) -> dict[str, Any]:
 @app.post("/api/characters/preview")
 def preview_characters(request: CharacterPreviewRequest) -> dict[str, Any]:
     cards = build_character_cards(request.text)
-    logger.info("characters preview character_count=%s text_length=%s", len(cards), len(request.text))
-    return {"characters": to_dict(cards)}
+    provider = OpenAICompatibleProvider() if request.use_llm else None
+    difference_analysis = analyze_character_differences(cards, provider)
+    logger.info(
+        "characters preview character_count=%s text_length=%s difference_pair_count=%s",
+        len(cards),
+        len(request.text),
+        len(difference_analysis.get("pairs", [])),
+    )
+    return {"characters": to_dict(cards), "difference_analysis": difference_analysis}
 
 
 @app.post("/api/pipeline")
@@ -258,6 +267,8 @@ async def pipeline(
     write_text(run_dir / "characters.md", character_text)
 
     cards = build_character_cards(character_text)
+    provider = OpenAICompatibleProvider() if use_llm else None
+    difference_analysis = analyze_character_differences(cards, provider)
     bindings = parse_reference_bindings(reference_bindings)
     if reference_images:
         refs_dir = run_dir / "references"
@@ -271,11 +282,10 @@ async def pipeline(
             bind_reference_image(cards, filename, url, binding)
             logger.info("reference image saved run_id=%s filename=%s binding=%s", run_id, filename, redact(binding))
     scenes = segment_novel(novel_text, cards)
-    provider = OpenAICompatibleProvider() if use_llm else None
     if provider:
         scenes = [summarize_scene_with_llm(scene, provider) for scene in scenes]
     state = initial_state(cards)
-    shots, state = build_storyboard(scenes, cards, state, max_shots=max_shots)
+    shots, state = build_storyboard(scenes, cards, state, max_shots=max_shots, difference_analysis=difference_analysis)
     annotate_shots(shots, cards)
     if provider:
         shots = [polish_shot_prompt(shot, cards, provider) for shot in shots]
@@ -283,6 +293,7 @@ async def pipeline(
     payload = {
         "run_id": run_id,
         "characters": to_dict(cards),
+        "difference_analysis": difference_analysis,
         "scenes": to_dict(scenes),
         "shots": to_dict(shots),
         "continuity": to_dict(state),
@@ -301,10 +312,10 @@ def generate_image(request: ImageRequest) -> dict[str, Any]:
     provider = OpenAICompatibleProvider()
     target = RUNS / request.run_id / "images" / f"{shot.id}.png"
     if target.exists() and not request.overwrite:
-        image_url = f"/runs/{request.run_id}/images/{shot.id}.png"
+        image_url = clean_image_url(request.run_id, shot.id)
         update_shot_image(request.run_id, shot.id, str(target), image_url)
         logger.info("image generation skipped existing run_id=%s shot_id=%s path=%s", request.run_id, shot.id, target)
-        return {"image_path": str(target), "image_url": image_url, "skipped": True}
+        return {"image_path": str(target), "image_url": versioned_image_url(request.run_id, shot.id, target), "skipped": True}
     try:
         references = reference_paths_for_shot(request.run_id, shot)
         logger.info("image generation started run_id=%s shot_id=%s size=%s reference_count=%s", request.run_id, shot.id, request.size, len(references))
@@ -312,10 +323,10 @@ def generate_image(request: ImageRequest) -> dict[str, Any]:
     except ProviderError as exc:
         logger.warning("image generation failed run_id=%s shot_id=%s error=%s", request.run_id, shot.id, exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    image_url = f"/runs/{request.run_id}/images/{shot.id}.png"
+    image_url = clean_image_url(request.run_id, shot.id)
     update_shot_image(request.run_id, shot.id, str(target), image_url)
     logger.info("image generation completed run_id=%s shot_id=%s path=%s", request.run_id, shot.id, target)
-    return {"image_path": str(target), "image_url": image_url}
+    return {"image_path": str(target), "image_url": versioned_image_url(request.run_id, shot.id, target)}
 
 
 @app.post("/api/images/batch")
@@ -331,9 +342,9 @@ def generate_all_images(request: dict[str, Any]) -> dict[str, Any]:
     for shot in shots:
         target = RUNS / run_id / "images" / f"{shot.id}.png"
         if skip_existing and target.exists():
-            image_url = f"/runs/{run_id}/images/{shot.id}.png"
+            image_url = clean_image_url(run_id, shot.id)
             update_shot_image(run_id, shot.id, str(target), image_url)
-            results.append({"shot_id": shot.id, "ok": True, "skipped": True, "image_path": str(target), "image_url": image_url})
+            results.append({"shot_id": shot.id, "ok": True, "skipped": True, "image_path": str(target), "image_url": versioned_image_url(run_id, shot.id, target)})
             logger.info("batch image item skipped existing run_id=%s shot_id=%s", run_id, shot.id)
             continue
         result = generate_batch_image_item(provider, run_id, shot, target, size, retry_count)
@@ -356,10 +367,10 @@ def generate_batch_image_item(
     for attempt in range(retry_count + 1):
         try:
             provider.image(shot.positive_prompt, target, size=size, reference_images=references)
-            image_url = f"/runs/{run_id}/images/{shot.id}.png"
+            image_url = clean_image_url(run_id, shot.id)
             update_shot_image(run_id, shot.id, str(target), image_url)
             logger.info("batch image item completed run_id=%s shot_id=%s reference_count=%s attempt=%s", run_id, shot.id, len(references), attempt + 1)
-            return {"shot_id": shot.id, "ok": True, "attempts": attempt + 1, "image_path": str(target), "image_url": image_url}
+            return {"shot_id": shot.id, "ok": True, "attempts": attempt + 1, "image_path": str(target), "image_url": versioned_image_url(run_id, shot.id, target)}
         except ProviderError as exc:
             last_error = str(exc)
             logger.warning("batch image item failed run_id=%s shot_id=%s attempt=%s error=%s", run_id, shot.id, attempt + 1, exc)
@@ -421,6 +432,15 @@ def update_shot_image(run_id: str, shot_id: str, image_path: str, image_url: str
             shot["image_path"] = image_path
             shot["image_url"] = image_url
     write_json(pipeline_path, payload)
+
+
+def clean_image_url(run_id: str, shot_id: str) -> str:
+    return f"/runs/{run_id}/images/{shot_id}.png"
+
+
+def versioned_image_url(run_id: str, shot_id: str, target: Path) -> str:
+    version = int(target.stat().st_mtime_ns) if target.exists() else int(time.time_ns())
+    return f"{clean_image_url(run_id, shot_id)}?v={version}"
 
 
 def reference_paths_for_shot(run_id: str, shot: Shot) -> list[Path]:

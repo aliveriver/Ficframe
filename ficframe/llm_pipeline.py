@@ -14,6 +14,11 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
     system = (
         "你是小说插画分镜与文生图提示词专家。你的任务是把已有 prompt 精修得更适合生图，"
         "重点保持角色一致性、剧情准确、相邻画面连续。"
+        "必须按“场景、构图、角色、关系、风格、负面约束”的结构输出。"
+        "如果画面有多名角色，必须明确 exactly N visible characters，并为每个角色写清楚独立身份、外观差异、动作和情绪功能。"
+        "如果存在双胞胎、姐妹、相似角色，必须强化“相似但可区分”：不同发型、眼神、姿态、道具、气质，禁止同脸和角色复制。"
+        "只根据传入的人设文本和当前分镜写，不要引入外部作品设定或默认角色印象。"
+        "不要把某个角色的人设词套到另一个角色身上。不要新增原文没有出现的人物。"
         + JSON_RULE
     )
     user = json.dumps(
@@ -35,6 +40,9 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
                     "name": card.name,
                     "role": card.role,
                     "fixed_traits": card.fixed_traits,
+                    "variable_states": card.variable_states,
+                    "relationships": card.relationships,
+                    "source_text": compact(card.source_text, 1200),
                     "prompt_cn": card.prompt_cn,
                     "prompt_en": card.prompt_en,
                 }
@@ -42,7 +50,7 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
             ],
             "required_schema": {
                 "positive_prompt": "string",
-                "negative_prompt": "string",
+                "negative_prompt": "string，必须包含 extra people、duplicate character、same face between different characters、merged characters、wrong character identity 等身份错误约束",
                 "visual_goal": "string",
                 "qa_notes": ["string"],
             },

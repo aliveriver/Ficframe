@@ -14,7 +14,7 @@ def check_shot(shot: Shot, cards: list[CharacterCard]) -> list[str]:
             missing_fixed = [trait for trait in card.fixed_traits if trait not in shot.positive_prompt]
             if missing_fixed:
                 notes.append(f"{name} 的固定特征需要在生图后重点检查：{'; '.join(missing_fixed)}")
-        elif name != "博士":
+        else:
             notes.append(f"角色 {name} 没有角色卡，容易发生外貌漂移。")
     if "extra people" not in shot.negative_prompt:
         notes.append("负向 prompt 缺少 extra people，可能生成多余角色。")
