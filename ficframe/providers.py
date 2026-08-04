@@ -343,12 +343,51 @@ def extract_image_item(data: dict[str, Any]) -> dict[str, Any]:
 def extract_response_text(data: dict[str, Any]) -> str:
     if isinstance(data.get("output_text"), str):
         return data["output_text"]
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices:
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            return message["content"]
+        if isinstance(choices[0], dict) and isinstance(choices[0].get("text"), str):
+            return choices[0]["text"]
     pieces: list[str] = []
     for item in data.get("output", []) or []:
+        if not isinstance(item, dict):
+            continue
         for content in item.get("content", []) or []:
-            text = content.get("text")
+            if isinstance(content, str):
+                pieces.append(content)
+                continue
+            if not isinstance(content, dict):
+                continue
+            text = content.get("text") or content.get("output_text")
             if isinstance(text, str):
                 pieces.append(text)
+            elif isinstance(text, dict):
+                nested_text = text.get("value") or text.get("content")
+                if isinstance(nested_text, str):
+                    pieces.append(nested_text)
     if pieces:
         return "\n".join(pieces)
+
+    fallback_pieces = collect_response_text_fields(data.get("output"))
+    if fallback_pieces:
+        return "\n".join(fallback_pieces)
     return json.dumps(data, ensure_ascii=False)
+
+
+def collect_response_text_fields(value: Any) -> list[str]:
+    pieces: list[str] = []
+    if isinstance(value, dict):
+        value_type = str(value.get("type") or "")
+        for key in ("output_text", "text", "content"):
+            item = value.get(key)
+            if isinstance(item, str) and ("text" in value_type or key in {"output_text", "text"}):
+                pieces.append(item)
+        for item in value.values():
+            if isinstance(item, (dict, list)):
+                pieces.extend(collect_response_text_fields(item))
+    elif isinstance(value, list):
+        for item in value:
+            pieces.extend(collect_response_text_fields(item))
+    return pieces

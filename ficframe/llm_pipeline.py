@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import re
 
+from .logging_utils import get_logger
 from .models import CharacterCard, Scene, Shot
 from .providers import OpenAICompatibleProvider, ProviderError
 from .text_utils import compact
 
 
 JSON_RULE = "只输出 JSON，不要 Markdown，不要解释。"
+logger = get_logger("llm_pipeline")
 
 
 def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAICompatibleProvider) -> Shot:
@@ -60,7 +63,7 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
     )
     try:
         raw = provider.text(system, user)
-        data = json.loads(raw)
+        data = parse_llm_json(raw)
     except (ProviderError, json.JSONDecodeError, TypeError) as exc:
         shot.qa_notes.append(f"LLM 增强失败，已保留本地 prompt：{exc}")
         return shot
@@ -81,6 +84,82 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
     shot.visual_goal = data.get("visual_goal") or shot.visual_goal
     shot.qa_notes.extend(data.get("qa_notes") or [])
     return shot
+
+
+def extract_character_cards_with_llm(raw_text: str, provider: OpenAICompatibleProvider) -> list[CharacterCard]:
+    cards, _ = extract_character_cards_with_llm_detailed(raw_text, provider)
+    return cards
+
+
+def extract_character_cards_with_llm_detailed(raw_text: str, provider: OpenAICompatibleProvider) -> tuple[list[CharacterCard], str]:
+    system = (
+        "You are a character profile splitter and extractor for illustrated fiction. "
+        "Read the supplied character notes and identify every distinct character that has its own profile. "
+        "The source may use Markdown headings, bold section labels, standalone name lines followed by paragraphs, "
+        "or a long profile where one character starts after a '角色总览/人物总览' label. "
+        "Do not treat topic section titles such as abilities, relationships, events, personality, or writing advice as characters. "
+        "Use only the supplied text; do not add outside canon. "
+        "Return exactly one JSON object. The top-level object must have exactly one key named characters. "
+        "Never return a schema, examples, Markdown, explanations, or a nested field by itself."
+    )
+    user = json.dumps(
+        {
+            "raw_character_notes": compact(raw_text, 16000),
+            "output_contract": [
+                "Return a single JSON object shaped as {\"characters\": [...]}",
+                "characters must be an array.",
+                "Each character item must be an object.",
+                "Required item key: name.",
+                "Optional item keys: aliases, role, source_text, visual_traits, personality_traits, fixed_traits, variable_states, relationships, prompt_cn, prompt_en.",
+                "aliases, visual_traits, personality_traits, fixed_traits must be arrays of strings.",
+                "variable_states and relationships must be objects whose keys and values are strings.",
+            ],
+            "empty_result": {"characters": []},
+        },
+        ensure_ascii=False,
+    )
+    try:
+        raw = provider.text(system, user)
+        data = parse_llm_json(raw)
+    except ProviderError as exc:
+        logger.warning("llm character extraction provider_error=%s", exc)
+        return [], f"LLM 请求失败：{exc}"
+    except json.JSONDecodeError as exc:
+        logger.warning("llm character extraction invalid_json error=%s preview=%s", exc, compact(raw if "raw" in locals() else "", 500))
+        return [], f"LLM 返回不是合法 JSON：{exc}；返回开头：{compact(raw if 'raw' in locals() else '', 160)}"
+    except TypeError as exc:
+        logger.warning("llm character extraction invalid_payload error=%s", exc)
+        return [], f"LLM 返回结构异常：{exc}"
+    if not isinstance(data.get("characters"), list):
+        logger.warning("llm character extraction missing_characters keys=%s", list(data.keys())[:12])
+        return [], "LLM JSON 中缺少 characters 数组"
+    cards = []
+    for item in data.get("characters", []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        cards.append(
+            CharacterCard(
+                name=name,
+                aliases=string_list(item.get("aliases")),
+                role=str(item.get("role") or "").strip(),
+                source_text=compact(str(item.get("source_text") or raw_text), 3000),
+                visual_traits=string_list(item.get("visual_traits")),
+                personality_traits=string_list(item.get("personality_traits")),
+                fixed_traits=string_list(item.get("fixed_traits")),
+                variable_states=string_dict(item.get("variable_states")),
+                relationships=string_dict(item.get("relationships")),
+                prompt_cn=str(item.get("prompt_cn") or "").strip(),
+                prompt_en=str(item.get("prompt_en") or "").strip(),
+            )
+        )
+    cards = dedupe_cards(cards)
+    if not cards:
+        logger.warning("llm character extraction empty_valid_cards item_count=%s", len(data.get("characters", [])))
+        return [], "LLM 返回了 characters，但没有可用角色名"
+    return cards, f"LLM 返回 {len(cards)} 个可用角色"
 
 
 def enhance_character_cards_with_llm(cards: list[CharacterCard], provider: OpenAICompatibleProvider) -> list[CharacterCard]:
@@ -125,7 +204,7 @@ def enhance_character_cards_with_llm(cards: list[CharacterCard], provider: OpenA
         ensure_ascii=False,
     )
     try:
-        data = json.loads(provider.text(system, user))
+        data = parse_llm_json(provider.text(system, user))
     except (ProviderError, json.JSONDecodeError, TypeError):
         return cards
     by_name = {card.name: card for card in cards}
@@ -150,6 +229,29 @@ def enhance_character_cards_with_llm(cards: list[CharacterCard], provider: OpenA
             if isinstance(value, dict):
                 setattr(card, field, {str(key): str(val) for key, val in value.items() if str(val).strip()})
     return cards
+
+
+def string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def string_dict(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key).strip(): str(item).strip() for key, item in value.items() if str(key).strip() and str(item).strip()}
+
+
+def dedupe_cards(cards: list[CharacterCard]) -> list[CharacterCard]:
+    unique: list[CharacterCard] = []
+    seen: set[str] = set()
+    for card in cards:
+        if card.name in seen:
+            continue
+        seen.add(card.name)
+        unique.append(card)
+    return unique
 
 
 def repair_prompt_with_llm(
@@ -192,7 +294,7 @@ def repair_prompt_with_llm(
         ensure_ascii=False,
     )
     try:
-        data = json.loads(provider.text(system, user))
+        data = parse_llm_json(provider.text(system, user))
     except (ProviderError, json.JSONDecodeError, TypeError):
         return None
     if is_english_structured_prompt(str(data.get("positive_prompt") or "")):
@@ -231,7 +333,7 @@ def summarize_scene_with_llm(scene: Scene, provider: OpenAICompatibleProvider) -
         ensure_ascii=False,
     )
     try:
-        data = json.loads(provider.text(system, user))
+        data = parse_llm_json(provider.text(system, user))
     except (ProviderError, json.JSONDecodeError, TypeError):
         return scene
     scene.summary = data.get("summary") or scene.summary
@@ -282,7 +384,7 @@ def refine_scenes_with_llm(scenes: list[Scene], cards: list[CharacterCard], prov
         ensure_ascii=False,
     )
     try:
-        data = json.loads(provider.text(system, user))
+        data = parse_llm_json(provider.text(system, user))
     except (ProviderError, json.JSONDecodeError, TypeError):
         return scenes
     valid_names = {card.name for card in cards}
@@ -307,3 +409,50 @@ def refine_scenes_with_llm(scenes: list[Scene], cards: list[CharacterCard], prov
         except (TypeError, ValueError):
             pass
     return scenes
+
+
+def parse_llm_json(raw: str) -> dict:
+    text = (raw or "").strip()
+    if not text:
+        raise json.JSONDecodeError("empty response", raw or "", 0)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL | re.IGNORECASE)
+    if fenced:
+        return json.loads(fenced.group(1))
+
+    extracted = extract_first_json_object(text)
+    if extracted:
+        return json.loads(extracted)
+    raise json.JSONDecodeError("no JSON object found", raw, 0)
+
+
+def extract_first_json_object(text: str) -> str | None:
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return None

@@ -10,6 +10,7 @@ class CharacterCard:
     aliases: list[str] = field(default_factory=list)
     role: str = ""
     source_text: str = ""
+    manual: bool = False
     visual_traits: list[str] = field(default_factory=list)
     personality_traits: list[str] = field(default_factory=list)
     fixed_traits: list[str] = field(default_factory=list)
@@ -58,6 +59,7 @@ class Shot:
     qa_notes: list[str] = field(default_factory=list)
     image_path: str | None = None
     image_url: str | None = None
+    image_versions: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

@@ -10,16 +10,21 @@ import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .characters import build_character_cards
 from .character_diff import analyze_character_differences
 from .config_store import public_config, public_provider_config, read_provider_config, write_env_file, write_provider_config
 from .continuity import initial_state
 from .io import read_text, write_json, write_text
-from .llm_pipeline import enhance_character_cards_with_llm, polish_shot_prompt, refine_scenes_with_llm
+from .llm_pipeline import (
+    enhance_character_cards_with_llm,
+    extract_character_cards_with_llm_detailed,
+    polish_shot_prompt,
+    refine_scenes_with_llm,
+)
 from .logging_utils import build_log_bundle, get_logger, redact, setup_logging
-from .models import Shot, to_dict
+from .models import CharacterCard, Scene, Shot, to_dict
 from .providers import OpenAICompatibleProvider, ProviderError, build_url, effective_image_provider
 from .prompt_bank import analyze_reference_visuals, build_character_prompt_bank
 from .qa import annotate_shots
@@ -78,6 +83,13 @@ class ImageRequest(BaseModel):
     run_id: str = "manual"
     size: str = "1024x1024"
     overwrite: bool = True
+    activate: bool | None = None
+
+
+class ImageVersionRequest(BaseModel):
+    run_id: str
+    shot_id: str
+    image_url: str
 
 
 class ConfigRequest(BaseModel):
@@ -95,6 +107,12 @@ class ProviderTestRequest(BaseModel):
 class CharacterPreviewRequest(BaseModel):
     text: str
     use_llm: bool = False
+
+
+class CharacterLlmRequest(BaseModel):
+    text: str = ""
+    characters: list[dict[str, Any]] = Field(default_factory=list)
+    scenes: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class LogBundleRequest(BaseModel):
@@ -278,19 +296,85 @@ def test_provider(request: ProviderTestRequest) -> dict[str, Any]:
 
 @app.post("/api/characters/preview")
 def preview_characters(request: CharacterPreviewRequest) -> dict[str, Any]:
+    logger.info("characters preview started use_llm=%s text_length=%s", request.use_llm, len(request.text))
     cards = build_character_cards(request.text)
-    provider = OpenAICompatibleProvider() if request.use_llm else None
-    if provider:
-        cards = enhance_character_cards_with_llm(cards, provider)
-        build_character_prompt_bank(cards, [], provider)
-    difference_analysis = analyze_character_differences(cards, provider)
+    difference_analysis = analyze_character_differences(cards, None)
     logger.info(
-        "characters preview character_count=%s text_length=%s difference_pair_count=%s",
+        "characters preview completed use_llm=%s character_count=%s text_length=%s difference_pair_count=%s",
+        request.use_llm,
         len(cards),
         len(request.text),
         len(difference_analysis.get("pairs", [])),
     )
-    return {"characters": to_dict(cards), "difference_analysis": difference_analysis}
+    return {
+        "characters": to_dict(cards),
+        "difference_analysis": difference_analysis,
+        "llm_requested": False,
+        "llm_status": "本地规则",
+    }
+
+
+@app.post("/api/characters/llm/extract")
+def llm_extract_characters(request: CharacterLlmRequest) -> dict[str, Any]:
+    logger.info("characters llm extract started text_length=%s", len(request.text))
+    provider = OpenAICompatibleProvider()
+    if not provider.config.llm.api_key:
+        raise HTTPException(status_code=400, detail="未配置 LLM API key")
+    local_cards = build_character_cards(request.text)
+    cards, status = extract_character_cards_with_llm_detailed(request.text, provider)
+    if not cards:
+        logger.warning("characters llm extract fallback=local status=%s local_character_count=%s", status, len(local_cards))
+        cards = local_cards
+        status = f"未替换本地结果：{status}"
+    difference_analysis = analyze_character_differences(cards, None)
+    logger.info("characters llm extract completed status=%s character_count=%s", status, len(cards))
+    return {
+        "characters": to_dict(cards),
+        "difference_analysis": difference_analysis,
+        "llm_status": status,
+    }
+
+
+@app.post("/api/characters/llm/enhance")
+def llm_enhance_characters(request: CharacterLlmRequest) -> dict[str, Any]:
+    logger.info("characters llm enhance started character_count=%s", len(request.characters))
+    provider = OpenAICompatibleProvider()
+    if not provider.config.llm.api_key:
+        raise HTTPException(status_code=400, detail="未配置 LLM API key")
+    cards = parse_character_payload(request.characters)
+    cards = enhance_character_cards_with_llm(cards, provider)
+    logger.info("characters llm enhance completed character_count=%s", len(cards))
+    return {"characters": to_dict(cards), "llm_status": f"已增强 {len(cards)} 个角色"}
+
+
+@app.post("/api/characters/llm/prompt-bank")
+def llm_prompt_bank(request: CharacterLlmRequest) -> dict[str, Any]:
+    logger.info(
+        "characters llm prompt bank started character_count=%s scene_count=%s text_length=%s",
+        len(request.characters),
+        len(request.scenes),
+        len(request.text),
+    )
+    provider = OpenAICompatibleProvider()
+    if not provider.config.llm.api_key:
+        raise HTTPException(status_code=400, detail="未配置 LLM API key")
+    cards = parse_character_payload(request.characters)
+    scenes = parse_scene_payload(request.scenes)
+    build_character_prompt_bank(cards, scenes, provider)
+    logger.info("characters llm prompt bank completed character_count=%s", len(cards))
+    return {"characters": to_dict(cards), "llm_status": f"已生成 {len(cards)} 个角色 Prompt Bank"}
+
+
+@app.post("/api/characters/llm/diff")
+def llm_character_diff(request: CharacterLlmRequest) -> dict[str, Any]:
+    logger.info("characters llm diff started character_count=%s", len(request.characters))
+    provider = OpenAICompatibleProvider()
+    if not provider.config.llm.api_key:
+        raise HTTPException(status_code=400, detail="未配置 LLM API key")
+    cards = parse_character_payload(request.characters)
+    difference_analysis = analyze_character_differences(cards, provider)
+    logger.info("characters llm diff completed character_count=%s pair_count=%s", len(cards), len(difference_analysis.get("pairs", [])))
+    return {"difference_analysis": difference_analysis, "llm_status": "已完成角色差异分析"}
 
 
 @app.post("/api/pipeline")
@@ -299,6 +383,7 @@ async def pipeline(
     characters: Annotated[UploadFile, File()],
     reference_images: Annotated[list[UploadFile] | None, File()] = None,
     reference_bindings: Annotated[str | None, Form()] = None,
+    manual_characters: Annotated[str | None, Form()] = None,
     max_shots: Annotated[int, Form()] = 8,
     use_llm: Annotated[bool, Form()] = False,
 ) -> dict[str, Any]:
@@ -307,6 +392,12 @@ async def pipeline(
     run_dir.mkdir(parents=True, exist_ok=True)
     novel_text = (await novel.read()).decode("utf-8-sig")
     character_text = (await characters.read()).decode("utf-8-sig")
+    if not novel_text.strip():
+        logger.warning("pipeline rejected empty novel filename=%s", novel.filename)
+        raise HTTPException(status_code=400, detail="小说文件为空，请重新选择包含正文的小说 Markdown")
+    if not character_text.strip():
+        logger.warning("pipeline rejected empty characters filename=%s", characters.filename)
+        raise HTTPException(status_code=400, detail="人设文件为空，请重新选择包含角色设定的 Markdown")
     logger.info(
         "pipeline started run_id=%s novel=%s characters=%s reference_images=%s max_shots=%s use_llm=%s",
         run_id,
@@ -321,6 +412,15 @@ async def pipeline(
 
     cards = build_character_cards(character_text)
     provider = OpenAICompatibleProvider() if use_llm else None
+    if provider:
+        llm_cards, extraction_status = extract_character_cards_with_llm_detailed(character_text, provider)
+        if llm_cards:
+            cards = llm_cards
+            logger.info("pipeline llm character extraction applied run_id=%s character_count=%s", run_id, len(cards))
+        else:
+            logger.warning("pipeline llm character extraction fallback=local run_id=%s status=%s", run_id, extraction_status)
+    cards.extend(parse_manual_characters(manual_characters))
+    cards = dedupe_cards(cards)
     if provider:
         cards = enhance_character_cards_with_llm(cards, provider)
     bindings = parse_reference_bindings(reference_bindings)
@@ -339,8 +439,10 @@ async def pipeline(
     if reference_images and vlm_provider.config.vlm.api_key:
         analyze_reference_visuals(cards, run_dir, vlm_provider)
     scenes = segment_novel(novel_text, cards)
+    logger.info("pipeline local segmentation completed run_id=%s scene_count=%s novel_text_length=%s", run_id, len(scenes), len(novel_text))
     if provider:
         scenes = refine_scenes_with_llm(scenes, cards, provider)
+        logger.info("pipeline llm scene refinement completed run_id=%s scene_count=%s", run_id, len(scenes))
     build_character_prompt_bank(cards, scenes, provider)
     difference_analysis = analyze_character_differences(cards, provider)
     state = initial_state(cards)
@@ -365,17 +467,143 @@ async def pipeline(
     return payload
 
 
+def parse_manual_characters(raw: str | None) -> list[CharacterCard]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, list):
+        return []
+    cards: list[CharacterCard] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        source_text = str(item.get("source_text") or item.get("role") or "").strip()
+        cards.append(
+            CharacterCard(
+                name=name,
+                aliases=safe_string_list(item.get("aliases")),
+                role=str(item.get("role") or "").strip(),
+                source_text=source_text,
+                manual=True,
+                visual_traits=safe_string_list(item.get("visual_traits")),
+                personality_traits=safe_string_list(item.get("personality_traits")),
+                fixed_traits=safe_string_list(item.get("fixed_traits")),
+                variable_states=safe_string_dict(item.get("variable_states")),
+                relationships=safe_string_dict(item.get("relationships")),
+                reference_images=safe_string_list(item.get("reference_images")),
+                reference_visuals=item.get("reference_visuals") if isinstance(item.get("reference_visuals"), list) else [],
+                identity_prompt=str(item.get("identity_prompt") or "").strip(),
+                negative_identity_prompt=str(item.get("negative_identity_prompt") or "").strip(),
+                appearance_states=item.get("appearance_states") if isinstance(item.get("appearance_states"), list) else [],
+                prompt_cn=str(item.get("prompt_cn") or "").strip(),
+                prompt_en=str(item.get("prompt_en") or "").strip(),
+            )
+        )
+    return cards
+
+
+def parse_character_payload(items: list[dict[str, Any]]) -> list[CharacterCard]:
+    cards: list[CharacterCard] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        cards.append(
+            CharacterCard(
+                name=name,
+                aliases=safe_string_list(item.get("aliases")),
+                role=str(item.get("role") or "").strip(),
+                source_text=str(item.get("source_text") or "").strip(),
+                manual=bool(item.get("manual", False)),
+                visual_traits=safe_string_list(item.get("visual_traits")),
+                personality_traits=safe_string_list(item.get("personality_traits")),
+                fixed_traits=safe_string_list(item.get("fixed_traits")),
+                variable_states=safe_string_dict(item.get("variable_states")),
+                relationships=safe_string_dict(item.get("relationships")),
+                reference_images=safe_string_list(item.get("reference_images")),
+                reference_visuals=item.get("reference_visuals") if isinstance(item.get("reference_visuals"), list) else [],
+                identity_prompt=str(item.get("identity_prompt") or "").strip(),
+                negative_identity_prompt=str(item.get("negative_identity_prompt") or "").strip(),
+                appearance_states=item.get("appearance_states") if isinstance(item.get("appearance_states"), list) else [],
+                prompt_cn=str(item.get("prompt_cn") or "").strip(),
+                prompt_en=str(item.get("prompt_en") or "").strip(),
+            )
+        )
+    return dedupe_cards(cards)
+
+
+def parse_scene_payload(items: list[dict[str, Any]]) -> list[Scene]:
+    scenes: list[Scene] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        scenes.append(
+            Scene(
+                id=str(item.get("id") or ""),
+                chapter=str(item.get("chapter") or ""),
+                index=safe_int(item.get("index"), len(scenes) + 1),
+                text=str(item.get("text") or ""),
+                summary=str(item.get("summary") or ""),
+                characters=safe_string_list(item.get("characters")),
+                location=str(item.get("location") or ""),
+                time=str(item.get("time") or ""),
+                mood=safe_string_list(item.get("mood")),
+                visual_type=str(item.get("visual_type") or ""),
+                visual_priority=safe_int(item.get("visual_priority"), 1),
+            )
+        )
+    return scenes
+
+
+def safe_int(value: object, fallback: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def safe_string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def safe_string_dict(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key).strip(): str(item).strip() for key, item in value.items() if str(key).strip() and str(item).strip()}
+
+
+def dedupe_cards(cards: list[CharacterCard]) -> list[CharacterCard]:
+    unique: list[CharacterCard] = []
+    seen: set[str] = set()
+    for card in cards:
+        if card.name in seen:
+            continue
+        seen.add(card.name)
+        unique.append(card)
+    return unique
+
+
 @app.post("/api/images")
 def generate_image(request: ImageRequest) -> dict[str, Any]:
     shot = Shot(**request.shot)
     provider = OpenAICompatibleProvider()
     run_dir = run_directory(request.run_id)
-    target = run_dir / "images" / f"{shot.id}.png"
-    if target.exists() and not request.overwrite:
-        image_url = clean_image_url(request.run_id, shot.id)
-        update_shot_image(request.run_id, shot.id, str(target), image_url)
+    current = current_shot_image(request.run_id, shot.id)
+    target = image_target_for_generation(run_dir, shot.id, bool(current))
+    if current and not request.overwrite:
+        image_url = str(current.get("image_url") or clean_image_url(request.run_id, shot.id))
         logger.info("image generation skipped existing run_id=%s shot_id=%s path=%s", request.run_id, shot.id, target)
-        return {"image_path": str(target), "image_url": versioned_image_url(request.run_id, shot.id, target), "skipped": True}
+        return {"image_path": current.get("image_path"), "image_url": image_url, "skipped": True, "activated": True}
     try:
         references = reference_paths_for_shot(request.run_id, shot)
         logger.info("image generation started run_id=%s shot_id=%s size=%s reference_count=%s", request.run_id, shot.id, request.size, len(references))
@@ -383,10 +611,24 @@ def generate_image(request: ImageRequest) -> dict[str, Any]:
     except ProviderError as exc:
         logger.warning("image generation failed run_id=%s shot_id=%s error=%s", request.run_id, shot.id, exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    image_url = clean_image_url(request.run_id, shot.id)
-    update_shot_image(request.run_id, shot.id, str(target), image_url)
-    logger.info("image generation completed run_id=%s shot_id=%s path=%s", request.run_id, shot.id, target)
-    return {"image_path": str(target), "image_url": versioned_image_url(request.run_id, shot.id, target)}
+    image_url = image_url_for_path(request.run_id, target)
+    activate = request.activate if request.activate is not None else not bool(current)
+    payload = update_shot_image(request.run_id, shot.id, str(target), image_url, activate=activate)
+    logger.info("image generation completed run_id=%s shot_id=%s path=%s activated=%s", request.run_id, shot.id, target, activate)
+    return {
+        "image_path": str(target),
+        "image_url": versioned_url_for_path(image_url, target),
+        "raw_image_url": image_url,
+        "activated": activate,
+        "image_versions": payload.get("image_versions", []),
+    }
+
+
+@app.post("/api/images/version")
+def select_image_version(request: ImageVersionRequest) -> dict[str, Any]:
+    payload = activate_shot_image(request.run_id, request.shot_id, request.image_url)
+    logger.info("image version activated run_id=%s shot_id=%s image_url=%s", request.run_id, request.shot_id, request.image_url)
+    return payload
 
 
 @app.post("/api/images/batch")
@@ -401,14 +643,22 @@ def generate_all_images(request: dict[str, Any]) -> dict[str, Any]:
     provider = OpenAICompatibleProvider()
     logger.info("batch image generation started run_id=%s shot_count=%s size=%s retry_count=%s skip_existing=%s", run_id, len(shots), size, retry_count, skip_existing)
     for shot in shots:
-        target = run_dir / "images" / f"{shot.id}.png"
-        if skip_existing and target.exists():
-            image_url = clean_image_url(run_id, shot.id)
-            update_shot_image(run_id, shot.id, str(target), image_url)
-            results.append({"shot_id": shot.id, "ok": True, "skipped": True, "image_path": str(target), "image_url": versioned_image_url(run_id, shot.id, target)})
+        current = current_shot_image(run_id, shot.id)
+        if skip_existing and current:
+            results.append(
+                {
+                    "shot_id": shot.id,
+                    "ok": True,
+                    "skipped": True,
+                    "image_path": current.get("image_path"),
+                    "image_url": current.get("image_url"),
+                    "activated": True,
+                }
+            )
             logger.info("batch image item skipped existing run_id=%s shot_id=%s", run_id, shot.id)
             continue
-        result = generate_batch_image_item(provider, run_id, shot, target, size, retry_count)
+        target = image_target_for_generation(run_dir, shot.id, bool(current))
+        result = generate_batch_image_item(provider, run_id, shot, target, size, retry_count, activate=not bool(current))
         results.append(result)
     logger.info("batch image generation completed run_id=%s ok_count=%s total=%s", run_id, len([item for item in results if item["ok"]]), len(results))
     write_json(run_dir / "image_results.json", {"run_id": run_id, "size": size, "retry_count": retry_count, "skip_existing": skip_existing, "results": results})
@@ -422,16 +672,26 @@ def generate_batch_image_item(
     target: Path,
     size: str,
     retry_count: int,
+    activate: bool,
 ) -> dict[str, Any]:
     references = reference_paths_for_shot(run_id, shot)
     last_error = ""
     for attempt in range(retry_count + 1):
         try:
             provider.image(image_prompt_for_shot(shot), target, size=size, reference_images=references)
-            image_url = clean_image_url(run_id, shot.id)
-            update_shot_image(run_id, shot.id, str(target), image_url)
+            image_url = image_url_for_path(run_id, target)
+            payload = update_shot_image(run_id, shot.id, str(target), image_url, activate=activate)
             logger.info("batch image item completed run_id=%s shot_id=%s reference_count=%s attempt=%s", run_id, shot.id, len(references), attempt + 1)
-            return {"shot_id": shot.id, "ok": True, "attempts": attempt + 1, "image_path": str(target), "image_url": versioned_image_url(run_id, shot.id, target)}
+            return {
+                "shot_id": shot.id,
+                "ok": True,
+                "attempts": attempt + 1,
+                "image_path": str(target),
+                "image_url": versioned_url_for_path(image_url, target),
+                "raw_image_url": image_url,
+                "activated": activate,
+                "image_versions": payload.get("image_versions", []),
+            }
         except ProviderError as exc:
             last_error = str(exc)
             logger.warning("batch image item failed run_id=%s shot_id=%s attempt=%s error=%s", run_id, shot.id, attempt + 1, exc)
@@ -484,16 +744,101 @@ def build_exported_novel(run_id: str) -> dict[str, str]:
     }
 
 
-def update_shot_image(run_id: str, shot_id: str, image_path: str, image_url: str) -> None:
+def current_shot_image(run_id: str, shot_id: str) -> dict[str, Any] | None:
     pipeline_path = run_directory(run_id) / "pipeline.json"
     if not pipeline_path.exists():
-        return
+        return None
     payload = json.loads(read_text(pipeline_path))
     for shot in payload.get("shots", []):
         if shot.get("id") == shot_id:
-            shot["image_path"] = image_path
-            shot["image_url"] = image_url
+            if shot.get("image_url") or shot.get("image_path"):
+                return {"image_url": shot.get("image_url"), "image_path": shot.get("image_path")}
+    return None
+
+
+def image_target_for_generation(run_dir: Path, shot_id: str, has_current: bool) -> Path:
+    images_dir = run_dir / "images"
+    if not has_current:
+        return images_dir / f"{shot_id}.png"
+    return images_dir / f"{shot_id}_{int(time.time() * 1000)}.png"
+
+
+def image_url_for_path(run_id: str, path: Path) -> str:
+    return f"/runs/{run_id}/images/{path.name}"
+
+
+def versioned_url_for_path(image_url: str, path: Path) -> str:
+    version = int(path.stat().st_mtime_ns) if path.exists() else int(time.time_ns())
+    return f"{image_url}?v={version}"
+
+
+def update_shot_image(run_id: str, shot_id: str, image_path: str, image_url: str, activate: bool = True) -> dict[str, Any]:
+    pipeline_path = run_directory(run_id) / "pipeline.json"
+    if not pipeline_path.exists():
+        return {}
+    payload = json.loads(read_text(pipeline_path))
+    result: dict[str, Any] = {}
+    for shot in payload.get("shots", []):
+        if shot.get("id") == shot_id:
+            versions = shot.setdefault("image_versions", [])
+            existing_url = shot.get("image_url")
+            existing_path = shot.get("image_path")
+            if existing_url and existing_path and not any(item.get("image_url") == existing_url for item in versions if isinstance(item, dict)):
+                versions.append(
+                    {
+                        "image_path": existing_path,
+                        "image_url": existing_url,
+                        "created_at": int(Path(str(existing_path)).stat().st_mtime) if Path(str(existing_path)).exists() else int(time.time()),
+                    }
+                )
+            if not any(item.get("image_url") == image_url for item in versions if isinstance(item, dict)):
+                versions.append(
+                    {
+                        "image_path": image_path,
+                        "image_url": image_url,
+                        "created_at": int(time.time()),
+                    }
+                )
+            if activate:
+                shot["image_path"] = image_path
+                shot["image_url"] = image_url
+            result = {
+                "shot_id": shot_id,
+                "image_path": shot.get("image_path"),
+                "image_url": shot.get("image_url"),
+                "image_versions": versions,
+            }
     write_json(pipeline_path, payload)
+    return result
+
+
+def activate_shot_image(run_id: str, shot_id: str, image_url: str) -> dict[str, Any]:
+    pipeline_path = run_directory(run_id) / "pipeline.json"
+    if not pipeline_path.exists():
+        raise HTTPException(status_code=404, detail="run 不存在")
+    payload = json.loads(read_text(pipeline_path))
+    for shot in payload.get("shots", []):
+        if shot.get("id") != shot_id:
+            continue
+        versions = shot.get("image_versions", [])
+        for version in versions:
+            if isinstance(version, dict) and strip_version_query(str(version.get("image_url") or "")) == strip_version_query(image_url):
+                shot["image_url"] = version.get("image_url")
+                shot["image_path"] = version.get("image_path")
+                write_json(pipeline_path, payload)
+                return {
+                    "shot_id": shot_id,
+                    "image_path": shot.get("image_path"),
+                    "image_url": versioned_url_for_path(str(shot.get("image_url")), Path(str(shot.get("image_path")))),
+                    "raw_image_url": shot.get("image_url"),
+                    "image_versions": versions,
+                }
+        raise HTTPException(status_code=404, detail="未找到该图片版本")
+    raise HTTPException(status_code=404, detail="未找到该分镜")
+
+
+def strip_version_query(url: str) -> str:
+    return url.split("?", 1)[0]
 
 
 def image_prompt_for_shot(shot: Shot) -> str:

@@ -118,7 +118,34 @@
           <div class="reference-board">
             <div class="section-head tight">
               <h2>参考图绑定</h2>
-              <button id="previewCharactersBtn" type="button">识别角色</button>
+              <div class="head-actions">
+                <button id="previewCharactersBtn" type="button">识别角色</button>
+                <button id="llmExtractCharactersBtn" type="button">LLM拆分人设</button>
+                <button id="llmEnhanceCharactersBtn" type="button">LLM增强人设</button>
+                <button id="llmPromptBankBtn" type="button">生成Prompt Bank</button>
+                <button id="llmDiffBtn" type="button">LLM差异分析</button>
+                <button id="manualCharacterToggleBtn" type="button">手动添加角色</button>
+              </div>
+            </div>
+            <div id="manualCharacterPanel" class="manual-character-panel" hidden>
+              <fieldset class="manual-character">
+                <legend>手动添加角色</legend>
+                <label>
+                  <span>角色名</span>
+                  <input id="manualCharacterName" placeholder="例如：林鸢" />
+                </label>
+                <label>
+                  <span>角色描述</span>
+                  <textarea id="manualCharacterRole" placeholder="可写身份、性格、外貌、固定特征"></textarea>
+                </label>
+                <label>
+                  <span>补充说明</span>
+                  <textarea id="manualCharacterNote" placeholder="可选，用于补充 source_text"></textarea>
+                </label>
+                <div class="actions compact">
+                  <button id="addManualCharacterBtn" type="button">添加角色</button>
+                </div>
+              </fieldset>
             </div>
             <div id="referenceTable" class="reference-table"></div>
           </div>
@@ -130,6 +157,42 @@
             <input id="useLlm" type="checkbox" />
             <span>LLM 增强</span>
           </label>
+          <div class="rules-board">
+            <button id="rulesToggleBtn" type="button">查看本地规则</button>
+            <div id="rulesPanel" class="rules-panel" hidden>
+              <section>
+                <h3>人物文档</h3>
+                <ul>
+                  <li>推荐使用 `## 角色名` 作为每个角色的开头。</li>
+                  <li>也支持“单独一行角色名 + 下一段简介”。</li>
+                  <li>字段名可写：身份、外貌、性格、固定、禁止变化、道具、关系、别名、代号。</li>
+                  <li>参考图可写 Markdown 图片，也可上传后在绑定表里选择角色。</li>
+                </ul>
+                <pre>## 角色名
+- 身份：主角 / 指挥官 / 研究员
+- 外貌：短发，白外套，红色眼睛
+- 固定：发色不能变，始终带工具箱
+- 关系：与另一角色是搭档</pre>
+              </section>
+              <section>
+                <h3>小说分镜</h3>
+                <ul>
+                  <li>章节标题推荐写成 `# 第一章`、`第二章` 或 `Chapter 1`。</li>
+                  <li>自然段越清楚，场景切分越稳定；长段会按长度自动切块。</li>
+                  <li>角色名或别名出现在段落里，才会被本地规则识别为当前分镜角色。</li>
+                  <li>地点、时间、情绪写在段落内，有助于本地 prompt 更准确。</li>
+                </ul>
+              </section>
+              <section>
+                <h3>不开 LLM 时</h3>
+                <ul>
+                  <li>本地规则会生成角色卡、章节切分、分镜选择、基础 prompt 和连续性提示。</li>
+                  <li>LLM 主要用于复杂人设拆分、场景理解、英文 prompt 精修和外貌状态计划。</li>
+                  <li>想省 token 时，先按规则整理输入，再关闭 LLM 增强。</li>
+                </ul>
+              </section>
+            </div>
+          </div>
           <label>
             <span>图片尺寸</span>
             <div class="size-row">
@@ -190,6 +253,7 @@
           </fieldset>
           <div class="actions">
             <button id="imageBtn" type="button">生成图片</button>
+            <button id="selectedImagesBtn" type="button">生成选中</button>
             <button id="allImagesBtn" type="button">生成全部</button>
             <button id="retryFailedBtn" type="button">重试失败</button>
             <button id="exportBtn" type="button">导出小说 MD</button>
@@ -205,6 +269,7 @@
             </label>
           </div>
           <figure id="preview" class="preview"></figure>
+          <div id="imageVersions" class="image-versions"></div>
           <pre id="qaBox"></pre>
         </section>
       </section>

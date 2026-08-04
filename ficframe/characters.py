@@ -55,17 +55,35 @@ PERSONALITY_HINTS = ["性格", "气质", "说话", "口吻", "习惯", "态度",
 FIXED_HINTS = ["固定", "禁止变化", "不能变", "必须", "始终", "保持", "fixed", "must", "always", "never change"]
 PROP_HINTS = ["道具", "武器", "装备", "工具", "随身", "拿着", "持有", "props", "weapon", "equipment", "tool"]
 RELATION_HINTS = ["关系", "亲属", "朋友", "同事", "恋人", "姐姐", "妹妹", "哥哥", "弟弟", "双胞胎", "搭档", "relationship", "sibling", "twin", "partner"]
+SECTION_TITLES = {
+    "角色总览",
+    "人物总览",
+    "核心人设一句话",
+    "外在气质",
+    "内在核心",
+    "能力设定",
+    "人际关系",
+    "性格关键词",
+    "角色扮演口吻建议",
+    "创作抓手",
+}
 
 
 def infer_primary_name(text: str) -> str:
     heading = re.search(r"(?m)^#{1,3}\s+(.+?)\s*$", text.strip())
-    if heading and heading.group(1).strip() not in {"角色总览", "人物总览"}:
+    if heading and normalize_title(heading.group(1)) not in SECTION_TITLES:
         return heading.group(1).strip()
     match = re.search(r"(?m)^([^，,\n：:]{1,30})[，,：:]\s*(?:本名|真名|代号)\s*([^，,\n]+)", text.strip())
     if match:
         return match.group(1).strip()
+    overview_match = re.search(r"(?m)^(?:\*\*)?(?:角色总览|人物总览)(?:\*\*)?\s*\n([^，,\n：:]{1,30})[，,]", text.strip())
+    if overview_match:
+        return overview_match.group(1).strip()
     lines = clean_lines(text)
     first_line = lines[0] if lines else "未命名角色"
+    intro_match = re.match(r"^([^，,\n：:]{1,30})[，,]\S{2,}", first_line)
+    if intro_match:
+        return intro_match.group(1).strip()
     if "：" in first_line:
         return first_line.split("：", 1)[0].strip()
     if ":" in first_line:
@@ -104,7 +122,7 @@ def split_character_blocks(raw_text: str) -> list[str]:
     heading_matches = [
         match
         for match in re.finditer(r"(?m)^#{1,3}\s+(.+?)\s*$", raw_text)
-        if match.group(1).strip() not in {"角色总览", "人物总览"}
+        if normalize_title(match.group(1)) not in SECTION_TITLES
     ]
     if len(heading_matches) > 1:
         blocks = []
@@ -121,7 +139,79 @@ def split_character_blocks(raw_text: str) -> list[str]:
             blocks.append(raw_text[match.start() : end].strip())
         return blocks
 
+    loose_starts = find_loose_character_starts(raw_text)
+    if len(loose_starts) > 1:
+        blocks = []
+        for index, start in enumerate(loose_starts):
+            end = loose_starts[index + 1] if index + 1 < len(loose_starts) else len(raw_text)
+            blocks.append(raw_text[start:end].strip())
+        return blocks
+
     return [raw_text]
+
+
+def find_loose_character_starts(raw_text: str) -> list[int]:
+    lines = raw_text.replace("\r\n", "\n").split("\n")
+    starts: list[int] = []
+    offset = 0
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if is_loose_name_line(stripped, next_nonempty_line(lines, index + 1)):
+            starts.append(offset + line.index(stripped))
+        elif is_intro_start_line(stripped) and previous_is_blank(lines, index):
+            starts.append(offset + line.index(stripped))
+        elif normalize_title(stripped) in {"角色总览", "人物总览"}:
+            next_line, next_index = next_nonempty_line_with_index(lines, index + 1)
+            if re.match(r"^[^，,\n：:]{1,30}[，,]\S{2,}", next_line):
+                next_offset = sum(len(item) + 1 for item in lines[:next_index])
+                starts.append(next_offset + lines[next_index].index(next_line.strip()))
+        offset += len(line) + 1
+    return list(dict.fromkeys(starts))
+
+
+def is_loose_name_line(line: str, following: str) -> bool:
+    title = normalize_title(line)
+    if not title or title in SECTION_TITLES:
+        return False
+    if line.startswith(("#", "-", "•", ">", "|", "!", "`")):
+        return False
+    if line.startswith("**") and line.endswith("**"):
+        return False
+    if re.search(r"[，,。！？!?：:；;、（）()《》\[\]【】]", title):
+        return False
+    if len(title) > 24:
+        return False
+    return bool(following and len(following.strip()) >= 12)
+
+
+def is_intro_start_line(line: str) -> bool:
+    if not line or line.startswith(("#", "-", "•", ">", "|", "!", "`", "**")):
+        return False
+    match = re.match(r"^([^，,\n：:]{1,16})[，,]\S{2,}", line)
+    if not match:
+        return False
+    name = match.group(1).strip()
+    return bool(name and not re.search(r"[。！？!?：:；;、（）()《》\[\]【】]", name))
+
+
+def previous_is_blank(lines: list[str], index: int) -> bool:
+    return index == 0 or not lines[index - 1].strip()
+
+
+def next_nonempty_line(lines: list[str], start: int) -> str:
+    line, _ = next_nonempty_line_with_index(lines, start)
+    return line
+
+
+def next_nonempty_line_with_index(lines: list[str], start: int) -> tuple[str, int]:
+    for index in range(start, len(lines)):
+        if lines[index].strip():
+            return lines[index].strip(), index
+    return "", -1
+
+
+def normalize_title(text: str) -> str:
+    return text.strip().strip("#").strip("*").strip()
 
 
 def build_one_character_card(raw_text: str) -> CharacterCard:

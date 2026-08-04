@@ -1,11 +1,15 @@
 const state = {
   runId: null,
   shots: [],
+  scenes: [],
+  autoCharacters: [],
+  manualCharacters: [],
   characters: [],
   originalShots: [],
   originalCharacters: [],
   differenceAnalysis: null,
   selected: null,
+  selectedShotIds: new Set(),
   selectedCharacterIndex: 0,
   providerConfig: { active: {}, sources: [] },
   selectedProviderId: null,
@@ -27,8 +31,20 @@ const el = {
   referenceImages: document.querySelector("#referenceImages"),
   referenceTable: document.querySelector("#referenceTable"),
   previewCharactersBtn: document.querySelector("#previewCharactersBtn"),
+  llmExtractCharactersBtn: document.querySelector("#llmExtractCharactersBtn"),
+  llmEnhanceCharactersBtn: document.querySelector("#llmEnhanceCharactersBtn"),
+  llmPromptBankBtn: document.querySelector("#llmPromptBankBtn"),
+  llmDiffBtn: document.querySelector("#llmDiffBtn"),
+  manualCharacterToggleBtn: document.querySelector("#manualCharacterToggleBtn"),
+  manualCharacterPanel: document.querySelector("#manualCharacterPanel"),
+  manualCharacterName: document.querySelector("#manualCharacterName"),
+  manualCharacterRole: document.querySelector("#manualCharacterRole"),
+  manualCharacterNote: document.querySelector("#manualCharacterNote"),
+  addManualCharacterBtn: document.querySelector("#addManualCharacterBtn"),
   maxShots: document.querySelector("#maxShots"),
   useLlm: document.querySelector("#useLlm"),
+  rulesToggleBtn: document.querySelector("#rulesToggleBtn"),
+  rulesPanel: document.querySelector("#rulesPanel"),
   imageSize: document.querySelector("#imageSize"),
   customImageSize: document.querySelector("#customImageSize"),
   charactersBox: document.querySelector("#charactersBox"),
@@ -46,12 +62,14 @@ const el = {
   restoreCharacterBtn: document.querySelector("#restoreCharacterBtn"),
   rebuildAllPromptsBtn: document.querySelector("#rebuildAllPromptsBtn"),
   imageBtn: document.querySelector("#imageBtn"),
+  selectedImagesBtn: document.querySelector("#selectedImagesBtn"),
   allImagesBtn: document.querySelector("#allImagesBtn"),
   retryFailedBtn: document.querySelector("#retryFailedBtn"),
   exportBtn: document.querySelector("#exportBtn"),
   skipExistingImages: document.querySelector("#skipExistingImages"),
   imageRetryCount: document.querySelector("#imageRetryCount"),
   preview: document.querySelector("#preview"),
+  imageVersions: document.querySelector("#imageVersions"),
   qaBox: document.querySelector("#qaBox"),
   providerList: document.querySelector("#providerList"),
   addProviderBtn: document.querySelector("#addProviderBtn"),
@@ -89,15 +107,22 @@ async function api(path, options = {}) {
 function saveWorkspaceDraft() {
   saveSelectedPrompt();
   saveCharacterEditor();
-  if (!state.runId) return;
+  if (!state.runId && !state.shots.length && !state.characters.length && !state.manualCharacters.length) {
+    localStorage.removeItem(WORKSPACE_KEY);
+    return;
+  }
   localStorage.setItem(WORKSPACE_KEY, JSON.stringify({
     runId: state.runId,
     shots: state.shots,
+    scenes: state.scenes,
+    autoCharacters: state.autoCharacters,
+    manualCharacters: state.manualCharacters,
     characters: state.characters,
     originalShots: state.originalShots,
     originalCharacters: state.originalCharacters,
     differenceAnalysis: state.differenceAnalysis,
     selectedShotId: state.selected?.id || null,
+    selectedShotIds: Array.from(state.selectedShotIds),
     selectedCharacterIndex: state.selectedCharacterIndex,
     savedAt: Date.now(),
   }));
@@ -113,9 +138,9 @@ function restoreWorkspaceDraft() {
   if (!raw) return false;
   try {
     const draft = JSON.parse(raw);
-    if (!draft?.runId || !Array.isArray(draft.shots)) return false;
+    if (!Array.isArray(draft.shots) && !Array.isArray(draft.characters)) return false;
     hydrateWorkspace(draft, draft.selectedShotId);
-    el.health.textContent = `已恢复浏览器草稿 run ${state.runId}`;
+    el.health.textContent = state.runId ? `已恢复浏览器草稿 run ${state.runId}` : "已恢复浏览器草稿";
     return true;
   } catch (error) {
     return false;
@@ -125,14 +150,90 @@ function restoreWorkspaceDraft() {
 function hydrateWorkspace(payload, preferredShotId = null) {
   state.runId = payload.runId || payload.run_id;
   state.shots = payload.shots || [];
-  state.characters = payload.characters || [];
+  state.scenes = payload.scenes || [];
+  const allCharacters = payload.characters || [];
+  const partitioned = partitionCharacters(allCharacters);
+  state.autoCharacters = payload.autoCharacters || partitioned.auto;
+  state.manualCharacters = payload.manualCharacters || partitioned.manual;
+  composeCharacters();
   state.originalShots = payload.originalShots || clone(state.shots);
   state.originalCharacters = payload.originalCharacters || clone(state.characters);
   state.differenceAnalysis = payload.differenceAnalysis || payload.difference_analysis || null;
+  state.selectedShotIds = new Set(payload.selectedShotIds || []);
   state.selectedCharacterIndex = Math.min(payload.selectedCharacterIndex || 0, Math.max(0, state.characters.length - 1));
-  el.runId.textContent = `run ${state.runId}`;
+  el.runId.textContent = state.runId ? `run ${state.runId}` : "未运行";
   renderCharacters();
   renderShots(preferredShotId || state.shots[0]?.id);
+}
+
+function clearRunArtifacts(message = "新输入已选择，请重新生成分镜") {
+  state.runId = null;
+  state.shots = [];
+  state.scenes = [];
+  state.originalShots = [];
+  state.selected = null;
+  state.selectedShotIds.clear();
+  el.runId.textContent = "新输入未运行";
+  el.shotList.innerHTML = "";
+  el.promptBox.value = "";
+  el.preview.innerHTML = "";
+  el.imageVersions.innerHTML = "";
+  el.qaBox.textContent = "";
+  el.health.textContent = message;
+  saveWorkspaceDraft();
+}
+
+function selectedFileLabel(file) {
+  return file ? `${file.name}（${Math.max(0, Math.round(file.size / 1024))} KB）` : "";
+}
+
+function validateInputFiles() {
+  const novel = el.novelFile.files[0];
+  const characters = el.charactersFile.files[0];
+  if (!novel || !characters) {
+    return "请选择小说和人物文件";
+  }
+  if (!novel.size) {
+    return `小说文件为空：${novel.name}`;
+  }
+  if (!characters.size) {
+    return `人物文件为空：${characters.name}`;
+  }
+  return "";
+}
+
+function partitionCharacters(characters = []) {
+  const manual = [];
+  const auto = [];
+  for (const character of characters) {
+    if (character?.manual) {
+      manual.push(character);
+    } else {
+      auto.push(character);
+    }
+  }
+  return { auto, manual };
+}
+
+function composeCharacters() {
+  const manualNames = new Set(state.manualCharacters.map((character) => character.name));
+  state.characters = [
+    ...state.autoCharacters.filter((character) => !manualNames.has(character.name)),
+    ...state.manualCharacters,
+  ];
+}
+
+function snapshotCurrentCharacters() {
+  state.originalCharacters = clone(state.characters);
+}
+
+function replaceCharacterInCollections(card) {
+  const collection = card.manual ? state.manualCharacters : state.autoCharacters;
+  const index = collection.findIndex((character) => character.name === card.name);
+  if (index >= 0) {
+    collection[index] = card;
+  }
+  composeCharacters();
 }
 
 async function restoreLatestRun() {
@@ -374,9 +475,10 @@ function renderCharacters() {
     return;
   }
   el.charactersBox.textContent = state.characters.map((character) => {
+    const manual = character.manual ? "（手动）" : "";
     const refs = character.reference_images?.length ? `\n参考图：${character.reference_images.length} 张` : "\n参考图：无";
     const bank = character.identity_prompt ? "\nPrompt Bank：已生成" : "\nPrompt Bank：未生成";
-    return `${character.name}\n${character.role}${refs}${bank}\n${(character.fixed_traits || []).join(" / ")}`;
+    return `${character.name}${manual}\n${character.role}${refs}${bank}\n${(character.fixed_traits || []).join(" / ")}`;
   }).join("\n\n");
   renderCharacterEditor();
   renderCharacterDiff();
@@ -420,7 +522,8 @@ function restoreSelectedCharacter() {
   if (!current) return;
   const original = state.originalCharacters.find((character) => character.name === current.name);
   if (!original) return;
-  state.characters[state.selectedCharacterIndex] = clone(original);
+  replaceCharacterInCollections(clone(original));
+  state.selectedCharacterIndex = state.characters.findIndex((character) => character.name === current.name);
   loadCharacterEditor();
   renderCharacters();
   el.health.textContent = `${current.name} 已恢复到初始角色文本`;
@@ -455,8 +558,42 @@ function selectShot(index) {
   el.promptBox.value = state.selected?.positive_prompt || "";
   el.qaBox.textContent = (state.selected?.qa_notes || []).join("\n");
   el.preview.innerHTML = state.selected?.image_url ? `<img alt="${state.selected.id}" src="${state.selected.image_url}" />` : "";
+  renderImageVersions();
   document.querySelectorAll(".shot").forEach((node, nodeIndex) => {
     node.classList.toggle("active", nodeIndex === index);
+  });
+}
+
+function renderImageVersions() {
+  if (!state.selected || !el.imageVersions) return;
+  const versions = Array.isArray(state.selected.image_versions) ? state.selected.image_versions : [];
+  if (!versions.length) {
+    el.imageVersions.innerHTML = "";
+    return;
+  }
+  el.imageVersions.innerHTML = `
+    <div class="image-version-head">
+      <strong>图片版本</strong>
+      <span>${versions.length} 个本地版本</span>
+    </div>
+    <div class="image-version-grid">
+      ${versions.map((version, index) => {
+        const url = version.image_url || "";
+        const active = stripVersionQuery(url) === stripVersionQuery(state.selected.image_url || "");
+        return `
+          <div class="image-version ${active ? "active" : ""}">
+            <img src="${escapeHtml(versionedUrl(url, version.created_at || index))}" alt="${escapeHtml(state.selected.id)} version ${index + 1}" />
+            <div class="image-version-actions">
+              <span>${active ? "当前" : `版本 ${index + 1}`}</span>
+              <button type="button" data-image-url="${escapeHtml(url)}" ${active ? "disabled" : ""}>设为当前</button>
+            </div>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+  el.imageVersions.querySelectorAll("button[data-image-url]").forEach((button) => {
+    button.addEventListener("click", () => activateImageVersion(button.dataset.imageUrl));
   });
 }
 
@@ -546,6 +683,21 @@ function currentAppearanceState(character, shot) {
 function renderShots(preferredId = null) {
   el.shotList.innerHTML = "";
   state.shots.forEach((shot, index) => {
+    const row = document.createElement("div");
+    row.className = "shot-row";
+    const checkbox = document.createElement("input");
+    checkbox.className = "shot-check";
+    checkbox.type = "checkbox";
+    checkbox.checked = state.selectedShotIds.has(shot.id);
+    checkbox.title = `选择 ${shot.id} 用于批量生成`;
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) {
+        state.selectedShotIds.add(shot.id);
+      } else {
+        state.selectedShotIds.delete(shot.id);
+      }
+      saveWorkspaceDraft();
+    });
     const button = document.createElement("button");
     button.className = "shot";
     button.type = "button";
@@ -556,7 +708,8 @@ function renderShots(preferredId = null) {
       <small>${escapeHtml(shot.visual_goal)}</small>
     `;
     button.addEventListener("click", () => selectShot(index));
-    el.shotList.append(button);
+    row.append(checkbox, button);
+    el.shotList.append(row);
   });
   if (state.shots.length) {
     const index = Math.max(0, state.shots.findIndex((shot) => shot.id === preferredId));
@@ -564,23 +717,100 @@ function renderShots(preferredId = null) {
   }
 }
 
+function currentCharacterPayload() {
+  return state.characters.map((character) => clone(character));
+}
+
+function applyCharacterResponse(data, message) {
+  if (Array.isArray(data.characters)) {
+    state.autoCharacters = data.characters.filter((character) => !character.manual);
+    state.manualCharacters = data.characters.filter((character) => character.manual);
+    composeCharacters();
+    snapshotCurrentCharacters();
+    renderCharacters();
+    rebuildReferenceBindings();
+  }
+  if (data.difference_analysis) {
+    state.differenceAnalysis = data.difference_analysis;
+    renderCharacters();
+  }
+  saveWorkspaceDraft();
+  el.health.textContent = message;
+}
+
 async function previewCharacters() {
   if (!el.charactersFile.files[0]) {
     el.health.textContent = "请先选择人物 Markdown";
     return;
   }
+  el.health.textContent = "正在使用本地规则识别角色";
   const text = await el.charactersFile.files[0].text();
   const data = await api("/api/characters/preview", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, use_llm: el.useLlm.checked }),
+    body: JSON.stringify({ text, use_llm: false }),
   });
-  state.characters = data.characters || [];
-  state.originalCharacters = clone(state.characters);
-  state.differenceAnalysis = data.difference_analysis || null;
+  applyCharacterResponse(data, `识别到 ${state.characters.length} 个角色 · 本地规则`);
+}
+
+async function runCharacterLlmAction(path, body, successPrefix) {
+  if (!el.charactersFile.files[0]) {
+    el.health.textContent = "请先选择人物 Markdown";
+    return;
+  }
+  if (path !== "/api/characters/llm/extract" && !state.characters.length) {
+    el.health.textContent = "请先识别角色";
+    return;
+  }
+  el.health.textContent = "正在请求 LLM";
+  const data = await api(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  applyCharacterResponse(data, `${successPrefix}${data.llm_status ? ` · ${data.llm_status}` : ""}`);
+}
+
+function addManualCharacter() {
+  const name = el.manualCharacterName.value.trim();
+  if (!name) {
+    el.health.textContent = "请先填写角色名";
+    return;
+  }
+  const role = el.manualCharacterRole.value.trim();
+  const note = el.manualCharacterNote.value.trim();
+  const card = {
+    name,
+    role,
+    source_text: [role, note].filter(Boolean).join("\n\n"),
+    manual: true,
+    aliases: [],
+    visual_traits: [],
+    personality_traits: [],
+    fixed_traits: [],
+    variable_states: {},
+    relationships: {},
+    reference_images: [],
+    reference_visuals: [],
+    identity_prompt: role,
+    negative_identity_prompt: "",
+    appearance_states: [],
+    prompt_cn: role || name,
+    prompt_en: role || name,
+  };
+  const existingIndex = state.manualCharacters.findIndex((character) => character.name === name);
+  if (existingIndex >= 0) {
+    state.manualCharacters[existingIndex] = card;
+    el.health.textContent = `已更新手动角色 ${name}`;
+  } else {
+    state.manualCharacters.push(card);
+    el.health.textContent = `已添加手动角色 ${name}`;
+  }
+  composeCharacters();
+  snapshotCurrentCharacters();
   renderCharacters();
-  rebuildReferenceBindings();
-  el.health.textContent = `识别到 ${state.characters.length} 个角色`;
+  renderReferenceTable();
+  saveWorkspaceDraft();
 }
 
 function rebuildReferenceBindings() {
@@ -671,8 +901,9 @@ function selectedImageSize() {
 }
 
 async function runPipeline() {
-  if (!el.novelFile.files[0] || !el.charactersFile.files[0]) {
-    el.health.textContent = "请选择小说和人物文件";
+  const inputError = validateInputFiles();
+  if (inputError) {
+    el.health.textContent = inputError;
     return;
   }
   setBusy(el.runBtn, true);
@@ -684,14 +915,19 @@ async function runPipeline() {
       form.append("reference_images", file);
     }
     form.append("reference_bindings", JSON.stringify(serializeReferenceBindings()));
+    form.append("manual_characters", JSON.stringify(state.manualCharacters));
     form.append("max_shots", el.maxShots.value);
     form.append("use_llm", el.useLlm.checked ? "true" : "false");
     const data = await api("/api/pipeline", { method: "POST", body: form });
     state.runId = data.run_id;
     state.shots = data.shots;
-    state.characters = data.characters;
+    state.scenes = data.scenes || [];
+    const partitioned = partitionCharacters(data.characters || []);
+    state.autoCharacters = partitioned.auto;
+    state.manualCharacters = partitioned.manual;
+    composeCharacters();
     state.originalShots = clone(state.shots);
-    state.originalCharacters = clone(state.characters);
+    snapshotCurrentCharacters();
     state.differenceAnalysis = data.difference_analysis || null;
     el.runId.textContent = `run ${state.runId}`;
     renderCharacters();
@@ -709,6 +945,8 @@ async function generateImage() {
   if (!state.selected || !state.runId) return;
   saveSelectedPrompt();
   saveCharacterEditor();
+  const targetShot = clone(state.selected);
+  const targetId = targetShot.id;
   setBusy(el.imageBtn, true);
   try {
     const data = await api("/api/images", {
@@ -718,19 +956,48 @@ async function generateImage() {
         run_id: state.runId,
         size: selectedImageSize(),
         overwrite: true,
-        shot: { ...state.selected, positive_prompt: el.promptBox.value },
+        shot: targetShot,
       }),
     });
-    state.selected.image_url = data.image_url;
-    state.selected.image_path = data.image_path;
-    el.preview.innerHTML = `<img alt="${state.selected.id}" src="${data.image_url}" />`;
-    renderShots(state.selected?.id);
+    applyImageResult({
+      shot_id: targetId,
+      ok: true,
+      image_path: data.image_path,
+      image_url: data.image_url,
+    });
     saveWorkspaceDraft();
-    el.health.textContent = "图片已生成";
+    el.health.textContent = data.activated ? `${targetId} 图片已生成` : `${targetId} 新图已保存为候选版本`;
   } catch (error) {
     el.health.textContent = error.message;
   } finally {
     setBusy(el.imageBtn, false);
+  }
+}
+
+async function generateSelectedImages() {
+  if (!state.shots.length || !state.runId) return;
+  saveSelectedPrompt();
+  saveCharacterEditor();
+  const selectedShots = state.shots.filter((shot) => state.selectedShotIds.has(shot.id));
+  if (!selectedShots.length) {
+    el.health.textContent = "请先在分镜列表左侧勾选要生成的分镜";
+    return;
+  }
+  setBusy(el.selectedImagesBtn, true);
+  try {
+    const results = await generateImagesSequential(selectedShots, {
+      skipExisting: false,
+      retryCount: Number(el.imageRetryCount.value || 0),
+      label: "选中生成",
+    });
+    const okCount = results.filter((item) => item.ok).length;
+    const failures = results.filter((item) => !item.ok);
+    el.health.textContent = `选中生成完成：${okCount}/${selectedShots.length}`;
+    el.qaBox.textContent = failures.length ? failures.map((item) => `${item.shot_id}: ${item.error}`).join("\n\n") : "选中分镜已生成完成";
+  } catch (error) {
+    el.health.textContent = error.message;
+  } finally {
+    setBusy(el.selectedImagesBtn, false);
   }
 }
 
@@ -855,6 +1122,9 @@ async function generateOneImageWithRetry(shot, retryCount, overwrite) {
         skipped: Boolean(data.skipped),
         image_path: data.image_path,
         image_url: data.image_url,
+        raw_image_url: data.raw_image_url,
+        activated: Boolean(data.activated),
+        image_versions: data.image_versions || [],
       };
     } catch (error) {
       lastError = error.message;
@@ -870,14 +1140,75 @@ async function generateOneImageWithRetry(shot, retryCount, overwrite) {
 function applyImageResult(result) {
   const shot = state.shots.find((item) => item.id === result.shot_id);
   if (shot) {
-    shot.image_url = result.image_url;
-    shot.image_path = result.image_path;
+    if (Array.isArray(result.image_versions)) {
+      shot.image_versions = result.image_versions;
+    } else if (result.raw_image_url || result.image_url) {
+      const rawUrl = result.raw_image_url || stripVersionQuery(result.image_url);
+      shot.image_versions = appendImageVersion(shot.image_versions, {
+        image_path: result.image_path,
+        image_url: rawUrl,
+        created_at: Math.floor(Date.now() / 1000),
+      });
+    }
+    if (result.activated || !shot.image_url) {
+      shot.image_url = result.raw_image_url || stripVersionQuery(result.image_url);
+      shot.image_path = result.image_path;
+    }
   }
-  if (state.selected?.id === result.shot_id && result.image_url) {
-    el.preview.innerHTML = `<img alt="${result.shot_id}" src="${result.image_url}" />`;
+  if (state.selected?.id === result.shot_id) {
+    if (shot?.image_url) {
+      el.preview.innerHTML = `<img alt="${result.shot_id}" src="${versionedUrl(shot.image_url, Date.now())}" />`;
+    }
+    renderImageVersions();
   }
   renderShots(state.selected?.id);
   saveWorkspaceDraft();
+}
+
+function appendImageVersion(versions = [], next) {
+  const items = Array.isArray(versions) ? versions.slice() : [];
+  if (!items.some((item) => stripVersionQuery(item.image_url || "") === stripVersionQuery(next.image_url || ""))) {
+    items.push(next);
+  }
+  return items;
+}
+
+async function activateImageVersion(imageUrl) {
+  if (!state.selected || !state.runId || !imageUrl) return;
+  saveSelectedPrompt();
+  try {
+    const data = await api("/api/images/version", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        run_id: state.runId,
+        shot_id: state.selected.id,
+        image_url: imageUrl,
+      }),
+    });
+    applyImageResult({
+      shot_id: data.shot_id,
+      ok: true,
+      activated: true,
+      image_path: data.image_path,
+      image_url: data.image_url,
+      raw_image_url: data.raw_image_url,
+      image_versions: data.image_versions,
+    });
+    el.health.textContent = `${state.selected.id} 已切换图片版本`;
+  } catch (error) {
+    el.health.textContent = `切换版本失败：${error.message}`;
+  }
+}
+
+function stripVersionQuery(url = "") {
+  return String(url).split("?", 1)[0];
+}
+
+function versionedUrl(url, seed) {
+  const clean = stripVersionQuery(url);
+  if (!clean) return "";
+  return `${clean}?v=${encodeURIComponent(seed || Date.now())}`;
 }
 
 async function exportMarkdown() {
@@ -951,14 +1282,67 @@ function kindLabel(kind) {
   return { llm: "LLM", image: "图片", vlm: "VLM" }[kind] || kind;
 }
 
+function togglePanel(panel, button, openText, closedText) {
+  panel.hidden = !panel.hidden;
+  button.textContent = panel.hidden ? closedText : openText;
+}
+
 el.runBtn.addEventListener("click", runPipeline);
-el.charactersFile.addEventListener("change", () => previewCharacters().catch((error) => {
-  el.health.textContent = error.message;
-}));
+el.novelFile.addEventListener("change", () => {
+  const file = el.novelFile.files[0];
+  clearRunArtifacts(file ? `已选择新小说 ${selectedFileLabel(file)}，请重新生成分镜` : "已清空小说文件");
+});
+el.charactersFile.addEventListener("change", () => {
+  const file = el.charactersFile.files[0];
+  clearRunArtifacts(file ? `已选择新人设 ${selectedFileLabel(file)}，正在重新识别角色` : "已清空人设文件");
+  previewCharacters().catch((error) => {
+    el.health.textContent = error.message;
+  });
+});
 el.referenceImages.addEventListener("change", rebuildReferenceBindings);
 el.previewCharactersBtn.addEventListener("click", () => previewCharacters().catch((error) => {
   el.health.textContent = error.message;
 }));
+el.llmExtractCharactersBtn.addEventListener("click", async () => {
+  try {
+    if (!el.charactersFile.files[0]) {
+      el.health.textContent = "请先选择人物 Markdown";
+      return;
+    }
+    const text = await el.charactersFile.files[0].text();
+    await runCharacterLlmAction("/api/characters/llm/extract", { text }, "已完成 LLM 拆分人设");
+  } catch (error) {
+    el.health.textContent = error.message;
+  }
+});
+el.llmEnhanceCharactersBtn.addEventListener("click", () => runCharacterLlmAction(
+  "/api/characters/llm/enhance",
+  { characters: currentCharacterPayload() },
+  "已完成 LLM 增强人设"
+).catch((error) => {
+  el.health.textContent = error.message;
+}));
+el.llmPromptBankBtn.addEventListener("click", () => runCharacterLlmAction(
+  "/api/characters/llm/prompt-bank",
+  { characters: currentCharacterPayload(), scenes: state.scenes, text: "" },
+  "已生成角色 Prompt Bank"
+).catch((error) => {
+  el.health.textContent = error.message;
+}));
+el.llmDiffBtn.addEventListener("click", () => runCharacterLlmAction(
+  "/api/characters/llm/diff",
+  { characters: currentCharacterPayload() },
+  "已完成 LLM 差异分析"
+).catch((error) => {
+  el.health.textContent = error.message;
+}));
+el.manualCharacterToggleBtn.addEventListener("click", () => {
+  togglePanel(el.manualCharacterPanel, el.manualCharacterToggleBtn, "收起手动添加", "手动添加角色");
+});
+el.addManualCharacterBtn.addEventListener("click", addManualCharacter);
+el.rulesToggleBtn.addEventListener("click", () => {
+  togglePanel(el.rulesPanel, el.rulesToggleBtn, "收起本地规则", "查看本地规则");
+});
 el.configToggle.addEventListener("click", () => {
   el.configPanel.hidden = !el.configPanel.hidden;
 });
@@ -1029,6 +1413,7 @@ el.rebuildPromptBtn.addEventListener("click", rebuildSelectedPrompt);
 el.restoreCharacterBtn.addEventListener("click", restoreSelectedCharacter);
 el.rebuildAllPromptsBtn.addEventListener("click", rebuildAllPrompts);
 el.imageBtn.addEventListener("click", generateImage);
+el.selectedImagesBtn.addEventListener("click", generateSelectedImages);
 el.allImagesBtn.addEventListener("click", generateAllImages);
 el.retryFailedBtn.addEventListener("click", retryFailedImages);
 el.exportBtn.addEventListener("click", exportMarkdown);
