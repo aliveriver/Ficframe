@@ -15,6 +15,7 @@
         </div>
         <div class="top-actions">
           <button id="configToggle" type="button">API 管理</button>
+          <button id="cleanStartBtn" type="button">清空界面</button>
           <button id="restoreRunBtn" type="button">恢复最近</button>
           <button id="logExportBtn" type="button">导出日志</button>
           <button id="runBtn" class="primary" type="button">生成分镜</button>
@@ -44,6 +45,7 @@
                 <span>供应商类型</span>
                 <select id="providerType">
                   <option value="openai">OpenAI 兼容</option>
+                  <option value="deepseek">DeepSeek 官方</option>
                   <option value="ark">火山 Ark</option>
                   <option value="siliconflow">SiliconFlow</option>
                   <option value="grsai">Grsai</option>
@@ -123,6 +125,7 @@
                 <button id="llmExtractCharactersBtn" type="button">LLM拆分人设</button>
                 <button id="llmEnhanceCharactersBtn" type="button">LLM增强人设</button>
                 <button id="llmPromptBankBtn" type="button">生成Prompt Bank</button>
+                <button id="localPromptBankBtn" type="button">本地Prompt Bank</button>
                 <button id="llmDiffBtn" type="button">LLM差异分析</button>
                 <button id="manualCharacterToggleBtn" type="button">手动添加角色</button>
               </div>
@@ -157,6 +160,47 @@
             <input id="useLlm" type="checkbox" />
             <span>LLM 增强</span>
           </label>
+          <label>
+            <span>LLM 模式</span>
+            <select id="llmProfile">
+              <option value="fast" selected>快速：复用当前人设，跳过慢精修</option>
+              <option value="full">完整：全流程 LLM 精修（很慢）</option>
+            </select>
+          </label>
+          <label>
+            <span>LLM 并发数</span>
+            <input id="llmConcurrency" type="number" min="1" max="8" value="3" />
+          </label>
+          <div class="rules-board">
+            <button id="llmModeHelpToggleBtn" type="button">查看 LLM 模式说明</button>
+            <div id="llmModeHelpPanel" class="rules-panel" hidden>
+              <section>
+                <h3>快速模式</h3>
+                <ul>
+                  <li>适合日常生成分镜、先看整体节奏和画面方向。</li>
+                  <li>会复用当前页面里已经识别、编辑或增强过的人设。</li>
+                  <li>会跳过比较耗时的场景精修、角色差异精修和逐张 Prompt 精修。</li>
+                  <li>速度更快，生成后仍然可以手动修改分镜和 Prompt。</li>
+                </ul>
+              </section>
+              <section>
+                <h3>完整模式</h3>
+                <ul>
+                  <li>适合最后挑少量重点分镜进行细化。</li>
+                  <li>会调用更多 LLM 请求，尽量加强场景理解、角色关系和英文生图 Prompt。</li>
+                  <li>效果可能更细，但耗时、token 消耗和超时风险都会更高。</li>
+                </ul>
+              </section>
+              <section>
+                <h3>LLM 并发数</h3>
+                <ul>
+                  <li>主要影响完整模式里的逐张 Prompt 精修。</li>
+                  <li>供应商稳定时可以用 3 或 4；容易限流、超时就调到 1 或 2。</li>
+                  <li>快速模式基本不会用到这个并发数。</li>
+                </ul>
+              </section>
+            </div>
+          </div>
           <div class="rules-board">
             <button id="rulesToggleBtn" type="button">查看本地规则</button>
             <div id="rulesPanel" class="rules-panel" hidden>
@@ -188,7 +232,8 @@
                 <ul>
                   <li>本地规则会生成角色卡、章节切分、分镜选择、基础 prompt 和连续性提示。</li>
                   <li>LLM 主要用于复杂人设拆分、场景理解、英文 prompt 精修和外貌状态计划。</li>
-                  <li>想省 token 时，先按规则整理输入，再关闭 LLM 增强。</li>
+                  <li>想省 token 和时间时，先用独立 LLM 按钮处理人设，再用快速模式生成分镜。</li>
+                  <li>LLM 并发数只影响完整模式的逐张分镜精修；供应商限流时请调低。</li>
                 </ul>
               </section>
             </div>
@@ -274,6 +319,6 @@
         </section>
       </section>
     </main>
-    <script src="/assets/app.js"></script>
+    <script src="/assets/app.js?v=20260807-0050"></script>
   </body>
 </html>

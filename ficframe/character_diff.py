@@ -50,15 +50,15 @@ FEATURE_BUCKETS = {
 HIGH_RISK_WORDS = {"双胞胎", "双生", "twin", "twins", "兄弟姐妹", "相似", "same", "identical"}
 
 
-def analyze_character_differences(cards: list[CharacterCard], provider: Any | None = None) -> dict[str, Any]:
+def analyze_character_differences(cards: list[CharacterCard], provider: Any | None = None, purpose: str = "llm:character_diff") -> dict[str, Any]:
     if provider and len(cards) >= 2:
-        llm_result = analyze_character_differences_with_llm(cards, provider)
+        llm_result = analyze_character_differences_with_llm(cards, provider, purpose=purpose)
         if llm_result:
             return llm_result
     return analyze_character_differences_locally(cards)
 
 
-def analyze_character_differences_with_llm(cards: list[CharacterCard], provider: Any) -> dict[str, Any] | None:
+def analyze_character_differences_with_llm(cards: list[CharacterCard], provider: Any, purpose: str = "llm:character_diff") -> dict[str, Any] | None:
     system = (
         "你是通用角色差异分析器，服务于小说配图和文生图 prompt。"
         "请只根据用户提供的人设文本分析，不要引入任何外部作品设定或默认角色印象。"
@@ -110,7 +110,7 @@ def analyze_character_differences_with_llm(cards: list[CharacterCard], provider:
         ensure_ascii=False,
     )
     try:
-        data = json.loads(provider.text(system, user))
+        data = json.loads(provider.text(system, user, purpose=purpose))
     except (RuntimeError, json.JSONDecodeError, TypeError, AttributeError):
         return None
     normalized = normalize_llm_analysis(data, cards)

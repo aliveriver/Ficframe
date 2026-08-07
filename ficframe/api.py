@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -25,7 +26,7 @@ from .llm_pipeline import (
 )
 from .logging_utils import build_log_bundle, get_logger, redact, setup_logging
 from .models import CharacterCard, Scene, Shot, to_dict
-from .providers import OpenAICompatibleProvider, ProviderError, build_url, effective_image_provider
+from .providers import EndpointConfig, OpenAICompatibleProvider, ProviderError, build_url, effective_image_provider, llm_runtime_path, safe_url, vlm_runtime_path
 from .prompt_bank import analyze_reference_visuals, build_character_prompt_bank
 from .qa import annotate_shots
 from .render import render_illustrated_novel, render_prompts, render_storyboard
@@ -113,6 +114,7 @@ class CharacterLlmRequest(BaseModel):
     text: str = ""
     characters: list[dict[str, Any]] = Field(default_factory=list)
     scenes: list[dict[str, Any]] = Field(default_factory=list)
+    pending_reference_image_count: int = 0
 
 
 class LogBundleRequest(BaseModel):
@@ -249,6 +251,9 @@ def test_provider(request: ProviderTestRequest) -> dict[str, Any]:
     headers = {"Authorization": f"Bearer {api_key}"}
     started = time.perf_counter()
     model_url = build_url(base_url, "models")
+    kind = str(source.get("kind") or "").lower()
+    provider_name = str(source.get("provider") or "openai").lower()
+    model_name = str(source.get("active_model") or "").strip()
     try:
         with httpx.Client(timeout=15.0, follow_redirects=True) as client:
             response = client.get(model_url, headers=headers)
@@ -256,13 +261,32 @@ def test_provider(request: ProviderTestRequest) -> dict[str, Any]:
             if response.status_code < 400:
                 data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
                 count = len(data.get("data", [])) if isinstance(data, dict) and isinstance(data.get("data"), list) else None
+                probe = probe_runtime_endpoint(client, base_url, api_key, kind, provider_name, model_name)
+                runtime_ok = bool(probe.get("ok", True))
+                runtime_suffix = ""
+                if probe.get("tested"):
+                    runtime_suffix = f"；正式端点 {probe.get('path')} {'可达' if runtime_ok else '不可达'}"
+                    if not runtime_ok and probe.get("message"):
+                        runtime_suffix += f"：{probe.get('message')}"
                 result = {
-                    "ok": True,
-                    "status_code": response.status_code,
-                    "latency_ms": latency_ms,
+                    "ok": runtime_ok,
+                    "status_code": probe.get("status_code") if probe.get("tested") else response.status_code,
+                    "latency_ms": int((time.perf_counter() - started) * 1000),
                     "message": f"/models 可达{f'，模型数 {count}' if count is not None else ''}",
                 }
-                logger.info("provider test ok source_id=%s kind=%s provider=%s status=%s latency_ms=%s", source.get("id"), source.get("kind"), source.get("provider"), response.status_code, latency_ms)
+                result["message"] = f"{result['message']}{runtime_suffix}"
+                logger.info(
+                    "provider test completed source_id=%s kind=%s provider=%s models_status=%s runtime_path=%s runtime_status=%s ok=%s latency_ms=%s url=%s",
+                    source.get("id"),
+                    kind,
+                    provider_name,
+                    response.status_code,
+                    probe.get("path", ""),
+                    probe.get("status_code", ""),
+                    runtime_ok,
+                    result["latency_ms"],
+                    safe_url(model_url),
+                )
                 return result
             if response.status_code not in {404, 405}:
                 result = {
@@ -294,6 +318,68 @@ def test_provider(request: ProviderTestRequest) -> dict[str, Any]:
         }
 
 
+def probe_runtime_endpoint(
+    client: httpx.Client,
+    base_url: str,
+    api_key: str,
+    kind: str,
+    provider_name: str,
+    model_name: str,
+) -> dict[str, Any]:
+    if kind not in {"llm", "vlm"} or not model_name:
+        return {"tested": False, "ok": True}
+    endpoint = EndpointConfig(api_key=api_key, base_url=base_url, model=model_name, provider=provider_name)
+    path = vlm_runtime_path(endpoint) if kind == "vlm" else llm_runtime_path(endpoint)
+    url = build_url(base_url, path)
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = build_runtime_probe_payload(kind, path, model_name)
+    started = time.perf_counter()
+    try:
+        response = client.post(url, headers=headers, json=payload)
+    except httpx.HTTPError as exc:
+        logger.warning("provider runtime probe exception kind=%s provider=%s url=%s error=%s", kind, provider_name, safe_url(url), exc)
+        return {"tested": True, "ok": False, "path": path, "status_code": None, "message": str(exc)}
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    ok = response.status_code < 400
+    logger.info(
+        "provider runtime probe kind=%s provider=%s path=%s status=%s latency_ms=%s ok=%s url=%s",
+        kind,
+        provider_name,
+        path,
+        response.status_code,
+        latency_ms,
+        ok,
+        safe_url(url),
+    )
+    return {
+        "tested": True,
+        "ok": ok,
+        "path": path,
+        "status_code": response.status_code,
+        "latency_ms": latency_ms,
+        "message": response.text[:300] if not ok else "",
+    }
+
+
+def build_runtime_probe_payload(kind: str, path: str, model_name: str) -> dict[str, Any]:
+    if path == "chat/completions":
+        return {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": "Return one short word."},
+                {"role": "user", "content": "ping"},
+            ],
+            "max_tokens": 4,
+        }
+    return {
+        "model": model_name,
+        "input": [
+            {"role": "system", "content": [{"type": "input_text", "text": "Return one short word."}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "ping"}]},
+        ],
+    }
+
+
 @app.post("/api/characters/preview")
 def preview_characters(request: CharacterPreviewRequest) -> dict[str, Any]:
     logger.info("characters preview started use_llm=%s text_length=%s", request.use_llm, len(request.text))
@@ -321,7 +407,7 @@ def llm_extract_characters(request: CharacterLlmRequest) -> dict[str, Any]:
     if not provider.config.llm.api_key:
         raise HTTPException(status_code=400, detail="未配置 LLM API key")
     local_cards = build_character_cards(request.text)
-    cards, status = extract_character_cards_with_llm_detailed(request.text, provider)
+    cards, status = extract_character_cards_with_llm_detailed(request.text, provider, purpose="button:llm_extract_characters")
     if not cards:
         logger.warning("characters llm extract fallback=local status=%s local_character_count=%s", status, len(local_cards))
         cards = local_cards
@@ -342,7 +428,7 @@ def llm_enhance_characters(request: CharacterLlmRequest) -> dict[str, Any]:
     if not provider.config.llm.api_key:
         raise HTTPException(status_code=400, detail="未配置 LLM API key")
     cards = parse_character_payload(request.characters)
-    cards = enhance_character_cards_with_llm(cards, provider)
+    cards = enhance_character_cards_with_llm(cards, provider, purpose="button:llm_enhance_characters")
     logger.info("characters llm enhance completed character_count=%s", len(cards))
     return {"characters": to_dict(cards), "llm_status": f"已增强 {len(cards)} 个角色"}
 
@@ -360,9 +446,107 @@ def llm_prompt_bank(request: CharacterLlmRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="未配置 LLM API key")
     cards = parse_character_payload(request.characters)
     scenes = parse_scene_payload(request.scenes)
-    build_character_prompt_bank(cards, scenes, provider)
-    logger.info("characters llm prompt bank completed character_count=%s", len(cards))
-    return {"characters": to_dict(cards), "llm_status": f"已生成 {len(cards)} 个角色 Prompt Bank"}
+    result = build_character_prompt_bank(cards, scenes, provider, purpose="button:llm_prompt_bank")
+    logger.info(
+        "characters llm prompt bank completed character_count=%s mode=%s llm_error=%s",
+        len(cards),
+        result.mode,
+        result.llm_error,
+    )
+    status = prompt_bank_status_text(result, len(cards))
+    missing_reference_visuals = sum(1 for card in cards if card.reference_images and not card.reference_visuals)
+    if request.pending_reference_image_count or missing_reference_visuals:
+        status += "；注意：当前独立按钮不会上传新参考图，需先跑一次含参考图的生成分镜/VLM 分析后，Prompt Bank 才能贴合参考图"
+    return {"characters": to_dict(cards), "llm_status": status, "llm_prompt_bank_mode": result.mode, "llm_error": result.llm_error}
+
+
+@app.post("/api/characters/prompt-bank/local")
+def local_prompt_bank(request: CharacterLlmRequest) -> dict[str, Any]:
+    logger.info("characters local prompt bank started character_count=%s scene_count=%s", len(request.characters), len(request.scenes))
+    cards = parse_character_payload(request.characters)
+    scenes = parse_scene_payload(request.scenes)
+    for card in cards:
+        card.reference_visuals = []
+        card.identity_prompt = ""
+        card.negative_identity_prompt = ""
+        card.appearance_states = []
+    result = build_character_prompt_bank(cards, scenes, None, purpose="button:local_prompt_bank")
+    logger.info("characters local prompt bank completed character_count=%s mode=%s", len(cards), result.mode)
+    return {
+        "characters": to_dict(cards),
+        "llm_status": f"已改用本地规则生成 {len(cards)} 个角色 Prompt Bank",
+        "llm_prompt_bank_mode": result.mode,
+        "llm_error": result.llm_error,
+    }
+
+
+@app.post("/api/characters/llm/prompt-bank/references")
+async def llm_prompt_bank_with_references(
+    characters: Annotated[str, Form()],
+    scenes: Annotated[str, Form()] = "[]",
+    reference_bindings: Annotated[str | None, Form()] = None,
+    reference_images: Annotated[list[UploadFile] | None, File()] = None,
+) -> dict[str, Any]:
+    logger.info(
+        "characters llm prompt bank with references started reference_images=%s characters_text_length=%s scenes_text_length=%s",
+        len(reference_images or []),
+        len(characters),
+        len(scenes),
+    )
+    provider = OpenAICompatibleProvider()
+    if not provider.config.llm.api_key:
+        raise HTTPException(status_code=400, detail="未配置 LLM API key")
+    cards = parse_character_payload(parse_json_list(characters))
+    scene_cards = parse_scene_payload(parse_json_list(scenes))
+    run_id = f"prompt-bank-{int(time.time())}"
+    run_dir = RUNS / run_id
+    refs_dir = run_dir / "references"
+    refs_dir.mkdir(parents=True, exist_ok=True)
+    bindings = parse_reference_bindings(reference_bindings)
+    for upload in reference_images or []:
+        filename = Path(upload.filename or "reference.png").name
+        target = refs_dir / filename
+        target.write_bytes(await upload.read())
+        url = f"/runs/{run_id}/references/{filename}"
+        bind_reference_image(cards, filename, url, bindings.get(filename, {}))
+        logger.info("prompt bank reference image saved run_id=%s filename=%s binding=%s", run_id, filename, redact(bindings.get(filename, {})))
+
+    vlm_status = ""
+    if reference_images and provider.config.vlm.api_key:
+        analyze_reference_visuals(cards, run_dir, provider, purpose=f"button:{run_id}:vlm_reference_visuals")
+        analyzed_count = sum(len(card.reference_visuals) for card in cards)
+        if analyzed_count:
+            reviewed_count = sum(
+                1
+                for card in cards
+                for item in card.reference_visuals
+                if isinstance(item, dict) and item.get("llm_reviewed")
+            )
+            suffix = f"，其中 {reviewed_count} 组已由 LLM 审查" if reviewed_count else ""
+            vlm_status = f"已先用 VLM 分析参考图（提取到 {analyzed_count} 组视觉事实{suffix}）"
+        else:
+            vlm_status = "已尝试 VLM 分析参考图，但未提取到视觉事实，请检查 VLM 模型是否支持图片输入"
+    elif reference_images:
+        vlm_status = "未配置 VLM API key，参考图已绑定但无法先做视觉分析"
+
+    result = build_character_prompt_bank(cards, scene_cards, provider, purpose="button:llm_prompt_bank")
+    status = prompt_bank_status_text(result, len(cards))
+    if vlm_status:
+        status = f"{vlm_status}；{status}"
+    logger.info(
+        "characters llm prompt bank with references completed character_count=%s reference_images=%s mode=%s llm_error=%s",
+        len(cards),
+        len(reference_images or []),
+        result.mode,
+        result.llm_error,
+    )
+    return {
+        "characters": to_dict(cards),
+        "llm_status": status,
+        "llm_prompt_bank_mode": result.mode,
+        "llm_error": result.llm_error,
+        "run_id": run_id,
+    }
 
 
 @app.post("/api/characters/llm/diff")
@@ -372,7 +556,7 @@ def llm_character_diff(request: CharacterLlmRequest) -> dict[str, Any]:
     if not provider.config.llm.api_key:
         raise HTTPException(status_code=400, detail="未配置 LLM API key")
     cards = parse_character_payload(request.characters)
-    difference_analysis = analyze_character_differences(cards, provider)
+    difference_analysis = analyze_character_differences(cards, provider, purpose="button:llm_character_diff")
     logger.info("characters llm diff completed character_count=%s pair_count=%s", len(cards), len(difference_analysis.get("pairs", [])))
     return {"difference_analysis": difference_analysis, "llm_status": "已完成角色差异分析"}
 
@@ -384,8 +568,11 @@ async def pipeline(
     reference_images: Annotated[list[UploadFile] | None, File()] = None,
     reference_bindings: Annotated[str | None, Form()] = None,
     manual_characters: Annotated[str | None, Form()] = None,
+    prepared_characters: Annotated[str | None, Form()] = None,
     max_shots: Annotated[int, Form()] = 8,
     use_llm: Annotated[bool, Form()] = False,
+    llm_profile: Annotated[str, Form()] = "fast",
+    llm_concurrency: Annotated[int, Form()] = 3,
 ) -> dict[str, Any]:
     run_id = str(int(time.time()))
     run_dir = RUNS / run_id
@@ -399,21 +586,26 @@ async def pipeline(
         logger.warning("pipeline rejected empty characters filename=%s", characters.filename)
         raise HTTPException(status_code=400, detail="人设文件为空，请重新选择包含角色设定的 Markdown")
     logger.info(
-        "pipeline started run_id=%s novel=%s characters=%s reference_images=%s max_shots=%s use_llm=%s",
+        "pipeline started run_id=%s novel=%s characters=%s reference_images=%s max_shots=%s use_llm=%s llm_profile=%s llm_concurrency=%s",
         run_id,
         novel.filename,
         characters.filename,
         len(reference_images or []),
         max_shots,
         use_llm,
+        llm_profile,
+        llm_concurrency,
     )
     write_text(run_dir / "novel.md", novel_text)
     write_text(run_dir / "characters.md", character_text)
 
-    cards = build_character_cards(character_text)
+    prepared_cards = parse_prepared_characters(prepared_characters)
+    cards = dedupe_cards(prepared_cards) if prepared_cards else build_character_cards(character_text)
     provider = OpenAICompatibleProvider() if use_llm else None
-    if provider:
-        llm_cards, extraction_status = extract_character_cards_with_llm_detailed(character_text, provider)
+    full_llm = bool(provider and llm_profile == "full")
+    fast_llm = bool(provider and llm_profile != "full")
+    if full_llm and not prepared_cards:
+        llm_cards, extraction_status = extract_character_cards_with_llm_detailed(character_text, provider, purpose=f"pipeline:{run_id}:extract_characters")
         if llm_cards:
             cards = llm_cards
             logger.info("pipeline llm character extraction applied run_id=%s character_count=%s", run_id, len(cards))
@@ -421,8 +613,10 @@ async def pipeline(
             logger.warning("pipeline llm character extraction fallback=local run_id=%s status=%s", run_id, extraction_status)
     cards.extend(parse_manual_characters(manual_characters))
     cards = dedupe_cards(cards)
-    if provider:
-        cards = enhance_character_cards_with_llm(cards, provider)
+    if full_llm and not prepared_cards:
+        cards = enhance_character_cards_with_llm(cards, provider, purpose=f"pipeline:{run_id}:enhance_characters")
+    elif fast_llm:
+        logger.info("pipeline fast llm reused prepared/local characters run_id=%s prepared_character_count=%s", run_id, len(prepared_cards))
     bindings = parse_reference_bindings(reference_bindings)
     if reference_images:
         refs_dir = run_dir / "references"
@@ -437,19 +631,34 @@ async def pipeline(
             logger.info("reference image saved run_id=%s filename=%s binding=%s", run_id, filename, redact(binding))
     vlm_provider = OpenAICompatibleProvider()
     if reference_images and vlm_provider.config.vlm.api_key:
-        analyze_reference_visuals(cards, run_dir, vlm_provider)
+        analyze_reference_visuals(cards, run_dir, vlm_provider, purpose=f"pipeline:{run_id}:vlm_reference_visuals")
     scenes = segment_novel(novel_text, cards)
     logger.info("pipeline local segmentation completed run_id=%s scene_count=%s novel_text_length=%s", run_id, len(scenes), len(novel_text))
-    if provider:
-        scenes = refine_scenes_with_llm(scenes, cards, provider)
+    if full_llm:
+        scenes = refine_scenes_with_llm(scenes, cards, provider, purpose=f"pipeline:{run_id}:refine_scenes")
         logger.info("pipeline llm scene refinement completed run_id=%s scene_count=%s", run_id, len(scenes))
-    build_character_prompt_bank(cards, scenes, provider)
-    difference_analysis = analyze_character_differences(cards, provider)
+    elif fast_llm:
+        logger.info("pipeline fast llm skipped scene refinement run_id=%s", run_id)
+    prompt_bank_result = build_character_prompt_bank(cards, scenes, provider if full_llm else None, purpose=f"pipeline:{run_id}:prompt_bank")
+    logger.info(
+        "pipeline prompt bank completed run_id=%s requested_mode=%s actual_mode=%s llm_error=%s reference_visual_count=%s identity_prompt_count=%s appearance_state_count=%s",
+        run_id,
+        "llm" if full_llm else "local",
+        prompt_bank_result.mode,
+        prompt_bank_result.llm_error,
+        sum(len(card.reference_visuals) for card in cards),
+        sum(1 for card in cards if card.identity_prompt),
+        sum(len(card.appearance_states) for card in cards),
+    )
+    difference_analysis = analyze_character_differences(cards, provider if full_llm else None, purpose=f"pipeline:{run_id}:character_diff")
     state = initial_state(cards)
     shots, state = build_storyboard(scenes, cards, state, max_shots=max_shots, difference_analysis=difference_analysis)
     annotate_shots(shots, cards)
-    if provider:
-        shots = [polish_shot_prompt(shot, cards, provider) for shot in shots]
+    if full_llm:
+        shots = polish_shots_with_llm(shots, cards, provider, llm_concurrency, run_id=run_id)
+    elif fast_llm:
+        for shot in shots:
+            shot.qa_notes.append("快速 LLM 模式：已跳过逐张 Prompt 精修，可在右侧手动编辑或使用独立 LLM 按钮增强角色。")
 
     payload = {
         "run_id": run_id,
@@ -506,6 +715,68 @@ def parse_manual_characters(raw: str | None) -> list[CharacterCard]:
             )
         )
     return cards
+
+
+def polish_shots_with_llm(
+    shots: list[Shot],
+    cards: list[CharacterCard],
+    provider: OpenAICompatibleProvider,
+    concurrency: int,
+    run_id: str,
+) -> list[Shot]:
+    workers = max(1, min(8, safe_int(concurrency, 3)))
+    if workers <= 1 or len(shots) <= 1:
+        logger.info("pipeline llm shot polish started mode=serial shot_count=%s", len(shots))
+        return [polish_shot_prompt(shot, cards, provider, purpose=f"pipeline:{run_id}:polish_shot:{shot.id}") for shot in shots]
+    logger.info("pipeline llm shot polish started mode=concurrent shot_count=%s workers=%s", len(shots), workers)
+
+    def polish_one(shot: Shot) -> Shot:
+        try:
+            return polish_shot_prompt(shot, cards, provider, purpose=f"pipeline:{run_id}:polish_shot:{shot.id}")
+        except Exception as exc:  # Defensive: one bad item should not discard the storyboard.
+            logger.warning("pipeline llm shot polish item failed shot_id=%s error=%s", shot.id, exc)
+            shot.qa_notes.append(f"LLM 分镜精修失败，已保留本地 prompt：{exc}")
+            return shot
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        polished = list(executor.map(polish_one, shots))
+    logger.info("pipeline llm shot polish completed shot_count=%s workers=%s", len(polished), workers)
+    return polished
+
+
+def parse_prepared_characters(raw: str | None) -> list[CharacterCard]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, list):
+        return []
+    return parse_character_payload(data)
+
+
+def parse_json_list(raw: str | None) -> list[dict[str, Any]]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def prompt_bank_status_text(result: Any, character_count: int) -> str:
+    if result.mode == "vlm_llm_reviewed":
+        return f"已由 VLM 提取并经 LLM 审查生成 {character_count} 个角色 Prompt Bank"
+    if result.mode == "vlm":
+        return f"已由 VLM 参考图结果生成 {character_count} 个角色 Prompt Bank"
+    if result.mode == "llm":
+        return f"LLM 已生成 {character_count} 个角色 Prompt Bank"
+    if result.mode == "llm_guarded":
+        return f"LLM 已生成 {character_count} 个角色 Prompt Bank，但{result.llm_error}"
+    detail = f"：{result.llm_error}" if result.llm_error else ""
+    return f"LLM 生成 Prompt Bank 失败{detail}，已改用本地规则生成 {character_count} 个角色 Prompt Bank"
 
 
 def parse_character_payload(items: list[dict[str, Any]]) -> list[CharacterCard]:
@@ -607,7 +878,13 @@ def generate_image(request: ImageRequest) -> dict[str, Any]:
     try:
         references = reference_paths_for_shot(request.run_id, shot)
         logger.info("image generation started run_id=%s shot_id=%s size=%s reference_count=%s", request.run_id, shot.id, request.size, len(references))
-        provider.image(image_prompt_for_shot(shot), target, size=request.size, reference_images=references)
+        provider.image(
+            image_prompt_for_shot(shot),
+            target,
+            size=request.size,
+            reference_images=references,
+            purpose=f"image:single:{request.run_id}:{shot.id}",
+        )
     except ProviderError as exc:
         logger.warning("image generation failed run_id=%s shot_id=%s error=%s", request.run_id, shot.id, exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -678,7 +955,13 @@ def generate_batch_image_item(
     last_error = ""
     for attempt in range(retry_count + 1):
         try:
-            provider.image(image_prompt_for_shot(shot), target, size=size, reference_images=references)
+            provider.image(
+                image_prompt_for_shot(shot),
+                target,
+                size=size,
+                reference_images=references,
+                purpose=f"image:batch:{run_id}:{shot.id}:attempt{attempt + 1}",
+            )
             image_url = image_url_for_path(run_id, target)
             payload = update_shot_image(run_id, shot.id, str(target), image_url, activate=activate)
             logger.info("batch image item completed run_id=%s shot_id=%s reference_count=%s attempt=%s", run_id, shot.id, len(references), attempt + 1)

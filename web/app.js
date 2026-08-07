@@ -23,6 +23,7 @@ const el = {
   health: document.querySelector("#health"),
   runBtn: document.querySelector("#runBtn"),
   configToggle: document.querySelector("#configToggle"),
+  cleanStartBtn: document.querySelector("#cleanStartBtn"),
   restoreRunBtn: document.querySelector("#restoreRunBtn"),
   logExportBtn: document.querySelector("#logExportBtn"),
   configPanel: document.querySelector("#configPanel"),
@@ -34,6 +35,7 @@ const el = {
   llmExtractCharactersBtn: document.querySelector("#llmExtractCharactersBtn"),
   llmEnhanceCharactersBtn: document.querySelector("#llmEnhanceCharactersBtn"),
   llmPromptBankBtn: document.querySelector("#llmPromptBankBtn"),
+  localPromptBankBtn: document.querySelector("#localPromptBankBtn"),
   llmDiffBtn: document.querySelector("#llmDiffBtn"),
   manualCharacterToggleBtn: document.querySelector("#manualCharacterToggleBtn"),
   manualCharacterPanel: document.querySelector("#manualCharacterPanel"),
@@ -43,6 +45,10 @@ const el = {
   addManualCharacterBtn: document.querySelector("#addManualCharacterBtn"),
   maxShots: document.querySelector("#maxShots"),
   useLlm: document.querySelector("#useLlm"),
+  llmProfile: document.querySelector("#llmProfile"),
+  llmConcurrency: document.querySelector("#llmConcurrency"),
+  llmModeHelpToggleBtn: document.querySelector("#llmModeHelpToggleBtn"),
+  llmModeHelpPanel: document.querySelector("#llmModeHelpPanel"),
   rulesToggleBtn: document.querySelector("#rulesToggleBtn"),
   rulesPanel: document.querySelector("#rulesPanel"),
   imageSize: document.querySelector("#imageSize"),
@@ -181,6 +187,44 @@ function clearRunArtifacts(message = "新输入已选择，请重新生成分镜
   el.qaBox.textContent = "";
   el.health.textContent = message;
   saveWorkspaceDraft();
+}
+
+function clearWorkspaceForRecording(message = "") {
+  localStorage.removeItem(WORKSPACE_KEY);
+  state.runId = null;
+  state.shots = [];
+  state.scenes = [];
+  state.autoCharacters = [];
+  state.manualCharacters = [];
+  state.characters = [];
+  state.originalShots = [];
+  state.originalCharacters = [];
+  state.differenceAnalysis = null;
+  state.selected = null;
+  state.selectedShotIds.clear();
+  state.selectedCharacterIndex = 0;
+  state.referenceBindings = [];
+  el.runId.textContent = "未运行";
+  el.shotList.innerHTML = "";
+  el.promptBox.value = "";
+  el.charactersBox.textContent = "";
+  el.characterDiffBox.textContent = "";
+  el.characterEditorSelect.innerHTML = "";
+  el.identityPromptBox.value = "";
+  el.appearanceStatesBox.value = "";
+  el.negativeIdentityPromptBox.value = "";
+  el.referenceTable.innerHTML = `<p class="muted">尚未选择参考图</p>`;
+  el.preview.innerHTML = "";
+  el.imageVersions.innerHTML = "";
+  el.qaBox.textContent = "";
+  if (message) {
+    el.health.textContent = message;
+  }
+}
+
+function cleanStartRequested() {
+  const params = new URLSearchParams(window.location.search);
+  return params.has("clean") || params.has("fresh");
 }
 
 function selectedFileLabel(file) {
@@ -621,7 +665,7 @@ function rebuildSelectedPrompt() {
   saveWorkspaceDraft();
 }
 
-function rebuildAllPrompts() {
+function rebuildAllPrompts(message = "全部 prompt 已根据角色库重建") {
   saveSelectedPrompt();
   saveCharacterEditor();
   for (const shot of state.shots) {
@@ -630,7 +674,7 @@ function rebuildAllPrompts() {
   if (state.selected) {
     el.promptBox.value = state.selected.positive_prompt;
   }
-  el.health.textContent = "全部 prompt 已根据角色库重建";
+  el.health.textContent = message;
   saveWorkspaceDraft();
 }
 
@@ -768,7 +812,55 @@ async function runCharacterLlmAction(path, body, successPrefix) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  applyCharacterResponse(data, `${successPrefix}${data.llm_status ? ` · ${data.llm_status}` : ""}`);
+  applyCharacterResponse(data, data.llm_status || successPrefix);
+}
+
+async function runPromptBankAction() {
+  if (!el.charactersFile.files[0]) {
+    el.health.textContent = "请先选择人物 Markdown";
+    return;
+  }
+  if (!state.characters.length) {
+    el.health.textContent = "请先识别角色";
+    return;
+  }
+  if (!el.referenceImages.files.length) {
+    await runCharacterLlmAction(
+      "/api/characters/llm/prompt-bank",
+      { characters: currentCharacterPayload(), scenes: state.scenes, text: "" },
+      "已生成角色 Prompt Bank"
+    );
+    return;
+  }
+  el.health.textContent = "正在先用 VLM 分析参考图，再生成 Prompt Bank";
+  const form = new FormData();
+  for (const file of el.referenceImages.files) {
+    form.append("reference_images", file);
+  }
+  form.append("characters", JSON.stringify(currentCharacterPayload()));
+  form.append("scenes", JSON.stringify(state.scenes));
+  form.append("reference_bindings", JSON.stringify(serializeReferenceBindings()));
+  const data = await api("/api/characters/llm/prompt-bank/references", { method: "POST", body: form });
+  applyCharacterResponse(data, data.llm_status || "已生成角色 Prompt Bank");
+}
+
+async function runLocalPromptBankAction() {
+  if (!el.charactersFile.files[0]) {
+    el.health.textContent = "请先选择人物 Markdown";
+    return;
+  }
+  if (!state.characters.length) {
+    el.health.textContent = "请先识别角色";
+    return;
+  }
+  el.health.textContent = "正在使用本地规则生成 Prompt Bank";
+  const data = await api("/api/characters/prompt-bank/local", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ characters: currentCharacterPayload(), scenes: state.scenes, text: "" }),
+  });
+  applyCharacterResponse(data, data.llm_status || "已改用本地规则生成 Prompt Bank");
+  rebuildAllPrompts(data.llm_status || "已改用本地规则生成 Prompt Bank，并已重建全部 prompt");
 }
 
 function addManualCharacter() {
@@ -916,8 +1008,11 @@ async function runPipeline() {
     }
     form.append("reference_bindings", JSON.stringify(serializeReferenceBindings()));
     form.append("manual_characters", JSON.stringify(state.manualCharacters));
+    form.append("prepared_characters", JSON.stringify(currentCharacterPayload()));
     form.append("max_shots", el.maxShots.value);
     form.append("use_llm", el.useLlm.checked ? "true" : "false");
+    form.append("llm_profile", el.llmProfile?.value || "fast");
+    form.append("llm_concurrency", el.llmConcurrency?.value || "3");
     const data = await api("/api/pipeline", { method: "POST", body: form });
     state.runId = data.run_id;
     state.shots = data.shots;
@@ -1322,11 +1417,10 @@ el.llmEnhanceCharactersBtn.addEventListener("click", () => runCharacterLlmAction
 ).catch((error) => {
   el.health.textContent = error.message;
 }));
-el.llmPromptBankBtn.addEventListener("click", () => runCharacterLlmAction(
-  "/api/characters/llm/prompt-bank",
-  { characters: currentCharacterPayload(), scenes: state.scenes, text: "" },
-  "已生成角色 Prompt Bank"
-).catch((error) => {
+el.llmPromptBankBtn.addEventListener("click", () => runPromptBankAction().catch((error) => {
+  el.health.textContent = error.message;
+}));
+el.localPromptBankBtn.addEventListener("click", () => runLocalPromptBankAction().catch((error) => {
   el.health.textContent = error.message;
 }));
 el.llmDiffBtn.addEventListener("click", () => runCharacterLlmAction(
@@ -1340,12 +1434,22 @@ el.manualCharacterToggleBtn.addEventListener("click", () => {
   togglePanel(el.manualCharacterPanel, el.manualCharacterToggleBtn, "收起手动添加", "手动添加角色");
 });
 el.addManualCharacterBtn.addEventListener("click", addManualCharacter);
+el.llmModeHelpToggleBtn.addEventListener("click", () => {
+  togglePanel(el.llmModeHelpPanel, el.llmModeHelpToggleBtn, "收起 LLM 模式说明", "查看 LLM 模式说明");
+});
 el.rulesToggleBtn.addEventListener("click", () => {
   togglePanel(el.rulesPanel, el.rulesToggleBtn, "收起本地规则", "查看本地规则");
 });
 el.configToggle.addEventListener("click", () => {
   el.configPanel.hidden = !el.configPanel.hidden;
 });
+if (el.cleanStartBtn) {
+  el.cleanStartBtn.addEventListener("click", () => {
+    clearWorkspaceForRecording();
+    const cleanUrl = `${window.location.pathname}?clean=1`;
+    window.history.replaceState(null, "", cleanUrl);
+  });
+}
 el.restoreRunBtn.addEventListener("click", () => restoreLatestRun().catch((error) => {
   el.health.textContent = `恢复失败：${error.message}`;
 }));
@@ -1429,6 +1533,10 @@ loadConfig().catch((error) => {
   el.health.textContent = error.message;
 });
 checkHealth().then(() => {
+  if (cleanStartRequested()) {
+    clearWorkspaceForRecording();
+    return;
+  }
   if (!restoreWorkspaceDraft()) {
     restoreLatestRun().catch(() => {});
   }

@@ -14,6 +14,7 @@ CONFIG_KEYS = [
     "FICFRAME_IMAGE_TIMEOUT",
     "FICFRAME_LLM_API_KEY",
     "FICFRAME_LLM_BASE_URL",
+    "FICFRAME_LLM_PROVIDER",
     "FICFRAME_LLM_MODEL",
     "FICFRAME_IMAGE_API_KEY",
     "FICFRAME_IMAGE_BASE_URL",
@@ -36,6 +37,7 @@ DEFAULT_CONFIG = {
     "FICFRAME_TIMEOUT": "300",
     "FICFRAME_IMAGE_TIMEOUT": "900",
     "FICFRAME_LLM_BASE_URL": "https://api.openai.com/v1",
+    "FICFRAME_LLM_PROVIDER": "openai",
     "FICFRAME_LLM_MODEL": "gpt-5-mini",
     "FICFRAME_IMAGE_BASE_URL": "https://api.siliconflow.cn/v1",
     "FICFRAME_IMAGE_PROVIDER": "siliconflow",
@@ -63,7 +65,7 @@ def default_provider_config(env_path: str | Path) -> dict[str, Any]:
                 "id": "llm-default",
                 "label": "默认 LLM",
                 "kind": "llm",
-                "provider": "openai",
+                "provider": values.get("FICFRAME_LLM_PROVIDER", "openai"),
                 "base_url": values.get("FICFRAME_LLM_BASE_URL", ""),
                 "api_key": values.get("FICFRAME_LLM_API_KEY", ""),
                 "models": [{"nickname": "默认模型", "model": values.get("FICFRAME_LLM_MODEL", "")}],
@@ -259,7 +261,7 @@ def sync_active_sources_to_env(env_path: str | Path, data: dict[str, Any]) -> No
     active = data.get("active", {})
     values: dict[str, str] = {}
     mappings = {
-        "llm": ("FICFRAME_LLM", False),
+        "llm": ("FICFRAME_LLM", True),
         "image": ("FICFRAME_IMAGE", True),
         "vlm": ("FICFRAME_VLM", True),
     }

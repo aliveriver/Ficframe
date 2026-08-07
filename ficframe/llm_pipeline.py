@@ -13,7 +13,7 @@ JSON_RULE = "只输出 JSON，不要 Markdown，不要解释。"
 logger = get_logger("llm_pipeline")
 
 
-def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAICompatibleProvider) -> Shot:
+def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAICompatibleProvider, purpose: str | None = None) -> Shot:
     system = (
         "你是小说插画分镜与文生图提示词专家。你的任务是把已有 prompt 精修得更适合生图，"
         "重点保持角色一致性、剧情准确、相邻画面连续。"
@@ -62,7 +62,7 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
         ensure_ascii=False,
     )
     try:
-        raw = provider.text(system, user)
+        raw = provider.text(system, user, purpose=purpose or f"pipeline:polish_shot_prompt:{shot.id}")
         data = parse_llm_json(raw)
     except (ProviderError, json.JSONDecodeError, TypeError) as exc:
         shot.qa_notes.append(f"LLM 增强失败，已保留本地 prompt：{exc}")
@@ -71,7 +71,7 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
     positive_prompt = data.get("positive_prompt") or shot.positive_prompt
     negative_prompt = data.get("negative_prompt") or shot.negative_prompt
     if not is_english_structured_prompt(positive_prompt):
-        repaired = repair_prompt_with_llm(shot, cards, provider, positive_prompt, negative_prompt)
+        repaired = repair_prompt_with_llm(shot, cards, provider, positive_prompt, negative_prompt, purpose=f"{purpose or 'pipeline:polish_shot_prompt'}:repair:{shot.id}")
         if repaired:
             positive_prompt = repaired.get("positive_prompt") or positive_prompt
             negative_prompt = repaired.get("negative_prompt") or negative_prompt
@@ -86,12 +86,12 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
     return shot
 
 
-def extract_character_cards_with_llm(raw_text: str, provider: OpenAICompatibleProvider) -> list[CharacterCard]:
-    cards, _ = extract_character_cards_with_llm_detailed(raw_text, provider)
+def extract_character_cards_with_llm(raw_text: str, provider: OpenAICompatibleProvider, purpose: str = "llm:extract_character_cards") -> list[CharacterCard]:
+    cards, _ = extract_character_cards_with_llm_detailed(raw_text, provider, purpose=purpose)
     return cards
 
 
-def extract_character_cards_with_llm_detailed(raw_text: str, provider: OpenAICompatibleProvider) -> tuple[list[CharacterCard], str]:
+def extract_character_cards_with_llm_detailed(raw_text: str, provider: OpenAICompatibleProvider, purpose: str = "llm:extract_character_cards") -> tuple[list[CharacterCard], str]:
     system = (
         "You are a character profile splitter and extractor for illustrated fiction. "
         "Read the supplied character notes and identify every distinct character that has its own profile. "
@@ -119,7 +119,7 @@ def extract_character_cards_with_llm_detailed(raw_text: str, provider: OpenAICom
         ensure_ascii=False,
     )
     try:
-        raw = provider.text(system, user)
+        raw = provider.text(system, user, purpose=purpose)
         data = parse_llm_json(raw)
     except ProviderError as exc:
         logger.warning("llm character extraction provider_error=%s", exc)
@@ -162,7 +162,7 @@ def extract_character_cards_with_llm_detailed(raw_text: str, provider: OpenAICom
     return cards, f"LLM 返回 {len(cards)} 个可用角色"
 
 
-def enhance_character_cards_with_llm(cards: list[CharacterCard], provider: OpenAICompatibleProvider) -> list[CharacterCard]:
+def enhance_character_cards_with_llm(cards: list[CharacterCard], provider: OpenAICompatibleProvider, purpose: str = "llm:enhance_character_cards") -> list[CharacterCard]:
     system = (
         "You are a character profile extraction assistant for image generation. "
         "Use only the supplied character profile text. Extract stable identity, appearance, personality, fixed traits, "
@@ -204,7 +204,7 @@ def enhance_character_cards_with_llm(cards: list[CharacterCard], provider: OpenA
         ensure_ascii=False,
     )
     try:
-        data = parse_llm_json(provider.text(system, user))
+        data = parse_llm_json(provider.text(system, user, purpose=purpose))
     except (ProviderError, json.JSONDecodeError, TypeError):
         return cards
     by_name = {card.name: card for card in cards}
@@ -260,6 +260,7 @@ def repair_prompt_with_llm(
     provider: OpenAICompatibleProvider,
     positive_prompt: str,
     negative_prompt: str,
+    purpose: str = "llm:repair_prompt",
 ) -> dict | None:
     system = (
         "Rewrite this image-generation prompt into a consistent English prompt. "
@@ -294,7 +295,7 @@ def repair_prompt_with_llm(
         ensure_ascii=False,
     )
     try:
-        data = parse_llm_json(provider.text(system, user))
+        data = parse_llm_json(provider.text(system, user, purpose=purpose))
     except (ProviderError, json.JSONDecodeError, TypeError):
         return None
     if is_english_structured_prompt(str(data.get("positive_prompt") or "")):
@@ -312,7 +313,7 @@ def is_english_structured_prompt(prompt: str) -> bool:
     return letters >= max(80, cjk * 3)
 
 
-def summarize_scene_with_llm(scene: Scene, provider: OpenAICompatibleProvider) -> Scene:
+def summarize_scene_with_llm(scene: Scene, provider: OpenAICompatibleProvider, purpose: str | None = None) -> Scene:
     system = (
         "你是小说章节分析工具。提取这个场景的可视化摘要、地点、时间、情绪和镜头类型。"
         "summary、location、time、mood 请优先输出英文，角色名和专有名词可以保留原文。"
@@ -333,7 +334,7 @@ def summarize_scene_with_llm(scene: Scene, provider: OpenAICompatibleProvider) -
         ensure_ascii=False,
     )
     try:
-        data = parse_llm_json(provider.text(system, user))
+        data = parse_llm_json(provider.text(system, user, purpose=purpose or f"pipeline:summarize_scene:{scene.id}"))
     except (ProviderError, json.JSONDecodeError, TypeError):
         return scene
     scene.summary = data.get("summary") or scene.summary
@@ -345,7 +346,7 @@ def summarize_scene_with_llm(scene: Scene, provider: OpenAICompatibleProvider) -
     return scene
 
 
-def refine_scenes_with_llm(scenes: list[Scene], cards: list[CharacterCard], provider: OpenAICompatibleProvider) -> list[Scene]:
+def refine_scenes_with_llm(scenes: list[Scene], cards: list[CharacterCard], provider: OpenAICompatibleProvider, purpose: str = "pipeline:refine_scenes") -> list[Scene]:
     by_id = {scene.id: scene for scene in scenes}
     system = (
         "You are a story structure analyzer for illustrated fiction. "
@@ -384,7 +385,7 @@ def refine_scenes_with_llm(scenes: list[Scene], cards: list[CharacterCard], prov
         ensure_ascii=False,
     )
     try:
-        data = parse_llm_json(provider.text(system, user))
+        data = parse_llm_json(provider.text(system, user, purpose=purpose))
     except (ProviderError, json.JSONDecodeError, TypeError):
         return scenes
     valid_names = {card.name for card in cards}
