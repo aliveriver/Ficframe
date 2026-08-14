@@ -30,6 +30,10 @@ CONFIG_KEYS = [
     "FICFRAME_IMAGE_SEQUENTIAL",
     "FICFRAME_IMAGE_RESPONSE_FORMAT",
     "FICFRAME_IMAGE_WATERMARK",
+    "FICFRAME_COMFYUI_WORKFLOW_PATH",
+    "FICFRAME_COMFYUI_NEGATIVE_PROMPT",
+    "FICFRAME_COMFYUI_OUTPUT_NODE_ID",
+    "FICFRAME_COMFYUI_POLL_INTERVAL",
 ]
 
 
@@ -51,6 +55,10 @@ DEFAULT_CONFIG = {
     "FICFRAME_IMAGE_SEQUENTIAL": "disabled",
     "FICFRAME_IMAGE_RESPONSE_FORMAT": "url",
     "FICFRAME_IMAGE_WATERMARK": "true",
+    "FICFRAME_COMFYUI_WORKFLOW_PATH": "",
+    "FICFRAME_COMFYUI_NEGATIVE_PROMPT": "",
+    "FICFRAME_COMFYUI_OUTPUT_NODE_ID": "",
+    "FICFRAME_COMFYUI_POLL_INTERVAL": "1",
 }
 
 
@@ -88,6 +96,10 @@ def default_provider_config(env_path: str | Path) -> dict[str, Any]:
                     "sequential": values.get("FICFRAME_IMAGE_SEQUENTIAL", "disabled"),
                     "response_format": values.get("FICFRAME_IMAGE_RESPONSE_FORMAT", "url"),
                     "watermark": values.get("FICFRAME_IMAGE_WATERMARK", "true"),
+                    "workflow_json": read_workflow_file(values.get("FICFRAME_COMFYUI_WORKFLOW_PATH", ""), Path(env_path).parent),
+                    "negative_prompt": values.get("FICFRAME_COMFYUI_NEGATIVE_PROMPT", ""),
+                    "output_node_id": values.get("FICFRAME_COMFYUI_OUTPUT_NODE_ID", ""),
+                    "poll_interval": values.get("FICFRAME_COMFYUI_POLL_INTERVAL", "1"),
                 },
                 "created_at": now,
             },
@@ -285,10 +297,23 @@ def sync_active_sources_to_env(env_path: str | Path, data: dict[str, Any]) -> No
                 "sequential": "FICFRAME_IMAGE_SEQUENTIAL",
                 "response_format": "FICFRAME_IMAGE_RESPONSE_FORMAT",
                 "watermark": "FICFRAME_IMAGE_WATERMARK",
+                "workflow_json": "FICFRAME_COMFYUI_WORKFLOW_PATH",
+                "negative_prompt": "FICFRAME_COMFYUI_NEGATIVE_PROMPT",
+                "output_node_id": "FICFRAME_COMFYUI_OUTPUT_NODE_ID",
+                "poll_interval": "FICFRAME_COMFYUI_POLL_INTERVAL",
             }
             for option_key, env_key in option_map.items():
                 if option_key in options:
-                    values[env_key] = str(options[option_key])
+                    option_value = str(options[option_key])
+                    if option_key == "workflow_json":
+                        workflow_path = Path(env_path).parent / ".ficframe" / "comfyui_workflow.json"
+                        if option_value:
+                            workflow_path.parent.mkdir(parents=True, exist_ok=True)
+                            workflow_path.write_text(option_value, encoding="utf-8")
+                            option_value = str(workflow_path.resolve())
+                        else:
+                            option_value = ""
+                    values[env_key] = option_value
     write_env_file(env_path, values)
 
 
@@ -298,6 +323,18 @@ def mask_secret(value: str) -> str:
     if len(value) <= 8:
         return "****"
     return f"{value[:4]}...{value[-4:]}"
+
+
+def read_workflow_file(value: str, base_dir: Path) -> str:
+    if not value.strip():
+        return ""
+    path = Path(value)
+    if not path.is_absolute():
+        path = base_dir / path
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
 
 
 def is_masked_or_empty(value: str) -> bool:

@@ -99,6 +99,12 @@ const el = {
   imageSequential: document.querySelector("#imageSequential"),
   imageResponseFormat: document.querySelector("#imageResponseFormat"),
   imageWatermark: document.querySelector("#imageWatermark"),
+  comfyOptions: document.querySelector("#comfyOptions"),
+  comfyWorkflowFile: document.querySelector("#comfyWorkflowFile"),
+  comfyWorkflow: document.querySelector("#comfyWorkflow"),
+  comfyNegativePrompt: document.querySelector("#comfyNegativePrompt"),
+  comfyOutputNode: document.querySelector("#comfyOutputNode"),
+  comfyPollInterval: document.querySelector("#comfyPollInterval"),
 };
 
 async function api(path, options = {}) {
@@ -352,6 +358,10 @@ function providerTemplate(kind = "image") {
       sequential: "disabled",
       response_format: "url",
       watermark: "true",
+      workflow_json: "",
+      negative_prompt: "",
+      output_node_id: "",
+      poll_interval: "1",
     } : {},
     created_at: Math.floor(Date.now() / 1000),
   };
@@ -409,7 +419,12 @@ function renderProviderDetail() {
   el.imageSequential.value = options.sequential || "";
   el.imageResponseFormat.value = options.response_format || "";
   el.imageWatermark.value = options.watermark || "true";
+  el.comfyWorkflow.value = options.workflow_json || "";
+  el.comfyNegativePrompt.value = options.negative_prompt || "";
+  el.comfyOutputNode.value = options.output_node_id || "";
+  el.comfyPollInterval.value = options.poll_interval || "1";
   el.imageOptions.hidden = source.kind !== "image";
+  el.comfyOptions.hidden = source.kind !== "image" || source.provider !== "comfyui";
   renderModelTable(source);
 }
 
@@ -464,6 +479,10 @@ function syncProviderForm() {
     sequential: el.imageSequential.value,
     response_format: el.imageResponseFormat.value,
     watermark: el.imageWatermark.value,
+    workflow_json: el.comfyWorkflow.value,
+    negative_prompt: el.comfyNegativePrompt.value,
+    output_node_id: el.comfyOutputNode.value.trim(),
+    poll_interval: el.comfyPollInterval.value || "1",
   } : {};
   if (previousKind !== source.kind && state.providerConfig.active?.[previousKind] === source.id) {
     state.providerConfig.active[previousKind] = "";
@@ -1479,18 +1498,45 @@ el.addModelBtn.addEventListener("click", () => {
   source.models.push({ nickname: "新模型", model: "" });
   renderModelTable(source);
 });
-for (const node of [el.providerKind, el.providerType, el.providerActive, el.providerLabel, el.providerBaseUrl, el.providerKey, el.imageSteps, el.imageGuidance, el.imageBatch, el.imageSequential, el.imageResponseFormat, el.imageWatermark]) {
+el.providerType.addEventListener("change", () => {
+  const source = findProvider();
+  const knownCloudDefaults = [
+    "https://api.openai.com/v1",
+    "https://api.siliconflow.cn/v1",
+    "https://ark.cn-beijing.volces.com/api/v3",
+  ];
+  if (el.providerType.value === "comfyui" && source?.provider !== "comfyui" && (!el.providerBaseUrl.value || knownCloudDefaults.includes(el.providerBaseUrl.value))) {
+    el.providerBaseUrl.value = "http://127.0.0.1:8188";
+    el.providerKey.value = "";
+  }
+});
+for (const node of [el.providerKind, el.providerType, el.providerActive, el.providerLabel, el.providerBaseUrl, el.providerKey, el.imageSteps, el.imageGuidance, el.imageBatch, el.imageSequential, el.imageResponseFormat, el.imageWatermark, el.comfyWorkflow, el.comfyNegativePrompt, el.comfyOutputNode, el.comfyPollInterval]) {
   node.addEventListener("input", () => {
     syncProviderForm();
     renderProviderList();
     el.imageOptions.hidden = findProvider()?.kind !== "image";
+    el.comfyOptions.hidden = findProvider()?.kind !== "image" || findProvider()?.provider !== "comfyui";
   });
   node.addEventListener("change", () => {
     syncProviderForm();
     renderProviderList();
     el.imageOptions.hidden = findProvider()?.kind !== "image";
+    el.comfyOptions.hidden = findProvider()?.kind !== "image" || findProvider()?.provider !== "comfyui";
   });
 }
+el.comfyWorkflowFile.addEventListener("change", async () => {
+  const file = el.comfyWorkflowFile.files[0];
+  if (!file) return;
+  try {
+    const data = JSON.parse(await file.text());
+    const workflow = data?.prompt && typeof data.prompt === "object" ? data.prompt : data;
+    el.comfyWorkflow.value = JSON.stringify(workflow, null, 2);
+    syncProviderForm();
+    el.providerTestResult.textContent = `已导入 ${file.name}`;
+  } catch (error) {
+    el.providerTestResult.textContent = `工作流 JSON 无效：${error.message}`;
+  }
+});
 el.saveConfigBtn.addEventListener("click", saveProviders);
 el.refreshConfigBtn.addEventListener("click", async () => {
   await loadConfig();

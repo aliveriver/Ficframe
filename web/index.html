@@ -49,6 +49,7 @@
                   <option value="ark">火山 Ark</option>
                   <option value="siliconflow">SiliconFlow</option>
                   <option value="grsai">Grsai</option>
+                  <option value="comfyui">ComfyUI 本地</option>
                 </select>
               </label>
               <label>
@@ -91,6 +92,31 @@
                   <option value="false">watermark false</option>
                 </select>
               </div>
+            </fieldset>
+            <fieldset id="comfyOptions" class="image-options" hidden>
+              <legend>ComfyUI 工作流</legend>
+              <div class="inline-fields">
+                <label>
+                  <span>API 工作流 JSON</span>
+                  <input id="comfyWorkflowFile" type="file" accept=".json,application/json" />
+                </label>
+                <label>
+                  <span>输出节点 ID</span>
+                  <input id="comfyOutputNode" placeholder="留空则自动查找 SaveImage 输出" />
+                </label>
+                <label>
+                  <span>轮询间隔（秒）</span>
+                  <input id="comfyPollInterval" type="number" min="0.1" step="0.1" value="1" />
+                </label>
+              </div>
+              <label>
+                <span>默认负向提示词</span>
+                <textarea id="comfyNegativePrompt" rows="2"></textarea>
+              </label>
+              <label>
+                <span>工作流 JSON</span>
+                <textarea id="comfyWorkflow" class="workflow-json" rows="10" spellcheck="false" placeholder='在节点输入中使用 {{prompt}}、{{negative_prompt}}、{{width}}、{{height}}、{{seed}}、{{steps}}、{{cfg}}、{{model}} 或 {{reference_image}}'></textarea>
+              </label>
             </fieldset>
             <div class="actions compact">
               <button id="saveConfigBtn" type="button">保存供应商</button>

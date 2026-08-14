@@ -15,6 +15,7 @@ import httpx
 from dotenv import load_dotenv
 
 from .logging_utils import get_logger
+from .comfyui import ComfyUIClient, ComfyUIError, load_api_workflow, render_api_workflow
 
 
 load_dotenv()
@@ -40,6 +41,7 @@ class ProviderConfig:
     vlm: EndpointConfig
     timeout: float = 300.0
     image_timeout: float = 900.0
+    image_options: dict[str, str] | None = None
 
     @classmethod
     def from_env(cls) -> "ProviderConfig":
@@ -67,6 +69,14 @@ class ProviderConfig:
             ),
             timeout=env_float("FICFRAME_TIMEOUT", 300.0),
             image_timeout=env_float("FICFRAME_IMAGE_TIMEOUT", env_float("FICFRAME_TIMEOUT", 900.0)),
+            image_options={
+                "steps": os.getenv("FICFRAME_IMAGE_STEPS", "20"),
+                "guidance_scale": os.getenv("FICFRAME_IMAGE_GUIDANCE_SCALE", "7.5"),
+                "workflow_json": read_env_text_file("FICFRAME_COMFYUI_WORKFLOW_PATH"),
+                "negative_prompt": os.getenv("FICFRAME_COMFYUI_NEGATIVE_PROMPT", ""),
+                "output_node_id": os.getenv("FICFRAME_COMFYUI_OUTPUT_NODE_ID", ""),
+                "poll_interval": os.getenv("FICFRAME_COMFYUI_POLL_INTERVAL", "1"),
+            },
         )
 
 
@@ -287,6 +297,31 @@ class OpenAICompatibleProvider:
         provider = effective_image_provider(endpoint)
         logger.info("image request purpose=%s provider=%s model=%s size=%s reference_count=%s", purpose, provider, model or endpoint.model, size, len(references))
 
+        if provider == "comfyui":
+            options = self.config.image_options or {}
+            try:
+                client = ComfyUIClient(
+                    endpoint.base_url,
+                    api_key=endpoint.api_key or "",
+                    timeout=self.config.image_timeout,
+                    poll_interval=float(options.get("poll_interval") or 1),
+                )
+                uploaded = client.upload_images(references) if references else []
+                workflow = render_api_workflow(
+                    load_api_workflow(options.get("workflow_json", "")),
+                    prompt=prompt,
+                    negative_prompt=options.get("negative_prompt", ""),
+                    size=size,
+                    model=model or endpoint.model,
+                    steps=int(options.get("steps") or 20),
+                    cfg=float(options.get("guidance_scale") or 7.5),
+                    reference_images=uploaded,
+                )
+                return client.generate(workflow, out_path, output_node_id=options.get("output_node_id", ""))
+            except httpx.HTTPError as exc:
+                raise ProviderError(provider_exception_message("ComfyUI", exc, self.config.image_timeout)) from exc
+            except (ComfyUIError, ValueError) as exc:
+                raise ProviderError(str(exc)) from exc
         if provider == "grsai":
             payload = {
                 "model": model or endpoint.model,
@@ -514,6 +549,17 @@ def env_float(key: str, default: float) -> float:
     except ValueError:
         logger.warning("invalid float env key=%s value=%s", key, value)
         return default
+
+
+def read_env_text_file(key: str) -> str:
+    value = os.getenv(key, "").strip()
+    if not value:
+        return ""
+    try:
+        return Path(value).read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("cannot read env file key=%s path=%s error=%s", key, value, exc)
+        return ""
 
 
 def provider_exception_message(label: str, exc: httpx.HTTPError, timeout: float) -> str:

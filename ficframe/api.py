@@ -129,11 +129,16 @@ def index() -> FileResponse:
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     config = OpenAICompatibleProvider().config
+    image_provider = effective_image_provider(config.image)
+    image_options = config.image_options or {}
+    image_ready = bool(config.image.api_key)
+    if image_provider == "comfyui":
+        image_ready = bool(config.image.base_url and image_options.get("workflow_json"))
     return {
         "ok": True,
         "keys": {
             "llm": bool(config.llm.api_key),
-            "image": bool(config.image.api_key),
+            "image": image_ready,
             "vlm": bool(config.vlm.api_key),
         },
         "base_urls": {
@@ -147,7 +152,7 @@ def health() -> dict[str, Any]:
             "vlm": config.vlm.model,
         },
         "providers": {
-            "image": effective_image_provider(config.image),
+            "image": image_provider,
         },
     }
 
@@ -244,6 +249,9 @@ def test_provider(request: ProviderTestRequest) -> dict[str, Any]:
     if not base_url:
         logger.warning("provider test failed reason=missing_base source=%s", redact(source))
         raise HTTPException(status_code=400, detail="请先填写请求地址")
+    provider_name = str(source.get("provider") or "openai").lower()
+    if provider_name == "comfyui":
+        return test_comfyui_provider(base_url, api_key)
     if not api_key:
         logger.warning("provider test failed reason=missing_key source=%s", redact(source))
         raise HTTPException(status_code=400, detail="请先填写 API key")
@@ -252,7 +260,6 @@ def test_provider(request: ProviderTestRequest) -> dict[str, Any]:
     started = time.perf_counter()
     model_url = build_url(base_url, "models")
     kind = str(source.get("kind") or "").lower()
-    provider_name = str(source.get("provider") or "openai").lower()
     model_name = str(source.get("active_model") or "").strip()
     try:
         with httpx.Client(timeout=15.0, follow_redirects=True) as client:
@@ -310,6 +317,30 @@ def test_provider(request: ProviderTestRequest) -> dict[str, Any]:
             return result
     except (httpx.HTTPError, ValueError) as exc:
         logger.warning("provider test exception source_id=%s error=%s", source.get("id"), exc)
+        return {
+            "ok": False,
+            "status_code": None,
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+            "message": str(exc),
+        }
+
+
+def test_comfyui_provider(base_url: str, api_key: str = "") -> dict[str, Any]:
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    started = time.perf_counter()
+    url = build_url(base_url, "system_stats")
+    try:
+        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+            response = client.get(url, headers=headers)
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        ok = response.status_code < 400
+        return {
+            "ok": ok,
+            "status_code": response.status_code,
+            "latency_ms": latency_ms,
+            "message": "ComfyUI 服务可达" if ok else response.text[:500],
+        }
+    except httpx.HTTPError as exc:
         return {
             "ok": False,
             "status_code": None,

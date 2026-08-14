@@ -203,6 +203,28 @@ FICFRAME_IMAGE_TIMEOUT=900
 | `ark` | 火山 Ark / 豆包图片接口 | 使用 `/images/generations`，支持 `size=2K` 等参数 |
 | `siliconflow` | SiliconFlow 图片接口 | 使用 `image_size`、`num_inference_steps`、`guidance_scale` |
 | `grsai` | Grsai 图片接口 | 参考图会作为 data URL 放入 `images` 字段 |
+| `comfyui` | 本地 ComfyUI | 提交 API 工作流、轮询队列并下载 `SaveImage` 输出；不要求 API key |
+
+### 使用本地 ComfyUI
+
+1. 启动 ComfyUI，并确认 FicFrame 所在机器可以访问，例如 `http://127.0.0.1:8188`。
+2. 在 ComfyUI 中搭好工作流，使用“导出（API）”保存 JSON。普通界面工作流 JSON 不能直接提交。
+3. 把需要动态注入的节点输入改成下列占位符，再保存 JSON：
+
+| 占位符 | 注入内容 |
+| --- | --- |
+| `{{prompt}}` / `{{negative_prompt}}` | 当前分镜 Prompt / 配置中的默认负向提示词 |
+| `{{width}}` / `{{height}}` | Web 中选择的图片宽高 |
+| `{{seed}}` | 每次生成的随机种子 |
+| `{{steps}}` / `{{cfg}}` | 图片供应商中的 Steps / Guidance |
+| `{{model}}` | 当前模型 ID，可用于 checkpoint 名称 |
+| `{{reference_image}}` | 上传到 ComfyUI 的第一张角色参考图 |
+| `{{reference_image_1}}`、`{{reference_image_2}}` ... | 按顺序上传的多张参考图 |
+
+4. 在 FicFrame 的 `API 管理` 中新增图片供应商，类型选择 `ComfyUI 本地`，填写 ComfyUI 根地址并导入工作流 JSON。
+5. 如果工作流有多个图片输出节点，填写希望采用的输出节点 ID；留空时使用历史结果中的第一个图片输出。
+
+ComfyUI 工作流和地址保存在本地 `.ficframe/providers.json`，激活后也会同步到本地 `.env`。使用鉴权代理时可在 API key 字段填写 Bearer token。
 
 ## 输入格式建议
 
