@@ -535,12 +535,14 @@ async def llm_prompt_bank_with_references(
     refs_dir.mkdir(parents=True, exist_ok=True)
     bindings = parse_reference_bindings(reference_bindings)
     for upload in reference_images or []:
-        filename = Path(upload.filename or "reference.png").name
+        original_filename = Path(upload.filename or "reference.png").name
+        filename = available_reference_filename(refs_dir, original_filename)
         target = refs_dir / filename
         target.write_bytes(await upload.read())
         url = f"/runs/{run_id}/references/{filename}"
-        bind_reference_image(cards, filename, url, bindings.get(filename, {}))
-        logger.info("prompt bank reference image saved run_id=%s filename=%s binding=%s", run_id, filename, redact(bindings.get(filename, {})))
+        binding = take_reference_binding(bindings, original_filename)
+        bind_reference_image(cards, original_filename, url, binding)
+        logger.info("prompt bank reference image saved run_id=%s filename=%s stored_filename=%s binding=%s", run_id, original_filename, filename, redact(binding))
 
     vlm_status = ""
     if reference_images and provider.config.vlm.api_key:
@@ -653,13 +655,14 @@ async def pipeline(
         refs_dir = run_dir / "references"
         refs_dir.mkdir(parents=True, exist_ok=True)
         for upload in reference_images:
-            filename = Path(upload.filename or "reference.png").name
+            original_filename = Path(upload.filename or "reference.png").name
+            filename = available_reference_filename(refs_dir, original_filename)
             target = refs_dir / filename
             target.write_bytes(await upload.read())
             url = f"/runs/{run_id}/references/{filename}"
-            binding = bindings.get(filename, {})
-            bind_reference_image(cards, filename, url, binding)
-            logger.info("reference image saved run_id=%s filename=%s binding=%s", run_id, filename, redact(binding))
+            binding = take_reference_binding(bindings, original_filename)
+            bind_reference_image(cards, original_filename, url, binding)
+            logger.info("reference image saved run_id=%s filename=%s stored_filename=%s binding=%s", run_id, original_filename, filename, redact(binding))
     vlm_provider = OpenAICompatibleProvider()
     if reference_images and vlm_provider.config.vlm.api_key:
         analyze_reference_visuals(cards, run_dir, vlm_provider, purpose=f"pipeline:{run_id}:vlm_reference_visuals")
@@ -907,13 +910,20 @@ def generate_image(request: ImageRequest) -> dict[str, Any]:
         logger.info("image generation skipped existing run_id=%s shot_id=%s path=%s", request.run_id, shot.id, target)
         return {"image_path": current.get("image_path"), "image_url": image_url, "skipped": True, "activated": True}
     try:
-        references = reference_paths_for_shot(request.run_id, shot)
+        reference_entries = reference_image_entries_for_shot(request.run_id, shot)
+        reference_names = [name for name, _ in reference_entries]
+        reference_groups = [group for _, group in reference_entries]
+        references = [path for group in reference_groups for path in group]
         logger.info("image generation started run_id=%s shot_id=%s size=%s reference_count=%s", request.run_id, shot.id, request.size, len(references))
         provider.image(
-            image_prompt_for_shot(shot),
+            shot.positive_prompt,
             target,
             size=request.size,
+            negative_prompt=shot.negative_prompt,
             reference_images=references,
+            reference_image_groups=reference_groups,
+            reference_regions=reference_regions_for_characters(shot, reference_names),
+            regional_guidance=shot.regional_guidance,
             purpose=f"image:single:{request.run_id}:{shot.id}",
         )
     except ProviderError as exc:
@@ -982,15 +992,22 @@ def generate_batch_image_item(
     retry_count: int,
     activate: bool,
 ) -> dict[str, Any]:
-    references = reference_paths_for_shot(run_id, shot)
+    reference_entries = reference_image_entries_for_shot(run_id, shot)
+    reference_names = [name for name, _ in reference_entries]
+    reference_groups = [group for _, group in reference_entries]
+    references = [path for group in reference_groups for path in group]
     last_error = ""
     for attempt in range(retry_count + 1):
         try:
             provider.image(
-                image_prompt_for_shot(shot),
+                shot.positive_prompt,
                 target,
                 size=size,
+                negative_prompt=shot.negative_prompt,
                 reference_images=references,
+                reference_image_groups=reference_groups,
+                reference_regions=reference_regions_for_characters(shot, reference_names),
+                regional_guidance=shot.regional_guidance,
                 purpose=f"image:batch:{run_id}:{shot.id}:attempt{attempt + 1}",
             )
             image_url = image_url_for_path(run_id, target)
@@ -1155,12 +1172,6 @@ def strip_version_query(url: str) -> str:
     return url.split("?", 1)[0]
 
 
-def image_prompt_for_shot(shot: Shot) -> str:
-    if not shot.negative_prompt:
-        return shot.positive_prompt
-    return f"{shot.positive_prompt}\n\nNegative constraints:\n{shot.negative_prompt}"
-
-
 def clean_image_url(run_id: str, shot_id: str) -> str:
     return f"/runs/{run_id}/images/{shot_id}.png"
 
@@ -1170,16 +1181,23 @@ def versioned_image_url(run_id: str, shot_id: str, target: Path) -> str:
     return f"{clean_image_url(run_id, shot_id)}?v={version}"
 
 
-def reference_paths_for_shot(run_id: str, shot: Shot) -> list[Path]:
+def reference_image_entries_for_shot(run_id: str, shot: Shot) -> list[tuple[str, list[Path]]]:
     run_dir = run_directory(run_id)
     pipeline_path = run_dir / "pipeline.json"
     if not pipeline_path.exists():
         return []
     payload = json.loads(read_text(pipeline_path))
-    paths: list[Path] = []
-    for character in payload.get("characters", []):
-        if character.get("name") not in shot.characters:
+    characters = {
+        str(character.get("name")): character
+        for character in payload.get("characters", [])
+        if isinstance(character, dict) and character.get("name")
+    }
+    entries: list[tuple[str, list[Path]]] = []
+    for character_name in dict.fromkeys(shot.characters):
+        character = characters.get(character_name)
+        if not character:
             continue
+        paths: list[Path] = []
         for reference in character.get("reference_images", []):
             url = str(reference).split(" (", 1)[0]
             prefix = f"/runs/{run_id}/"
@@ -1187,10 +1205,30 @@ def reference_paths_for_shot(run_id: str, shot: Shot) -> list[Path]:
                 local_path = (run_dir / url.removeprefix(prefix)).resolve()
                 if run_dir.resolve() in local_path.parents and local_path.exists():
                     paths.append(local_path)
-    return list(dict.fromkeys(paths))
+        unique_paths = list(dict.fromkeys(paths))
+        if unique_paths:
+            entries.append((character_name, unique_paths))
+    return entries
 
 
-def parse_reference_bindings(raw: str | None) -> dict[str, dict[str, str]]:
+def reference_image_groups_for_shot(run_id: str, shot: Shot) -> list[list[Path]]:
+    return [group for _, group in reference_image_entries_for_shot(run_id, shot)]
+
+
+def reference_paths_for_shot(run_id: str, shot: Shot) -> list[Path]:
+    return [path for group in reference_image_groups_for_shot(run_id, shot) for path in group]
+
+
+def reference_regions_for_characters(shot: Shot, character_names: list[str]) -> list[list[float] | None]:
+    by_name = {
+        str(item.get("character")): item.get("region")
+        for item in shot.character_layout
+        if isinstance(item, dict) and item.get("character")
+    }
+    return [by_name.get(name) if isinstance(by_name.get(name), list) else None for name in character_names]
+
+
+def parse_reference_bindings(raw: str | None) -> dict[str, list[dict[str, str]]]:
     if not raw:
         return {}
     try:
@@ -1199,11 +1237,36 @@ def parse_reference_bindings(raw: str | None) -> dict[str, dict[str, str]]:
         return {}
     if not isinstance(data, list):
         return {}
-    result: dict[str, dict[str, str]] = {}
+    result: dict[str, list[dict[str, str]]] = {}
     for item in data:
         if isinstance(item, dict) and item.get("filename"):
-            result[str(item["filename"])] = {str(key): str(value) for key, value in item.items() if value is not None}
+            filename = Path(str(item["filename"])).name
+            binding = {str(key): str(value) for key, value in item.items() if value is not None}
+            result.setdefault(filename, []).append(binding)
     return result
+
+
+def take_reference_binding(
+    bindings: dict[str, list[dict[str, str]]],
+    filename: str,
+) -> dict[str, str]:
+    queue = bindings.get(Path(filename).name, [])
+    return queue.pop(0) if queue else {}
+
+
+def available_reference_filename(directory: Path, filename: str) -> str:
+    safe_name = Path(filename).name or "reference.png"
+    candidate = directory / safe_name
+    if not candidate.exists():
+        return safe_name
+    stem = Path(safe_name).stem or "reference"
+    suffix = Path(safe_name).suffix
+    index = 2
+    while True:
+        unique_name = f"{stem}_{index}{suffix}"
+        if not (directory / unique_name).exists():
+            return unique_name
+        index += 1
 
 
 def bind_reference_image(cards: list[Any], filename: str, url: str, binding: dict[str, str]) -> None:

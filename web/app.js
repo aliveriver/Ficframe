@@ -662,7 +662,7 @@ function renderImageVersions() {
 
 function saveSelectedPrompt() {
   if (!state.selected) return;
-  state.selected.positive_prompt = el.promptBox.value;
+  window.FicFramePromptState.updateShotPositivePrompt(state.selected, el.promptBox.value);
 }
 
 function restoreSelectedPrompt() {
@@ -670,6 +670,8 @@ function restoreSelectedPrompt() {
   const original = state.originalShots.find((shot) => shot.id === state.selected.id);
   if (!original) return;
   state.selected.positive_prompt = original.positive_prompt || "";
+  state.selected.character_layout = clone(original.character_layout || []);
+  state.selected.regional_guidance = original.regional_guidance ?? null;
   el.promptBox.value = state.selected.positive_prompt;
   el.health.textContent = `${state.selected.id} prompt 已恢复到初始文本`;
   saveWorkspaceDraft();
@@ -678,7 +680,8 @@ function restoreSelectedPrompt() {
 function rebuildSelectedPrompt() {
   if (!state.selected) return;
   saveCharacterEditor();
-  state.selected.positive_prompt = buildPromptFromShot(state.selected);
+  window.FicFramePromptState.updateShotPositivePrompt(state.selected, buildPromptFromShot(state.selected));
+  state.selected.negative_prompt = buildNegativePromptFromShot(state.selected);
   el.promptBox.value = state.selected.positive_prompt;
   el.health.textContent = `${state.selected.id} prompt 已根据角色库重建`;
   saveWorkspaceDraft();
@@ -688,7 +691,8 @@ function rebuildAllPrompts(message = "全部 prompt 已根据角色库重建") {
   saveSelectedPrompt();
   saveCharacterEditor();
   for (const shot of state.shots) {
-    shot.positive_prompt = buildPromptFromShot(shot);
+    window.FicFramePromptState.updateShotPositivePrompt(shot, buildPromptFromShot(shot));
+    shot.negative_prompt = buildNegativePromptFromShot(shot);
   }
   if (state.selected) {
     el.promptBox.value = state.selected.positive_prompt;
@@ -706,10 +710,6 @@ function buildPromptFromShot(shot) {
       `Current visible state: ${currentAppearanceState(character, shot)}`,
     ].join("\n");
   }).join("\n");
-  const negativeConstraints = (shot.characters || []).map((name) => {
-    const character = state.characters.find((item) => item.name === name);
-    return character?.negative_identity_prompt || "";
-  }).filter(Boolean).join(", ");
   return [
     "high quality anime light novel illustration, cinematic composition",
     "",
@@ -729,10 +729,28 @@ function buildPromptFromShot(shot) {
     "",
     "Style:",
     "soft volumetric light, gentle rim light, natural skin tones, restrained teal and amber accents, clean detailed linework, subtle painterly texture, quiet emotional storytelling, detailed character design.",
-    "",
-    "Negative constraints:",
-    ["extra people, duplicate character, same face between different characters, merged characters, wrong character identity", negativeConstraints].filter(Boolean).join(", "),
   ].join("\n");
+}
+
+function buildNegativePromptFromShot(shot) {
+  const constraints = [
+    "extra people",
+    "duplicate character",
+    "same face between different characters",
+    "merged characters",
+    "wrong character identity",
+    ...(shot.characters || []).map((name) => {
+      const character = state.characters.find((item) => item.name === name);
+      return character?.negative_identity_prompt || "";
+    }),
+  ].filter(Boolean);
+  let result = (shot.negative_prompt || "").trim();
+  for (const constraint of constraints) {
+    if (!result.toLowerCase().includes(constraint.toLowerCase())) {
+      result = [result, constraint].filter(Boolean).join(", ");
+    }
+  }
+  return result;
 }
 
 function currentAppearanceState(character, shot) {
@@ -925,9 +943,14 @@ function addManualCharacter() {
 }
 
 function rebuildReferenceBindings() {
-  const previous = new Map(state.referenceBindings.map((item) => [item.filename, item]));
+  const previous = new Map();
+  for (const item of state.referenceBindings) {
+    const queue = previous.get(item.filename) || [];
+    queue.push(item);
+    previous.set(item.filename, queue);
+  }
   state.referenceBindings = Array.from(el.referenceImages.files).map((file) => {
-    const old = previous.get(file.name);
+    const old = previous.get(file.name)?.shift();
     return old || {
       filename: file.name,
       character: suggestCharacter(file.name),

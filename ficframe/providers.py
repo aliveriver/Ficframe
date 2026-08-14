@@ -289,12 +289,18 @@ class OpenAICompatibleProvider:
         out_path: str | Path,
         model: str | None = None,
         size: str = "1024x1024",
+        negative_prompt: str = "",
         reference_images: list[Path] | None = None,
+        reference_image_groups: list[list[Path]] | None = None,
+        reference_regions: list[list[float] | None] | None = None,
+        regional_guidance: bool | None = None,
         purpose: str = "",
     ) -> Path:
         endpoint = self.config.image
-        references = reference_images or []
+        groups = [group for group in (reference_image_groups or []) if group]
+        references = [path for group in groups for path in group] if groups else (reference_images or [])
         provider = effective_image_provider(endpoint)
+        cloud_prompt = image_prompt_with_negative(prompt, negative_prompt)
         logger.info("image request purpose=%s provider=%s model=%s size=%s reference_count=%s", purpose, provider, model or endpoint.model, size, len(references))
 
         if provider == "comfyui":
@@ -307,15 +313,24 @@ class OpenAICompatibleProvider:
                     poll_interval=float(options.get("poll_interval") or 1),
                 )
                 uploaded = client.upload_images(references) if references else []
+                group_sizes = [len(group) for group in groups] if groups else [1] * len(references)
                 workflow = render_api_workflow(
-                    load_api_workflow(options.get("workflow_json", "")),
+                    load_api_workflow(
+                        options.get("workflow_json", ""),
+                        reference_count=len(references),
+                        reference_group_sizes=group_sizes,
+                        reference_regions=reference_regions,
+                        regional_guidance=regional_guidance,
+                    ),
                     prompt=prompt,
-                    negative_prompt=options.get("negative_prompt", ""),
+                    negative_prompt=combine_negative_prompts(negative_prompt, options.get("negative_prompt", "")),
                     size=size,
                     model=model or endpoint.model,
                     steps=int(options.get("steps") or 20),
                     cfg=float(options.get("guidance_scale") or 7.5),
                     reference_images=uploaded,
+                    reference_group_sizes=group_sizes,
+                    reference_regions=reference_regions,
                 )
                 return client.generate(workflow, out_path, output_node_id=options.get("output_node_id", ""))
             except httpx.HTTPError as exc:
@@ -325,7 +340,7 @@ class OpenAICompatibleProvider:
         if provider == "grsai":
             payload = {
                 "model": model or endpoint.model,
-                "prompt": reference_aware_prompt(prompt, bool(references)),
+                "prompt": reference_aware_prompt(cloud_prompt, bool(references)),
                 "images": [to_data_url(path) for path in references],
                 "aspectRatio": size,
                 "replyType": "json",
@@ -334,7 +349,7 @@ class OpenAICompatibleProvider:
         elif provider == "ark":
             payload = {
                 "model": model or endpoint.model,
-                "prompt": reference_aware_prompt(prompt, bool(references)),
+                "prompt": reference_aware_prompt(cloud_prompt, bool(references)),
                 "sequential_image_generation": os.getenv("FICFRAME_IMAGE_SEQUENTIAL", "disabled"),
                 "response_format": os.getenv("FICFRAME_IMAGE_RESPONSE_FORMAT", "url"),
                 "size": size,
@@ -347,7 +362,7 @@ class OpenAICompatibleProvider:
         elif provider == "siliconflow":
             payload = {
                 "model": model or endpoint.model,
-                "prompt": prompt,
+                "prompt": cloud_prompt,
                 "image_size": size,
                 "batch_size": int(os.getenv("FICFRAME_IMAGE_BATCH_SIZE", "1")),
                 "num_inference_steps": int(os.getenv("FICFRAME_IMAGE_STEPS", "20")),
@@ -372,7 +387,7 @@ class OpenAICompatibleProvider:
                 "images/edits",
                 {
                     "model": model or endpoint.model,
-                    "prompt": reference_aware_prompt(prompt, True),
+                    "prompt": reference_aware_prompt(cloud_prompt, True),
                     "size": size,
                     "n": "1",
                 },
@@ -382,7 +397,7 @@ class OpenAICompatibleProvider:
         else:
             payload = {
                 "model": model or endpoint.model,
-                "prompt": prompt,
+                "prompt": cloud_prompt,
                 "size": size,
                 "n": 1,
             }
@@ -579,6 +594,16 @@ def reference_aware_prompt(prompt: str, has_references: bool) -> str:
         "accessories, and body proportions. Do not redesign the character. "
         + prompt
     )
+
+
+def combine_negative_prompts(*prompts: str) -> str:
+    return ", ".join(prompt.strip().strip(",") for prompt in prompts if prompt and prompt.strip())
+
+
+def image_prompt_with_negative(prompt: str, negative_prompt: str) -> str:
+    if not negative_prompt.strip():
+        return prompt
+    return f"{prompt}\n\nNegative constraints:\n{negative_prompt.strip()}"
 
 
 def to_data_url(path: Path) -> str:

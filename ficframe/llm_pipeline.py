@@ -21,6 +21,9 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
         "必须按 Scene, Composition, Characters, Relationships, Style, Negative constraints 的结构输出。"
         "如果画面有多名角色，必须明确 exactly N visible characters，并为每个角色写清楚独立身份、外观差异、动作和情绪功能。"
         "如果存在双胞胎、姐妹、相似角色，必须强化“相似但可区分”：不同发型、眼神、姿态、道具、气质，禁止同脸和角色复制。"
+        "同时判断当前镜头是否需要 IP-Adapter 区域约束。多人近景、中景或身份容易串线时 regional_guidance=true，"
+        "并为每名可见角色返回归一化 region=[left, top, right, bottom]；区域可以不等宽、前后景重叠。"
+        "单人、远景、背影，或原文没有明确站位且自由构图更重要时 regional_guidance=false，character_layout 可以为空。"
         "只根据传入的人设文本和当前分镜写，不要引入外部作品设定或默认角色印象。"
         "不要把某个角色的人设词套到另一个角色身上。不要新增原文没有出现的人物。"
         + JSON_RULE
@@ -35,6 +38,8 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
                 "location": shot.location,
                 "time": shot.time,
                 "mood": shot.mood,
+                "camera": shot.camera,
+                "composition": shot.composition,
                 "positive_prompt": shot.positive_prompt,
                 "negative_prompt": shot.negative_prompt,
                 "continuity_notes": shot.continuity_notes,
@@ -49,6 +54,7 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
                     "source_text": compact(card.source_text, 1200),
                     "prompt_cn": card.prompt_cn,
                     "prompt_en": card.prompt_en,
+                    "has_reference_images": bool(card.reference_images),
                 }
                 for card in cards
             ],
@@ -56,6 +62,15 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
                 "positive_prompt": "English string, structured with Scene, Composition, Characters, Relationships, Style",
                 "negative_prompt": "English string, must include extra people, duplicate character, same face between different characters, merged characters, wrong character identity",
                 "visual_goal": "string",
+                "regional_guidance": "boolean; true only when per-character regional identity control is useful",
+                "character_layout": [
+                    {
+                        "character": "exact character name from shot.characters",
+                        "position": "short semantic position such as foreground left or background center",
+                        "depth": "foreground | midground | background",
+                        "region": ["left 0..1", "top 0..1", "right 0..1", "bottom 0..1"],
+                    }
+                ],
                 "qa_notes": ["string"],
             },
         },
@@ -82,8 +97,46 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
     shot.positive_prompt = positive_prompt
     shot.negative_prompt = negative_prompt
     shot.visual_goal = data.get("visual_goal") or shot.visual_goal
+    layout = normalize_character_layout(data.get("character_layout"), shot.characters)
+    if "character_layout" in data:
+        shot.character_layout = layout
+    if isinstance(data.get("regional_guidance"), bool):
+        shot.regional_guidance = data["regional_guidance"]
+    elif layout:
+        shot.regional_guidance = True
     shot.qa_notes.extend(data.get("qa_notes") or [])
     return shot
+
+
+def normalize_character_layout(value: object, character_names: list[str]) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    allowed = set(character_names)
+    result: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        character = str(item.get("character") or "").strip()
+        region = item.get("region")
+        if character not in allowed or character in seen or not isinstance(region, list) or len(region) != 4:
+            continue
+        try:
+            left, top, right, bottom = [float(part) for part in region]
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= left < right <= 1 and 0 <= top < bottom <= 1):
+            continue
+        seen.add(character)
+        result.append(
+            {
+                "character": character,
+                "position": str(item.get("position") or "").strip(),
+                "depth": str(item.get("depth") or "").strip(),
+                "region": [left, top, right, bottom],
+            }
+        )
+    return result
 
 
 def extract_character_cards_with_llm(raw_text: str, provider: OpenAICompatibleProvider, purpose: str = "llm:extract_character_cards") -> list[CharacterCard]:

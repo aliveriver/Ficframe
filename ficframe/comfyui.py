@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import mimetypes
 import secrets
@@ -15,7 +16,13 @@ class ComfyUIError(RuntimeError):
     pass
 
 
-def load_api_workflow(raw: str) -> dict[str, Any]:
+def load_api_workflow(
+    raw: str,
+    reference_count: int = 0,
+    reference_group_sizes: list[int] | None = None,
+    reference_regions: list[list[float] | None] | None = None,
+    regional_guidance: bool | None = None,
+) -> dict[str, Any]:
     if not raw.strip():
         raise ComfyUIError("请先导入 ComfyUI API 格式工作流 JSON。")
     try:
@@ -24,11 +31,196 @@ def load_api_workflow(raw: str) -> dict[str, Any]:
         raise ComfyUIError(f"ComfyUI 工作流 JSON 格式错误：{exc}") from exc
     if isinstance(data, dict) and isinstance(data.get("prompt"), dict):
         data = data["prompt"]
+    if isinstance(data, dict) and isinstance(data.get("ficframe_dynamic_ipadapter"), dict):
+        descriptor = data["ficframe_dynamic_ipadapter"]
+        group_sizes = reference_group_sizes if reference_group_sizes is not None else [1] * reference_count
+        return build_dynamic_ipadapter_workflow(
+            descriptor,
+            group_sizes,
+            reference_regions=reference_regions,
+            regional_guidance=regional_guidance,
+        )
+    if isinstance(data, dict) and isinstance(data.get("ficframe_workflows"), dict):
+        workflows = data["ficframe_workflows"]
+        variant = "multi" if reference_count >= 2 else "single" if reference_count == 1 else "text"
+        data = workflows.get(variant) or workflows.get("single") or workflows.get("text")
+        if not isinstance(data, dict):
+            raise ComfyUIError(f"ComfyUI 工作流包缺少 {variant} 变体。")
     if not isinstance(data, dict) or not data:
         raise ComfyUIError("ComfyUI 工作流必须是非空 JSON 对象。")
     if not any(isinstance(node, dict) and node.get("class_type") for node in data.values()):
         raise ComfyUIError("工作流不是 API 格式；请在 ComfyUI 中使用“导出（API）”。")
     return data
+
+
+def build_dynamic_ipadapter_workflow(
+    descriptor: dict[str, Any],
+    reference_group_sizes: list[int],
+    *,
+    reference_regions: list[list[float] | None] | None = None,
+    regional_guidance: bool | None = None,
+) -> dict[str, Any]:
+    base_workflow = descriptor.get("workflow")
+    if not isinstance(base_workflow, dict) or not base_workflow:
+        raise ComfyUIError("动态 IP-Adapter 工作流缺少 workflow 基础节点。")
+    if not any(isinstance(node, dict) and node.get("class_type") for node in base_workflow.values()):
+        raise ComfyUIError("动态 IP-Adapter 的 workflow 不是 ComfyUI API 格式。")
+
+    try:
+        group_sizes = [int(size) for size in reference_group_sizes if int(size) > 0]
+    except (TypeError, ValueError) as exc:
+        raise ComfyUIError("角色参考图分组大小必须是正整数。") from exc
+    workflow = copy.deepcopy(base_workflow)
+    if not group_sizes:
+        return workflow
+
+    sampler_node_id = str(descriptor.get("sampler_node_id") or "3")
+    checkpoint_node_id = str(descriptor.get("checkpoint_node_id") or "4")
+    prompt_node_id = str(descriptor.get("prompt_node_id") or "6")
+    for node_id in (sampler_node_id, checkpoint_node_id, prompt_node_id):
+        if not isinstance(workflow.get(node_id), dict):
+            raise ComfyUIError(f"动态 IP-Adapter 工作流缺少节点 {node_id}。")
+
+    numeric_ids = [int(node_id) for node_id in workflow if str(node_id).isdigit()]
+    next_node_id = max(numeric_ids, default=0) + 1
+
+    def add_node(class_type: str, inputs: dict[str, Any], title: str) -> str:
+        nonlocal next_node_id
+        while str(next_node_id) in workflow:
+            next_node_id += 1
+        node_id = str(next_node_id)
+        next_node_id += 1
+        workflow[node_id] = {
+            "class_type": class_type,
+            "inputs": inputs,
+            "_meta": {"title": title},
+        }
+        return node_id
+
+    settings = descriptor.get("settings") if isinstance(descriptor.get("settings"), dict) else {}
+    loader_id = add_node(
+        "IPAdapterUnifiedLoader",
+        {
+            "model": [checkpoint_node_id, 0],
+            "preset": str(settings.get("preset") or "PLUS (high strength)"),
+        },
+        "FicFrame IP-Adapter Loader",
+    )
+    current_model: list[Any] = [loader_id, 0]
+    empty_mask_id = ""
+    use_attention_masks = len(group_sizes) > 1 and regional_guidance is not False
+    custom_layout = any(is_normalized_region(region) for region in (reference_regions or []))
+    if use_attention_masks:
+        empty_mask_id = add_node(
+            "SolidMask",
+            {"value": 0, "width": "{{width}}", "height": "{{height}}"},
+            "FicFrame Empty Attention Mask",
+        )
+        prompt_input = workflow[prompt_node_id].setdefault("inputs", {})
+        prompt_text = prompt_input.get("text", "{{prompt}}")
+        if custom_layout:
+            prompt_input["text"] = f"keep each referenced character in their assigned composition region, {prompt_text}"
+        else:
+            prompt_input["text"] = (
+                "place the referenced characters in separate left-to-right regions following reference group order, "
+                f"keep each referenced character in their assigned region, {prompt_text}"
+            )
+
+    reference_index = 1
+    base_weight = float(settings.get("weight", 0.3))
+    weight_type = str(settings.get("weight_type") or "linear")
+    start_at = float(settings.get("start_at", 0.0))
+    end_at = float(settings.get("end_at", 0.65))
+    embeds_scaling = str(settings.get("embeds_scaling") or "V only")
+
+    for group_index, group_size in enumerate(group_sizes, start=1):
+        positive_embed: list[Any] | None = None
+        negative_embed: list[Any] | None = None
+        for image_index in range(1, group_size + 1):
+            image_id = add_node(
+                "LoadImage",
+                {"image": f"{{{{reference_image_{reference_index}}}}}"},
+                f"Character {group_index} Reference {image_index}",
+            )
+            encoder_id = add_node(
+                "IPAdapterEncoder",
+                {"ipadapter": [loader_id, 1], "image": [image_id, 0], "weight": 1.0},
+                f"Character {group_index} Reference Encoder {image_index}",
+            )
+            next_positive = [encoder_id, 0]
+            next_negative = [encoder_id, 1]
+            if positive_embed is None:
+                positive_embed = next_positive
+                negative_embed = next_negative
+            else:
+                positive_id = add_node(
+                    "IPAdapterCombineEmbeds",
+                    {"embed1": positive_embed, "embed2": next_positive, "method": "add"},
+                    f"Character {group_index} Positive Embeds {image_index}",
+                )
+                negative_id = add_node(
+                    "IPAdapterCombineEmbeds",
+                    {"embed1": negative_embed, "embed2": next_negative, "method": "add"},
+                    f"Character {group_index} Negative Embeds {image_index}",
+                )
+                positive_embed = [positive_id, 0]
+                negative_embed = [negative_id, 0]
+            reference_index += 1
+
+        apply_inputs: dict[str, Any] = {
+            "model": current_model,
+            "ipadapter": [loader_id, 1],
+            "pos_embed": positive_embed,
+            "neg_embed": negative_embed,
+            "weight": base_weight / group_size,
+            "weight_type": weight_type,
+            "start_at": start_at,
+            "end_at": end_at,
+            "embeds_scaling": embeds_scaling,
+        }
+        if use_attention_masks:
+            region_id = add_node(
+                "SolidMask",
+                {
+                    "value": 1,
+                    "width": f"{{{{region_{group_index}_width}}}}",
+                    "height": f"{{{{region_{group_index}_height}}}}",
+                },
+                f"Character {group_index} Region",
+            )
+            composite_id = add_node(
+                "MaskComposite",
+                {
+                    "destination": [empty_mask_id, 0],
+                    "source": [region_id, 0],
+                    "x": f"{{{{region_{group_index}_x}}}}",
+                    "y": f"{{{{region_{group_index}_y}}}}",
+                    "operation": "add",
+                },
+                f"Character {group_index} Positioned Region",
+            )
+            feather_id = add_node(
+                "FeatherMask",
+                {
+                    "mask": [composite_id, 0],
+                    "left": f"{{{{region_{group_index}_feather_left}}}}",
+                    "top": f"{{{{region_{group_index}_feather_top}}}}",
+                    "right": f"{{{{region_{group_index}_feather_right}}}}",
+                    "bottom": f"{{{{region_{group_index}_feather_bottom}}}}",
+                },
+                f"Character {group_index} Soft Region",
+            )
+            apply_inputs["attn_mask"] = [feather_id, 0]
+        apply_id = add_node(
+            "IPAdapterEmbeds",
+            apply_inputs,
+            f"Character {group_index} IP-Adapter",
+        )
+        current_model = [apply_id, 0]
+
+    sampler_inputs = workflow[sampler_node_id].setdefault("inputs", {})
+    sampler_inputs["model"] = current_model
+    return workflow
 
 
 def render_api_workflow(
@@ -41,6 +233,8 @@ def render_api_workflow(
     steps: int,
     cfg: float,
     reference_images: list[str] | None = None,
+    reference_group_sizes: list[int] | None = None,
+    reference_regions: list[list[float] | None] | None = None,
     seed: int | None = None,
 ) -> dict[str, Any]:
     width, height = parse_size(size)
@@ -50,6 +244,8 @@ def render_api_workflow(
         "negative_prompt": negative_prompt,
         "width": width,
         "height": height,
+        "half_width": width // 2,
+        "half_height": height // 2,
         "seed": seed if seed is not None else secrets.randbelow(2**63),
         "steps": steps,
         "cfg": cfg,
@@ -58,7 +254,54 @@ def render_api_workflow(
     }
     for index, filename in enumerate(references, start=1):
         values[f"reference_image_{index}"] = filename
+    group_sizes = [size for size in (reference_group_sizes or []) if size > 0]
+    regions = resolve_reference_regions(len(group_sizes), reference_regions)
+    for index, region in enumerate(regions, start=1):
+        normalized_left, normalized_top, normalized_right, normalized_bottom = region
+        left = min(width - 1, max(0, round(normalized_left * width)))
+        top = min(height - 1, max(0, round(normalized_top * height)))
+        right = min(width, max(left + 1, round(normalized_right * width)))
+        bottom = min(height, max(top + 1, round(normalized_bottom * height)))
+        region_width = right - left
+        region_height = bottom - top
+        horizontal_feather = min(96, max(1, region_width // 4))
+        vertical_feather = min(96, max(1, region_height // 4))
+        values[f"region_{index}_x"] = left
+        values[f"region_{index}_y"] = top
+        values[f"region_{index}_width"] = region_width
+        values[f"region_{index}_height"] = region_height
+        values[f"region_{index}_feather_left"] = 0 if normalized_left == 0 else horizontal_feather
+        values[f"region_{index}_feather_top"] = 0 if normalized_top == 0 else vertical_feather
+        values[f"region_{index}_feather_right"] = 0 if normalized_right == 1 else horizontal_feather
+        values[f"region_{index}_feather_bottom"] = 0 if normalized_bottom == 1 else vertical_feather
     return _replace_placeholders(copy.deepcopy(workflow), values)
+
+
+def resolve_reference_regions(
+    count: int,
+    reference_regions: list[list[float] | None] | None,
+) -> list[list[float]]:
+    if count <= 0:
+        return []
+    provided = reference_regions or []
+    regions: list[list[float]] = []
+    for index in range(count):
+        region = provided[index] if index < len(provided) else None
+        if is_normalized_region(region):
+            regions.append([float(part) for part in region])
+            continue
+        regions.append([index / count, 0.0, (index + 1) / count, 1.0])
+    return regions
+
+
+def is_normalized_region(value: object) -> bool:
+    if not isinstance(value, list) or len(value) != 4:
+        return False
+    try:
+        left, top, right, bottom = [float(part) for part in value]
+    except (TypeError, ValueError):
+        return False
+    return 0 <= left < right <= 1 and 0 <= top < bottom <= 1
 
 
 def parse_size(size: str) -> tuple[int, int]:
@@ -142,19 +385,19 @@ class ComfyUIClient:
         with httpx.Client(timeout=min(self.timeout, 60.0), headers=self.headers) as client:
             for path in paths:
                 mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+                upload_name = comfyui_upload_filename(path)
                 with path.open("rb") as stream:
                     response = client.post(
                         f"{self.base_url}/upload/image",
-                        files={"image": (path.name, stream, mime)},
+                        files={"image": (upload_name, stream, mime)},
                         data={"type": "input", "subfolder": "ficframe", "overwrite": "true"},
                     )
                 self._raise_for_status(response, f"上传参考图 {path.name}")
                 data = response.json()
-                name = str(data.get("name") or path.name)
+                name = str(data.get("name") or upload_name)
                 subfolder = str(data.get("subfolder") or "")
                 uploaded.append(f"{subfolder}/{name}".strip("/"))
         return uploaded
-
     def _wait_for_image(
         self,
         client: httpx.Client,
@@ -182,6 +425,13 @@ class ComfyUIClient:
     def _raise_for_status(response: httpx.Response, action: str) -> None:
         if response.status_code >= 400:
             raise ComfyUIError(f"ComfyUI {action}失败：HTTP {response.status_code} {response.text[:500]}")
+
+
+def comfyui_upload_filename(path: Path) -> str:
+    resolved = str(path.resolve()).casefold().encode("utf-8")
+    digest = hashlib.sha256(resolved).hexdigest()[:12]
+    stem = path.stem or "reference"
+    return f"{stem}-{digest}{path.suffix}"
 
 
 def find_output_image(outputs: Any, output_node_id: str = "") -> dict[str, Any] | None:
