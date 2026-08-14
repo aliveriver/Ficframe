@@ -17,7 +17,9 @@ from ficframe.comfyui import (
     ComfyUIError,
     comfyui_upload_filename,
     find_output_image,
+    is_comfyui_install_path,
     load_api_workflow,
+    normalize_comfyui_base_url,
     parse_size,
     render_api_workflow,
 )
@@ -58,6 +60,13 @@ WORKFLOW = {
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_comfyui_base_url_distinguishes_http_endpoints_from_install_paths(self) -> None:
+        self.assertEqual(normalize_comfyui_base_url("127.0.0.1:8188/"), "http://127.0.0.1:8188")
+        self.assertEqual(normalize_comfyui_base_url("http://127.0.0.1:8000/"), "http://127.0.0.1:8000")
+        self.assertTrue(is_comfyui_install_path(r"E:\ComfyUI"))
+        with self.assertRaisesRegex(ComfyUIError, "安装目录"):
+            ComfyUIClient(r"E:\ComfyUI")
+
     def test_comfyui_reference_selection_keeps_all_images_grouped_by_shot_character_order(self) -> None:
         from ficframe import api as api_module
 
@@ -459,6 +468,9 @@ class _ComfyHandler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_GET(self) -> None:  # noqa: N802
+        if self.path == "/system_stats":
+            self._json({"system": {"os": "test"}})
+            return
         if self.path == "/history/test-prompt":
             self._json({
                 "test-prompt": {
@@ -490,6 +502,61 @@ class _ComfyHandler(BaseHTTPRequestHandler):
 
 
 class ClientTests(unittest.TestCase):
+    def test_desktop_server_target_reads_launch_settings_and_port_range(self) -> None:
+        from ficframe import api as api_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "user" / "default" / "comfy.settings.json"
+            settings_path.parent.mkdir(parents=True)
+            settings_path.write_text(json.dumps({
+                "Comfy.Server.LaunchArgs": {"listen": "0.0.0.0", "port": "8123"},
+            }), encoding="utf-8")
+
+            host, port = api_module.desktop_comfyui_server_target(directory)
+
+        self.assertEqual(host, "127.0.0.1")
+        self.assertEqual(port, 8123)
+        self.assertEqual(api_module.COMFYUI_DESKTOP_PORT_SPAN, 1000)
+
+    def test_provider_test_detects_http_endpoint_from_desktop_install_path(self) -> None:
+        from ficframe import api as api_module
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _ComfyHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            detected_url = f"http://127.0.0.1:{server.server_port}"
+            with patch.object(api_module, "discover_local_comfyui_endpoints", return_value=(detected_url,)):
+                result = api_module.test_comfyui_provider(r"E:\ComfyUI Desktop")
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["resolved_base_url"], detected_url)
+            self.assertIn("安装目录不是 API 地址", result["message"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_provider_config_rejects_comfyui_install_path(self) -> None:
+        from ficframe import api as api_module
+
+        payload = {
+            "config": {
+                "active": {"image": "desktop-comfy"},
+                "sources": [{
+                    "id": "desktop-comfy",
+                    "kind": "image",
+                    "provider": "comfyui",
+                    "base_url": r"E:\ComfyUI Desktop",
+                }],
+            }
+        }
+        with TestClient(api_module.app) as client:
+            response = client.post("/api/providers", json=payload)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("安装目录", response.json()["detail"])
+
     def test_upload_queue_poll_and_download(self) -> None:
         server = ThreadingHTTPServer(("127.0.0.1", 0), _ComfyHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)

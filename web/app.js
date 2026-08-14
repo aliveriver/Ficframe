@@ -88,6 +88,7 @@ const el = {
   providerType: document.querySelector("#providerType"),
   providerActive: document.querySelector("#providerActive"),
   providerLabel: document.querySelector("#providerLabel"),
+  providerBaseUrlLabel: document.querySelector("#providerBaseUrlLabel"),
   providerBaseUrl: document.querySelector("#providerBaseUrl"),
   providerKey: document.querySelector("#providerKey"),
   addModelBtn: document.querySelector("#addModelBtn"),
@@ -408,6 +409,7 @@ function renderProviderDetail() {
   }
   el.providerKind.value = source.kind || "image";
   el.providerType.value = source.provider || "openai";
+  renderProviderBaseUrlField(source.provider);
   el.providerActive.value = state.providerConfig.active?.[source.kind] === source.id ? "true" : "false";
   el.providerLabel.value = source.label || "";
   el.providerBaseUrl.value = source.base_url || "";
@@ -426,6 +428,14 @@ function renderProviderDetail() {
   el.imageOptions.hidden = source.kind !== "image";
   el.comfyOptions.hidden = source.kind !== "image" || source.provider !== "comfyui";
   renderModelTable(source);
+}
+
+function renderProviderBaseUrlField(provider) {
+  const isComfyUI = provider === "comfyui";
+  el.providerBaseUrlLabel.textContent = isComfyUI ? "服务地址（HTTP）" : "请求地址";
+  el.providerBaseUrl.placeholder = isComfyUI
+    ? "CLI 默认 127.0.0.1:8188；Desktop 从 8000 起自动选端口"
+    : "https://api.example.com/v1";
 }
 
 function renderModelTable(source) {
@@ -496,16 +506,21 @@ function syncProviderForm() {
 
 async function saveProviders() {
   syncProviderForm();
-  const data = await api("/api/providers", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ config: state.providerConfig }),
-  });
-  state.providerConfig = data.config;
-  renderProviderList();
-  renderProviderDetail();
-  await checkHealth();
-  el.health.textContent = "供应商配置已保存";
+  try {
+    const data = await api("/api/providers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: state.providerConfig }),
+    });
+    state.providerConfig = data.config;
+    renderProviderList();
+    renderProviderDetail();
+    await checkHealth();
+    el.health.textContent = "供应商配置已保存";
+  } catch (error) {
+    el.providerTestResult.textContent = error.message;
+    el.health.textContent = error.message;
+  }
 }
 
 async function testProvider() {
@@ -519,6 +534,10 @@ async function testProvider() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ source }),
     });
+    if (data.resolved_base_url) {
+      el.providerBaseUrl.value = data.resolved_base_url;
+      syncProviderForm();
+    }
     el.providerTestResult.textContent = JSON.stringify(data, null, 2);
   } catch (error) {
     el.providerTestResult.textContent = error.message;
@@ -1532,6 +1551,7 @@ el.providerType.addEventListener("change", () => {
     el.providerBaseUrl.value = "http://127.0.0.1:8188";
     el.providerKey.value = "";
   }
+  renderProviderBaseUrlField(el.providerType.value);
 });
 for (const node of [el.providerKind, el.providerType, el.providerActive, el.providerLabel, el.providerBaseUrl, el.providerKey, el.imageSteps, el.imageGuidance, el.imageBatch, el.imageSequential, el.imageResponseFormat, el.imageWatermark, el.comfyWorkflow, el.comfyNegativePrompt, el.comfyOutputNode, el.comfyPollInterval]) {
   node.addEventListener("input", () => {

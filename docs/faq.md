@@ -92,14 +92,25 @@ ComfyUI 用户还应检查队列是否仍在运行，以及终端中是否有显
 
 ## ComfyUI
 
+### Desktop 用户应该填写 E 盘目录还是 URL？
+
+最终保存的必须是 HTTP URL。可以先把 Desktop 安装向导中选择的数据目录（包含 `models`、`input`、`output`、`user`）临时填入 `服务地址（HTTP）`，然后点击 `测试可达性`。FicFrame 检测成功后会把输入框替换为 Desktop 当前使用的地址，再保存供应商。
+
+Desktop 默认从 `8000` 开始寻找空闲端口，所以实际地址可能是 `http://127.0.0.1:8000`、`8001` 或其他后续端口。不要直接保存 `E:\ComfyUI`，也不要把 checkpoint 的磁盘路径填入模型 ID。
+
+详细步骤见 [ComfyUI Desktop 操作步骤](comfyui.md#comfyui-desktop-操作步骤)。
+
 ### FicFrame 无法连接 ComfyUI
 
 确认：
 
-- ComfyUI 已启动并能访问 `http://127.0.0.1:8188`。
+- ComfyUI 已启动，并且其 HTTP 地址能在浏览器中打开。CLI 默认使用 `http://127.0.0.1:8188`；Desktop 默认从 `8000` 开始，端口被占用时会自动递增选择。
 - FicFrame 中填写的是根地址，不要附加 `/prompt`。
+- `E:\ComfyUI`、`G:\ComfyUI` 等 Desktop 数据目录只能临时用于自动探测，最终保存值必须是探测后回填的 HTTP 地址。
 - ComfyUI 和 FicFrame 不在同一台机器时，ComfyUI 已监听局域网地址且防火墙允许访问。
 - HTTPS 代理或鉴权代理配置正确。
+
+Desktop 用户还应保持 Desktop 窗口运行，并检查 `%APPDATA%\ComfyUI\logs\comfyui_*.log` 中的实际监听地址和启动错误。
 
 ### 导入工作流后提示“不是 API 格式”
 

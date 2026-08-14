@@ -18,13 +18,66 @@ FicFrame 的 ComfyUI 适配会完成以下工作：
 
 ## 准备工作
 
-1. 启动 ComfyUI，确认浏览器可以访问，例如 `http://127.0.0.1:8188`。
-2. 把 checkpoint 放入 `ComfyUI/models/checkpoints/`。
+1. 启动 ComfyUI，确认浏览器可以访问其 HTTP 服务地址。CLI 默认是 `http://127.0.0.1:8188`；Desktop 默认从 `8000` 开始，并在端口占用时从后续端口中选择第一个可用端口。
+2. 把 checkpoint 放入 CLI/Portable 的 `ComfyUI/models/checkpoints/`，或 Desktop 数据目录的 `models/checkpoints/`。
 3. 在 FicFrame 的 `API 管理` 中新增图片供应商，选择 `ComfyUI 本地`。
-4. 请求地址填写 ComfyUI 根地址；本地默认实例通常不需要 API key。
+4. 最终保存的请求地址必须是 ComfyUI 的 HTTP 根地址；本地默认实例通常不需要 API key。
 5. 模型 ID 填写 ComfyUI 中显示的 checkpoint 完整文件名。
 
 建议先点击 `测试可达性`，确认 FicFrame 能读取 ComfyUI 状态和模型列表。
+
+Desktop 用户可以临时填写 `E:\ComfyUI` 之类的数据目录来触发自动探测。FicFrame 会读取该目录中的 Desktop 启动设置，并检查 Desktop 可能选择的本机端口，同时检查 CLI 默认端口 `8188`。只检测到一个服务时页面会回填真实 HTTP 地址；检测到多个实例时会列出候选地址，不会擅自选择。数据目录本身不能保存为请求地址。
+
+## ComfyUI Desktop 操作步骤
+
+### 1. 启动 Desktop
+
+打开 ComfyUI Desktop，等待工作流画布完全出现。Desktop 窗口关闭时，它启动的 Python 后端也会停止，因此使用 FicFrame 生图期间需要保持 Desktop 运行。
+
+### 2. 确认 Desktop 数据目录
+
+安装向导中选择的目录是 Desktop 数据目录，例如 `E:\ComfyUI`。目录中通常可以看到：
+
+```text
+E:\ComfyUI\
+├── models\
+├── input\
+├── output\
+├── custom_nodes\
+└── user\default\comfy.settings.json
+```
+
+它不是 API 地址。Windows 下 Desktop 应用程序本身通常安装在 `%LOCALAPPDATA%\Programs\ComfyUI`，Desktop 配置位于 `%APPDATA%\ComfyUI`；模型和自定义节点应以安装向导选择的数据目录为准。
+
+### 3. 在 FicFrame 中连接 Desktop
+
+1. 打开 FicFrame 的 `API 管理`，新增图片供应商。
+2. 类型选择 `ComfyUI 本地`。
+3. 在 `服务地址（HTTP）` 中临时填写 Desktop 数据目录，例如 `E:\ComfyUI`。
+4. 点击 `测试可达性`。FicFrame 会读取 Desktop 启动设置，并检查 Desktop 实际可能使用的端口。
+5. 只检测到一个实例时，输入框会自动替换成类似 `http://127.0.0.1:8000` 或 `http://127.0.0.1:8001` 的真实地址。
+6. 如果列出多个候选地址，逐个填入并再次测试，选择与当前 Desktop 实例对应的地址。
+7. 测试成功后再点击 `保存供应商`，并设为当前图片供应商。
+
+如果已经知道 Desktop 的实际端口，可以直接填写 HTTP 地址，不需要先填数据目录。不要在自动探测完成前保存 `E:\ComfyUI`，因为持久化配置只接受 HTTP 地址。
+
+### 4. 配置模型和基础工作流
+
+1. 把 checkpoint 放入 `<Desktop数据目录>\models\checkpoints\`。
+2. 在 FicFrame 的模型 ID 中填写 ComfyUI 显示的完整文件名，例如 `Illustrious-XL-v0.1.safetensors`，不要填写磁盘绝对路径。
+3. 导入 `examples/comfyui/ficframe_sdxl_api.json`。
+4. 输出节点 ID 填写 `9`，保存配置。
+5. 先生成一张不带参考图的图片，确认模型加载、Prompt 提交和图片下载正常。
+
+### 5. 启用角色参考图
+
+1. 在 Desktop 的 Manager 中安装或更新 `ComfyUI_IPAdapter_plus`。
+2. 把 IP-Adapter 权重放入 `<Desktop数据目录>\models\ipadapter\`。
+3. 把 CLIP Vision 权重放入 `<Desktop数据目录>\models\clip_vision\`。
+4. 重启 ComfyUI Desktop，确认所需节点可以在 Desktop 中搜索到。
+5. 在 FicFrame 中导入 `examples/comfyui/ficframe_sdxl_ipadapter_api.json`，再测试单角色和多角色分镜。
+
+连接失败时，检查 `%APPDATA%\ComfyUI\logs\` 下最新的 `comfyui_*.log`。日志中的实际监听地址优先于默认端口；如果日志仍在安装依赖或加载节点，应等待 Desktop 完成启动后再测试。
 
 ## 案例一：基础 SDXL 文生图
 
@@ -40,7 +93,7 @@ examples/comfyui/ficframe_sdxl_api.json
 
 | 配置 | 建议值 |
 | --- | --- |
-| 请求地址 | `http://127.0.0.1:8188` |
+| 请求地址 | CLI 默认 `http://127.0.0.1:8188`；Desktop 使用探测后回填的地址 |
 | 模型 ID | checkpoint 完整文件名，例如 `Illustrious-XL-v0.1.safetensors` |
 | Steps | `20-24` |
 | Guidance | `6` |

@@ -4,16 +4,42 @@ import copy
 import hashlib
 import json
 import mimetypes
+import re
 import secrets
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
 
 class ComfyUIError(RuntimeError):
     pass
+
+
+WINDOWS_PATH_PATTERN = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def is_comfyui_install_path(value: str) -> bool:
+    raw = value.strip()
+    return bool(WINDOWS_PATH_PATTERN.match(raw)) or raw.startswith("\\\\") or raw.lower().startswith("file://")
+
+
+def normalize_comfyui_base_url(value: str) -> str:
+    raw = value.strip().rstrip("/")
+    if not raw:
+        raise ComfyUIError("请填写 ComfyUI 服务地址。")
+    if is_comfyui_install_path(raw):
+        raise ComfyUIError(
+            "ComfyUI 安装目录不能作为请求地址；请填写启动日志或 Desktop 设置中显示的 HTTP 地址。"
+        )
+    if "://" not in raw:
+        raw = f"http://{raw}"
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ComfyUIError("ComfyUI 服务地址必须是 http:// 或 https:// 开头的有效 URL。")
+    return raw.rstrip("/")
 
 
 def load_api_workflow(
@@ -346,7 +372,7 @@ class ComfyUIClient:
         timeout: float = 900.0,
         poll_interval: float = 1.0,
     ):
-        self.base_url = base_url.rstrip("/")
+        self.base_url = normalize_comfyui_base_url(base_url)
         self.timeout = timeout
         self.poll_interval = max(0.1, poll_interval)
         self.headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}

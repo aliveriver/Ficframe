@@ -36,7 +36,7 @@ FicFrame 是一套本地运行的小说配图工作台，用来把小说正文�
 
 ## 文档
 
-- [ComfyUI 使用指南](docs/comfyui.md)：基础 SDXL、Illustrious XL、IP-Adapter、多参考图、LLM 布局和自定义工作流。
+- [ComfyUI 使用指南](docs/comfyui.md)：Desktop 接入、基础 SDXL、Illustrious XL、IP-Adapter、多参考图、LLM 布局和自定义工作流。
 - [常见问题](docs/faq.md)：启动、端口、图片 API、ComfyUI 节点、显存、参考图和导出排障。
 - [安全与隐私](SECURITY.md)：本地文件、第三方 API 和日志包注意事项。
 
@@ -214,6 +214,8 @@ FICFRAME_IMAGE_TIMEOUT=900
 ### 本地 ComfyUI
 
 FicFrame 支持提交 ComfyUI API 工作流、上传角色参考图、轮询队列和下载 `SaveImage` 输出。仓库同时提供基础 SDXL 与动态 IP-Adapter 示例。
+
+ComfyUI 的请求地址必须是正在运行的 HTTP 服务地址，不能填写 `E:\ComfyUI` 等安装目录。CLI 默认使用 `http://127.0.0.1:8188`；Desktop 默认从 `8000` 开始，并在端口占用时自动选择后续可用端口，因此应以实际运行地址为准。
 
 完整安装步骤、Illustrious XL 配置、多参考图、LLM 角色布局、自定义占位符和性能建议见 [ComfyUI 使用指南](docs/comfyui.md)。模型或节点找不到、显存不足、参考图不生效等问题见 [常见问题](docs/faq.md#comfyui)。
 

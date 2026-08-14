@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -15,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from .characters import build_character_cards
 from .character_diff import analyze_character_differences
+from .comfyui import ComfyUIError, is_comfyui_install_path, normalize_comfyui_base_url
 from .config_store import public_config, public_provider_config, read_provider_config, write_env_file, write_provider_config
 from .continuity import initial_state
 from .io import read_text, write_json, write_text
@@ -44,6 +46,9 @@ LOGS = setup_logging(ROOT)
 logger = get_logger("api")
 
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+COMFYUI_CLI_PORT = 8188
+COMFYUI_DESKTOP_DEFAULT_PORT = 8000
+COMFYUI_DESKTOP_PORT_SPAN = 1000
 
 app = FastAPI(title="FicFrame API")
 app.mount("/assets", StaticFiles(directory=WEB), name="assets")
@@ -235,6 +240,13 @@ def get_providers() -> dict[str, Any]:
 
 @app.post("/api/providers")
 def save_providers(request: ProvidersRequest) -> dict[str, Any]:
+    for source in request.config.get("sources", []):
+        if not isinstance(source, dict) or str(source.get("provider") or "").lower() != "comfyui":
+            continue
+        try:
+            source["base_url"] = normalize_comfyui_base_url(str(source.get("base_url") or ""))
+        except ComfyUIError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     write_provider_config(PROVIDERS_FILE, ENV_FILE, request.config)
     sources = request.config.get("sources", []) if isinstance(request.config, dict) else []
     logger.info("providers saved source_count=%s active=%s", len(sources), redact(request.config.get("active", {})))
@@ -328,25 +340,118 @@ def test_provider(request: ProviderTestRequest) -> dict[str, Any]:
 def test_comfyui_provider(base_url: str, api_key: str = "") -> dict[str, Any]:
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     started = time.perf_counter()
-    url = build_url(base_url, "system_stats")
+    from_install_path = is_comfyui_install_path(base_url)
     try:
-        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
-            response = client.get(url, headers=headers)
-        latency_ms = int((time.perf_counter() - started) * 1000)
-        ok = response.status_code < 400
-        return {
-            "ok": ok,
-            "status_code": response.status_code,
-            "latency_ms": latency_ms,
-            "message": "ComfyUI 服务可达" if ok else response.text[:500],
-        }
-    except httpx.HTTPError as exc:
+        candidates = discover_local_comfyui_endpoints(base_url) if from_install_path else (normalize_comfyui_base_url(base_url),)
+    except ComfyUIError as exc:
         return {
             "ok": False,
             "status_code": None,
             "latency_ms": int((time.perf_counter() - started) * 1000),
             "message": str(exc),
         }
+    errors: list[str] = []
+    detected: list[tuple[str, int]] = []
+    last_status: int | None = None
+    timeout = 2.0 if from_install_path else 15.0
+    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+        for candidate in candidates:
+            url = build_url(candidate, "system_stats")
+            try:
+                response = client.get(url, headers=headers)
+            except httpx.HTTPError as exc:
+                errors.append(f"{candidate}: {exc}")
+                continue
+            last_status = response.status_code
+            if response.status_code >= 400:
+                errors.append(f"{candidate}: HTTP {response.status_code}")
+                continue
+            if from_install_path:
+                detected.append((candidate, response.status_code))
+                continue
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            return {
+                "ok": True,
+                "status_code": response.status_code,
+                "latency_ms": latency_ms,
+                "message": "ComfyUI 服务可达",
+                "resolved_base_url": candidate,
+            }
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    if from_install_path:
+        if len(detected) == 1:
+            candidate, status_code = detected[0]
+            return {
+                "ok": True,
+                "status_code": status_code,
+                "latency_ms": latency_ms,
+                "message": f"安装目录不是 API 地址；已自动检测到 ComfyUI 服务 {candidate}，请保存该地址",
+                "resolved_base_url": candidate,
+            }
+        if len(detected) > 1:
+            endpoints = [candidate for candidate, _ in detected]
+            return {
+                "ok": True,
+                "status_code": detected[0][1],
+                "latency_ms": latency_ms,
+                "message": "检测到多个 ComfyUI 服务，请选择与当前 Desktop 窗口一致的地址后保存。",
+                "detected_base_urls": endpoints,
+            }
+        return {
+            "ok": False,
+            "status_code": None,
+            "latency_ms": latency_ms,
+            "message": (
+                "填写的是 ComfyUI 安装目录，不是 API 地址，且未检测到正在运行的本机 ComfyUI 服务。"
+                "请先启动 ComfyUI，再填写启动日志或 Desktop 设置中显示的 http://127.0.0.1:端口。"
+            ),
+        }
+    return {
+        "ok": False,
+        "status_code": last_status,
+        "latency_ms": latency_ms,
+        "message": errors[-1] if errors else "ComfyUI 服务不可达",
+    }
+
+
+def discover_local_comfyui_endpoints(base_path: str) -> tuple[str, ...]:
+    host, start_port = desktop_comfyui_server_target(base_path)
+    # Desktop searches from its configured start port through start_port + 1000.
+    end_port = min(65535, start_port + COMFYUI_DESKTOP_PORT_SPAN)
+    ports = set(range(start_port, end_port + 1))
+    ports.add(COMFYUI_CLI_PORT)
+    open_ports: list[int] = []
+    with ThreadPoolExecutor(max_workers=64) as executor:
+        checks = executor.map(lambda port: (port, local_tcp_port_open(host, port)), sorted(ports))
+        open_ports = [port for port, is_open in checks if is_open]
+    return tuple(f"http://{host}:{port}" for port in open_ports)
+
+
+def desktop_comfyui_server_target(base_path: str) -> tuple[str, int]:
+    host = "127.0.0.1"
+    port = COMFYUI_DESKTOP_DEFAULT_PORT
+    settings_path = Path(base_path) / "user" / "default" / "comfy.settings.json"
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        launch_args = settings.get("Comfy.Server.LaunchArgs") if isinstance(settings, dict) else None
+        if isinstance(launch_args, dict):
+            configured_host = str(launch_args.get("listen") or host).strip()
+            if configured_host in {"0.0.0.0", "::", "localhost", "127.0.0.1"}:
+                host = "127.0.0.1"
+            configured_port = int(launch_args.get("port") or port)
+            if 1 <= configured_port <= 65535:
+                port = configured_port
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return host, port
+
+
+def local_tcp_port_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.05):
+            return True
+    except OSError:
+        return False
 
 
 def probe_runtime_endpoint(
