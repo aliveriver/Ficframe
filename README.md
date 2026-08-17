@@ -34,6 +34,12 @@ FicFrame 是一套本地运行的小说配图工作台，用来把小说正文�
 
 ![alt text](./pic/image.png)
 
+## 文档
+
+- [ComfyUI 使用指南](docs/comfyui.md)：Desktop 接入、基础 SDXL、Illustrious XL、IP-Adapter、多参考图、LLM 布局和自定义工作流。
+- [常见问题](docs/faq.md)：启动、端口、图片 API、ComfyUI 节点、显存、参考图和导出排障。
+- [安全与隐私](SECURITY.md)：本地文件、第三方 API 和日志包注意事项。
+
 ## 快速开始
 
 ### Windows 用户
@@ -203,6 +209,15 @@ FICFRAME_IMAGE_TIMEOUT=900
 | `ark` | 火山 Ark / 豆包图片接口 | 使用 `/images/generations`，支持 `size=2K` 等参数 |
 | `siliconflow` | SiliconFlow 图片接口 | 使用 `image_size`、`num_inference_steps`、`guidance_scale` |
 | `grsai` | Grsai 图片接口 | 参考图会作为 data URL 放入 `images` 字段 |
+| `comfyui` | 本地 ComfyUI | 提交 API 工作流、轮询队列并下载 `SaveImage` 输出；不要求 API key |
+
+### 本地 ComfyUI
+
+FicFrame 支持提交 ComfyUI API 工作流、上传角色参考图、轮询队列和下载 `SaveImage` 输出。仓库同时提供基础 SDXL 与动态 IP-Adapter 示例。
+
+ComfyUI 的请求地址必须是正在运行的 HTTP 服务地址，不能填写 `E:\ComfyUI` 等安装目录。CLI 默认使用 `http://127.0.0.1:8188`；Desktop 默认从 `8000` 开始，并在端口占用时自动选择后续可用端口，因此应以实际运行地址为准。
+
+完整安装步骤、Illustrious XL 配置、多参考图、LLM 角色布局、自定义占位符和性能建议见 [ComfyUI 使用指南](docs/comfyui.md)。模型或节点找不到、显存不足、参考图不生效等问题见 [常见问题](docs/faq.md#comfyui)。
 
 ## 输入格式建议
 
@@ -410,6 +425,9 @@ examples/minimal/
 │   ├── app.js
 │   ├── styles.css
 │   └── tokens.css
+├── docs/                       # 使用指南与常见问题
+│   ├── comfyui.md
+│   └── faq.md
 ├── examples/minimal/           # 最小公开示例
 ├── outputs/                    # 运行输出，默认不提交
 ├── .ficframe/                  # 本地供应商配置，默认不提交
@@ -426,62 +444,7 @@ examples/minimal/
 
 ## 常见问题
 
-### 没有 uv 怎么办？
-
-直接运行 `start.bat`。脚本会检测是否存在 `uv`，没有则自动使用 Python `venv + pip`。
-
-手动安装依赖：
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-```
-
-### 端口 8787 被占用
-
-PowerShell：
-
-```powershell
-.\start.ps1 -Port 8788
-```
-
-或手动查看并停止占用进程：
-
-```powershell
-netstat -ano | Select-String ':8787'
-Stop-Process -Id <PID> -Force
-```
-
-### 图片尺寸不支持
-
-不同供应商支持的尺寸不同。可以在 Web 的 `图片尺寸` 中选择预设，或填写自定义尺寸，例如：
-
-```text
-2048x2048
-2K
-```
-
-### 生成图片超时
-
-图片模型排队较久时，可以在 `.env` 中调大：
-
-```env
-FICFRAME_IMAGE_TIMEOUT=1200
-```
-
-### 参考图没有生效
-
-请检查：
-
-- 是否上传了参考图
-- 是否在绑定表中绑定到了正确角色
-- 当前分镜是否出现了该角色
-- 当前图片供应商是否支持参考图输入
-- 该模型本身是否遵循参考图约束
-
-### 导出的 Markdown 图片打不开
-
-请保持 `illustrated_novel.md` 和同目录下的 `images/` 文件夹相对位置不变。
+启动失败、端口占用、图片超时、参考图不生效、ComfyUI 节点缺失和显存不足等问题统一整理在 [常见问题](docs/faq.md)。
 
 ## 开发
 
@@ -497,6 +460,7 @@ uv sync
 ```powershell
 uv run python -m compileall ficframe
 node --check web/app.js
+node --test tests/frontend/test_prompt_state.js
 ```
 
 ## 安全与隐私

@@ -56,6 +56,8 @@ class Shot:
     continuity_notes: list[str]
     positive_prompt: str
     negative_prompt: str
+    character_layout: list[dict[str, Any]] = field(default_factory=list)
+    regional_guidance: bool | None = None
     qa_notes: list[str] = field(default_factory=list)
     image_path: str | None = None
     image_url: str | None = None

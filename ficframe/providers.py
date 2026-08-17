@@ -15,6 +15,7 @@ import httpx
 from dotenv import load_dotenv
 
 from .logging_utils import get_logger
+from .comfyui import ComfyUIClient, ComfyUIError, load_api_workflow, render_api_workflow
 
 
 load_dotenv()
@@ -40,6 +41,7 @@ class ProviderConfig:
     vlm: EndpointConfig
     timeout: float = 300.0
     image_timeout: float = 900.0
+    image_options: dict[str, str] | None = None
 
     @classmethod
     def from_env(cls) -> "ProviderConfig":
@@ -67,6 +69,14 @@ class ProviderConfig:
             ),
             timeout=env_float("FICFRAME_TIMEOUT", 300.0),
             image_timeout=env_float("FICFRAME_IMAGE_TIMEOUT", env_float("FICFRAME_TIMEOUT", 900.0)),
+            image_options={
+                "steps": os.getenv("FICFRAME_IMAGE_STEPS", "20"),
+                "guidance_scale": os.getenv("FICFRAME_IMAGE_GUIDANCE_SCALE", "7.5"),
+                "workflow_json": read_env_text_file("FICFRAME_COMFYUI_WORKFLOW_PATH"),
+                "negative_prompt": os.getenv("FICFRAME_COMFYUI_NEGATIVE_PROMPT", ""),
+                "output_node_id": os.getenv("FICFRAME_COMFYUI_OUTPUT_NODE_ID", ""),
+                "poll_interval": os.getenv("FICFRAME_COMFYUI_POLL_INTERVAL", "1"),
+            },
         )
 
 
@@ -279,18 +289,58 @@ class OpenAICompatibleProvider:
         out_path: str | Path,
         model: str | None = None,
         size: str = "1024x1024",
+        negative_prompt: str = "",
         reference_images: list[Path] | None = None,
+        reference_image_groups: list[list[Path]] | None = None,
+        reference_regions: list[list[float] | None] | None = None,
+        regional_guidance: bool | None = None,
         purpose: str = "",
     ) -> Path:
         endpoint = self.config.image
-        references = reference_images or []
+        groups = [group for group in (reference_image_groups or []) if group]
+        references = [path for group in groups for path in group] if groups else (reference_images or [])
         provider = effective_image_provider(endpoint)
+        cloud_prompt = image_prompt_with_negative(prompt, negative_prompt)
         logger.info("image request purpose=%s provider=%s model=%s size=%s reference_count=%s", purpose, provider, model or endpoint.model, size, len(references))
 
+        if provider == "comfyui":
+            options = self.config.image_options or {}
+            try:
+                client = ComfyUIClient(
+                    endpoint.base_url,
+                    api_key=endpoint.api_key or "",
+                    timeout=self.config.image_timeout,
+                    poll_interval=float(options.get("poll_interval") or 1),
+                )
+                uploaded = client.upload_images(references) if references else []
+                group_sizes = [len(group) for group in groups] if groups else [1] * len(references)
+                workflow = render_api_workflow(
+                    load_api_workflow(
+                        options.get("workflow_json", ""),
+                        reference_count=len(references),
+                        reference_group_sizes=group_sizes,
+                        reference_regions=reference_regions,
+                        regional_guidance=regional_guidance,
+                    ),
+                    prompt=prompt,
+                    negative_prompt=combine_negative_prompts(negative_prompt, options.get("negative_prompt", "")),
+                    size=size,
+                    model=model or endpoint.model,
+                    steps=int(options.get("steps") or 20),
+                    cfg=float(options.get("guidance_scale") or 7.5),
+                    reference_images=uploaded,
+                    reference_group_sizes=group_sizes,
+                    reference_regions=reference_regions,
+                )
+                return client.generate(workflow, out_path, output_node_id=options.get("output_node_id", ""))
+            except httpx.HTTPError as exc:
+                raise ProviderError(provider_exception_message("ComfyUI", exc, self.config.image_timeout)) from exc
+            except (ComfyUIError, ValueError) as exc:
+                raise ProviderError(str(exc)) from exc
         if provider == "grsai":
             payload = {
                 "model": model or endpoint.model,
-                "prompt": reference_aware_prompt(prompt, bool(references)),
+                "prompt": reference_aware_prompt(cloud_prompt, bool(references)),
                 "images": [to_data_url(path) for path in references],
                 "aspectRatio": size,
                 "replyType": "json",
@@ -299,7 +349,7 @@ class OpenAICompatibleProvider:
         elif provider == "ark":
             payload = {
                 "model": model or endpoint.model,
-                "prompt": reference_aware_prompt(prompt, bool(references)),
+                "prompt": reference_aware_prompt(cloud_prompt, bool(references)),
                 "sequential_image_generation": os.getenv("FICFRAME_IMAGE_SEQUENTIAL", "disabled"),
                 "response_format": os.getenv("FICFRAME_IMAGE_RESPONSE_FORMAT", "url"),
                 "size": size,
@@ -312,7 +362,7 @@ class OpenAICompatibleProvider:
         elif provider == "siliconflow":
             payload = {
                 "model": model or endpoint.model,
-                "prompt": prompt,
+                "prompt": cloud_prompt,
                 "image_size": size,
                 "batch_size": int(os.getenv("FICFRAME_IMAGE_BATCH_SIZE", "1")),
                 "num_inference_steps": int(os.getenv("FICFRAME_IMAGE_STEPS", "20")),
@@ -337,7 +387,7 @@ class OpenAICompatibleProvider:
                 "images/edits",
                 {
                     "model": model or endpoint.model,
-                    "prompt": reference_aware_prompt(prompt, True),
+                    "prompt": reference_aware_prompt(cloud_prompt, True),
                     "size": size,
                     "n": "1",
                 },
@@ -347,7 +397,7 @@ class OpenAICompatibleProvider:
         else:
             payload = {
                 "model": model or endpoint.model,
-                "prompt": prompt,
+                "prompt": cloud_prompt,
                 "size": size,
                 "n": 1,
             }
@@ -516,6 +566,17 @@ def env_float(key: str, default: float) -> float:
         return default
 
 
+def read_env_text_file(key: str) -> str:
+    value = os.getenv(key, "").strip()
+    if not value:
+        return ""
+    try:
+        return Path(value).read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("cannot read env file key=%s path=%s error=%s", key, value, exc)
+        return ""
+
+
 def provider_exception_message(label: str, exc: httpx.HTTPError, timeout: float) -> str:
     if isinstance(exc, httpx.TimeoutException):
         return f"{label} 请求超时（{timeout:.0f}s）。服务商可能排队较久，可以增大 FICFRAME_TIMEOUT，或稍后重试。"
@@ -533,6 +594,16 @@ def reference_aware_prompt(prompt: str, has_references: bool) -> str:
         "accessories, and body proportions. Do not redesign the character. "
         + prompt
     )
+
+
+def combine_negative_prompts(*prompts: str) -> str:
+    return ", ".join(prompt.strip().strip(",") for prompt in prompts if prompt and prompt.strip())
+
+
+def image_prompt_with_negative(prompt: str, negative_prompt: str) -> str:
+    if not negative_prompt.strip():
+        return prompt
+    return f"{prompt}\n\nNegative constraints:\n{negative_prompt.strip()}"
 
 
 def to_data_url(path: Path) -> str:

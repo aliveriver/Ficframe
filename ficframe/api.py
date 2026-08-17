@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -15,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from .characters import build_character_cards
 from .character_diff import analyze_character_differences
+from .comfyui import ComfyUIError, is_comfyui_install_path, normalize_comfyui_base_url
 from .config_store import public_config, public_provider_config, read_provider_config, write_env_file, write_provider_config
 from .continuity import initial_state
 from .io import read_text, write_json, write_text
@@ -44,6 +46,9 @@ LOGS = setup_logging(ROOT)
 logger = get_logger("api")
 
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+COMFYUI_CLI_PORT = 8188
+COMFYUI_DESKTOP_DEFAULT_PORT = 8000
+COMFYUI_DESKTOP_PORT_SPAN = 1000
 
 app = FastAPI(title="FicFrame API")
 app.mount("/assets", StaticFiles(directory=WEB), name="assets")
@@ -129,11 +134,16 @@ def index() -> FileResponse:
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     config = OpenAICompatibleProvider().config
+    image_provider = effective_image_provider(config.image)
+    image_options = config.image_options or {}
+    image_ready = bool(config.image.api_key)
+    if image_provider == "comfyui":
+        image_ready = bool(config.image.base_url and image_options.get("workflow_json"))
     return {
         "ok": True,
         "keys": {
             "llm": bool(config.llm.api_key),
-            "image": bool(config.image.api_key),
+            "image": image_ready,
             "vlm": bool(config.vlm.api_key),
         },
         "base_urls": {
@@ -147,7 +157,7 @@ def health() -> dict[str, Any]:
             "vlm": config.vlm.model,
         },
         "providers": {
-            "image": effective_image_provider(config.image),
+            "image": image_provider,
         },
     }
 
@@ -230,6 +240,13 @@ def get_providers() -> dict[str, Any]:
 
 @app.post("/api/providers")
 def save_providers(request: ProvidersRequest) -> dict[str, Any]:
+    for source in request.config.get("sources", []):
+        if not isinstance(source, dict) or str(source.get("provider") or "").lower() != "comfyui":
+            continue
+        try:
+            source["base_url"] = normalize_comfyui_base_url(str(source.get("base_url") or ""))
+        except ComfyUIError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     write_provider_config(PROVIDERS_FILE, ENV_FILE, request.config)
     sources = request.config.get("sources", []) if isinstance(request.config, dict) else []
     logger.info("providers saved source_count=%s active=%s", len(sources), redact(request.config.get("active", {})))
@@ -244,6 +261,9 @@ def test_provider(request: ProviderTestRequest) -> dict[str, Any]:
     if not base_url:
         logger.warning("provider test failed reason=missing_base source=%s", redact(source))
         raise HTTPException(status_code=400, detail="请先填写请求地址")
+    provider_name = str(source.get("provider") or "openai").lower()
+    if provider_name == "comfyui":
+        return test_comfyui_provider(base_url, api_key)
     if not api_key:
         logger.warning("provider test failed reason=missing_key source=%s", redact(source))
         raise HTTPException(status_code=400, detail="请先填写 API key")
@@ -252,7 +272,6 @@ def test_provider(request: ProviderTestRequest) -> dict[str, Any]:
     started = time.perf_counter()
     model_url = build_url(base_url, "models")
     kind = str(source.get("kind") or "").lower()
-    provider_name = str(source.get("provider") or "openai").lower()
     model_name = str(source.get("active_model") or "").strip()
     try:
         with httpx.Client(timeout=15.0, follow_redirects=True) as client:
@@ -316,6 +335,123 @@ def test_provider(request: ProviderTestRequest) -> dict[str, Any]:
             "latency_ms": int((time.perf_counter() - started) * 1000),
             "message": str(exc),
         }
+
+
+def test_comfyui_provider(base_url: str, api_key: str = "") -> dict[str, Any]:
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    started = time.perf_counter()
+    from_install_path = is_comfyui_install_path(base_url)
+    try:
+        candidates = discover_local_comfyui_endpoints(base_url) if from_install_path else (normalize_comfyui_base_url(base_url),)
+    except ComfyUIError as exc:
+        return {
+            "ok": False,
+            "status_code": None,
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+            "message": str(exc),
+        }
+    errors: list[str] = []
+    detected: list[tuple[str, int]] = []
+    last_status: int | None = None
+    timeout = 2.0 if from_install_path else 15.0
+    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+        for candidate in candidates:
+            url = build_url(candidate, "system_stats")
+            try:
+                response = client.get(url, headers=headers)
+            except httpx.HTTPError as exc:
+                errors.append(f"{candidate}: {exc}")
+                continue
+            last_status = response.status_code
+            if response.status_code >= 400:
+                errors.append(f"{candidate}: HTTP {response.status_code}")
+                continue
+            if from_install_path:
+                detected.append((candidate, response.status_code))
+                continue
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            return {
+                "ok": True,
+                "status_code": response.status_code,
+                "latency_ms": latency_ms,
+                "message": "ComfyUI 服务可达",
+                "resolved_base_url": candidate,
+            }
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    if from_install_path:
+        if len(detected) == 1:
+            candidate, status_code = detected[0]
+            return {
+                "ok": True,
+                "status_code": status_code,
+                "latency_ms": latency_ms,
+                "message": f"安装目录不是 API 地址；已自动检测到 ComfyUI 服务 {candidate}，请保存该地址",
+                "resolved_base_url": candidate,
+            }
+        if len(detected) > 1:
+            endpoints = [candidate for candidate, _ in detected]
+            return {
+                "ok": True,
+                "status_code": detected[0][1],
+                "latency_ms": latency_ms,
+                "message": "检测到多个 ComfyUI 服务，请选择与当前 Desktop 窗口一致的地址后保存。",
+                "detected_base_urls": endpoints,
+            }
+        return {
+            "ok": False,
+            "status_code": None,
+            "latency_ms": latency_ms,
+            "message": (
+                "填写的是 ComfyUI 安装目录，不是 API 地址，且未检测到正在运行的本机 ComfyUI 服务。"
+                "请先启动 ComfyUI，再填写启动日志或 Desktop 设置中显示的 http://127.0.0.1:端口。"
+            ),
+        }
+    return {
+        "ok": False,
+        "status_code": last_status,
+        "latency_ms": latency_ms,
+        "message": errors[-1] if errors else "ComfyUI 服务不可达",
+    }
+
+
+def discover_local_comfyui_endpoints(base_path: str) -> tuple[str, ...]:
+    host, start_port = desktop_comfyui_server_target(base_path)
+    # Desktop searches from its configured start port through start_port + 1000.
+    end_port = min(65535, start_port + COMFYUI_DESKTOP_PORT_SPAN)
+    ports = set(range(start_port, end_port + 1))
+    ports.add(COMFYUI_CLI_PORT)
+    open_ports: list[int] = []
+    with ThreadPoolExecutor(max_workers=64) as executor:
+        checks = executor.map(lambda port: (port, local_tcp_port_open(host, port)), sorted(ports))
+        open_ports = [port for port, is_open in checks if is_open]
+    return tuple(f"http://{host}:{port}" for port in open_ports)
+
+
+def desktop_comfyui_server_target(base_path: str) -> tuple[str, int]:
+    host = "127.0.0.1"
+    port = COMFYUI_DESKTOP_DEFAULT_PORT
+    settings_path = Path(base_path) / "user" / "default" / "comfy.settings.json"
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        launch_args = settings.get("Comfy.Server.LaunchArgs") if isinstance(settings, dict) else None
+        if isinstance(launch_args, dict):
+            configured_host = str(launch_args.get("listen") or host).strip()
+            if configured_host in {"0.0.0.0", "::", "localhost", "127.0.0.1"}:
+                host = "127.0.0.1"
+            configured_port = int(launch_args.get("port") or port)
+            if 1 <= configured_port <= 65535:
+                port = configured_port
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return host, port
+
+
+def local_tcp_port_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.05):
+            return True
+    except OSError:
+        return False
 
 
 def probe_runtime_endpoint(
@@ -504,12 +640,14 @@ async def llm_prompt_bank_with_references(
     refs_dir.mkdir(parents=True, exist_ok=True)
     bindings = parse_reference_bindings(reference_bindings)
     for upload in reference_images or []:
-        filename = Path(upload.filename or "reference.png").name
+        original_filename = Path(upload.filename or "reference.png").name
+        filename = available_reference_filename(refs_dir, original_filename)
         target = refs_dir / filename
         target.write_bytes(await upload.read())
         url = f"/runs/{run_id}/references/{filename}"
-        bind_reference_image(cards, filename, url, bindings.get(filename, {}))
-        logger.info("prompt bank reference image saved run_id=%s filename=%s binding=%s", run_id, filename, redact(bindings.get(filename, {})))
+        binding = take_reference_binding(bindings, original_filename)
+        bind_reference_image(cards, original_filename, url, binding)
+        logger.info("prompt bank reference image saved run_id=%s filename=%s stored_filename=%s binding=%s", run_id, original_filename, filename, redact(binding))
 
     vlm_status = ""
     if reference_images and provider.config.vlm.api_key:
@@ -622,13 +760,14 @@ async def pipeline(
         refs_dir = run_dir / "references"
         refs_dir.mkdir(parents=True, exist_ok=True)
         for upload in reference_images:
-            filename = Path(upload.filename or "reference.png").name
+            original_filename = Path(upload.filename or "reference.png").name
+            filename = available_reference_filename(refs_dir, original_filename)
             target = refs_dir / filename
             target.write_bytes(await upload.read())
             url = f"/runs/{run_id}/references/{filename}"
-            binding = bindings.get(filename, {})
-            bind_reference_image(cards, filename, url, binding)
-            logger.info("reference image saved run_id=%s filename=%s binding=%s", run_id, filename, redact(binding))
+            binding = take_reference_binding(bindings, original_filename)
+            bind_reference_image(cards, original_filename, url, binding)
+            logger.info("reference image saved run_id=%s filename=%s stored_filename=%s binding=%s", run_id, original_filename, filename, redact(binding))
     vlm_provider = OpenAICompatibleProvider()
     if reference_images and vlm_provider.config.vlm.api_key:
         analyze_reference_visuals(cards, run_dir, vlm_provider, purpose=f"pipeline:{run_id}:vlm_reference_visuals")
@@ -876,13 +1015,20 @@ def generate_image(request: ImageRequest) -> dict[str, Any]:
         logger.info("image generation skipped existing run_id=%s shot_id=%s path=%s", request.run_id, shot.id, target)
         return {"image_path": current.get("image_path"), "image_url": image_url, "skipped": True, "activated": True}
     try:
-        references = reference_paths_for_shot(request.run_id, shot)
+        reference_entries = reference_image_entries_for_shot(request.run_id, shot)
+        reference_names = [name for name, _ in reference_entries]
+        reference_groups = [group for _, group in reference_entries]
+        references = [path for group in reference_groups for path in group]
         logger.info("image generation started run_id=%s shot_id=%s size=%s reference_count=%s", request.run_id, shot.id, request.size, len(references))
         provider.image(
-            image_prompt_for_shot(shot),
+            shot.positive_prompt,
             target,
             size=request.size,
+            negative_prompt=shot.negative_prompt,
             reference_images=references,
+            reference_image_groups=reference_groups,
+            reference_regions=reference_regions_for_characters(shot, reference_names),
+            regional_guidance=shot.regional_guidance,
             purpose=f"image:single:{request.run_id}:{shot.id}",
         )
     except ProviderError as exc:
@@ -951,15 +1097,22 @@ def generate_batch_image_item(
     retry_count: int,
     activate: bool,
 ) -> dict[str, Any]:
-    references = reference_paths_for_shot(run_id, shot)
+    reference_entries = reference_image_entries_for_shot(run_id, shot)
+    reference_names = [name for name, _ in reference_entries]
+    reference_groups = [group for _, group in reference_entries]
+    references = [path for group in reference_groups for path in group]
     last_error = ""
     for attempt in range(retry_count + 1):
         try:
             provider.image(
-                image_prompt_for_shot(shot),
+                shot.positive_prompt,
                 target,
                 size=size,
+                negative_prompt=shot.negative_prompt,
                 reference_images=references,
+                reference_image_groups=reference_groups,
+                reference_regions=reference_regions_for_characters(shot, reference_names),
+                regional_guidance=shot.regional_guidance,
                 purpose=f"image:batch:{run_id}:{shot.id}:attempt{attempt + 1}",
             )
             image_url = image_url_for_path(run_id, target)
@@ -1124,12 +1277,6 @@ def strip_version_query(url: str) -> str:
     return url.split("?", 1)[0]
 
 
-def image_prompt_for_shot(shot: Shot) -> str:
-    if not shot.negative_prompt:
-        return shot.positive_prompt
-    return f"{shot.positive_prompt}\n\nNegative constraints:\n{shot.negative_prompt}"
-
-
 def clean_image_url(run_id: str, shot_id: str) -> str:
     return f"/runs/{run_id}/images/{shot_id}.png"
 
@@ -1139,16 +1286,23 @@ def versioned_image_url(run_id: str, shot_id: str, target: Path) -> str:
     return f"{clean_image_url(run_id, shot_id)}?v={version}"
 
 
-def reference_paths_for_shot(run_id: str, shot: Shot) -> list[Path]:
+def reference_image_entries_for_shot(run_id: str, shot: Shot) -> list[tuple[str, list[Path]]]:
     run_dir = run_directory(run_id)
     pipeline_path = run_dir / "pipeline.json"
     if not pipeline_path.exists():
         return []
     payload = json.loads(read_text(pipeline_path))
-    paths: list[Path] = []
-    for character in payload.get("characters", []):
-        if character.get("name") not in shot.characters:
+    characters = {
+        str(character.get("name")): character
+        for character in payload.get("characters", [])
+        if isinstance(character, dict) and character.get("name")
+    }
+    entries: list[tuple[str, list[Path]]] = []
+    for character_name in dict.fromkeys(shot.characters):
+        character = characters.get(character_name)
+        if not character:
             continue
+        paths: list[Path] = []
         for reference in character.get("reference_images", []):
             url = str(reference).split(" (", 1)[0]
             prefix = f"/runs/{run_id}/"
@@ -1156,10 +1310,30 @@ def reference_paths_for_shot(run_id: str, shot: Shot) -> list[Path]:
                 local_path = (run_dir / url.removeprefix(prefix)).resolve()
                 if run_dir.resolve() in local_path.parents and local_path.exists():
                     paths.append(local_path)
-    return list(dict.fromkeys(paths))
+        unique_paths = list(dict.fromkeys(paths))
+        if unique_paths:
+            entries.append((character_name, unique_paths))
+    return entries
 
 
-def parse_reference_bindings(raw: str | None) -> dict[str, dict[str, str]]:
+def reference_image_groups_for_shot(run_id: str, shot: Shot) -> list[list[Path]]:
+    return [group for _, group in reference_image_entries_for_shot(run_id, shot)]
+
+
+def reference_paths_for_shot(run_id: str, shot: Shot) -> list[Path]:
+    return [path for group in reference_image_groups_for_shot(run_id, shot) for path in group]
+
+
+def reference_regions_for_characters(shot: Shot, character_names: list[str]) -> list[list[float] | None]:
+    by_name = {
+        str(item.get("character")): item.get("region")
+        for item in shot.character_layout
+        if isinstance(item, dict) and item.get("character")
+    }
+    return [by_name.get(name) if isinstance(by_name.get(name), list) else None for name in character_names]
+
+
+def parse_reference_bindings(raw: str | None) -> dict[str, list[dict[str, str]]]:
     if not raw:
         return {}
     try:
@@ -1168,11 +1342,36 @@ def parse_reference_bindings(raw: str | None) -> dict[str, dict[str, str]]:
         return {}
     if not isinstance(data, list):
         return {}
-    result: dict[str, dict[str, str]] = {}
+    result: dict[str, list[dict[str, str]]] = {}
     for item in data:
         if isinstance(item, dict) and item.get("filename"):
-            result[str(item["filename"])] = {str(key): str(value) for key, value in item.items() if value is not None}
+            filename = Path(str(item["filename"])).name
+            binding = {str(key): str(value) for key, value in item.items() if value is not None}
+            result.setdefault(filename, []).append(binding)
     return result
+
+
+def take_reference_binding(
+    bindings: dict[str, list[dict[str, str]]],
+    filename: str,
+) -> dict[str, str]:
+    queue = bindings.get(Path(filename).name, [])
+    return queue.pop(0) if queue else {}
+
+
+def available_reference_filename(directory: Path, filename: str) -> str:
+    safe_name = Path(filename).name or "reference.png"
+    candidate = directory / safe_name
+    if not candidate.exists():
+        return safe_name
+    stem = Path(safe_name).stem or "reference"
+    suffix = Path(safe_name).suffix
+    index = 2
+    while True:
+        unique_name = f"{stem}_{index}{suffix}"
+        if not (directory / unique_name).exists():
+            return unique_name
+        index += 1
 
 
 def bind_reference_image(cards: list[Any], filename: str, url: str, binding: dict[str, str]) -> None:

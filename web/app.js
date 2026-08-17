@@ -88,6 +88,7 @@ const el = {
   providerType: document.querySelector("#providerType"),
   providerActive: document.querySelector("#providerActive"),
   providerLabel: document.querySelector("#providerLabel"),
+  providerBaseUrlLabel: document.querySelector("#providerBaseUrlLabel"),
   providerBaseUrl: document.querySelector("#providerBaseUrl"),
   providerKey: document.querySelector("#providerKey"),
   addModelBtn: document.querySelector("#addModelBtn"),
@@ -99,6 +100,12 @@ const el = {
   imageSequential: document.querySelector("#imageSequential"),
   imageResponseFormat: document.querySelector("#imageResponseFormat"),
   imageWatermark: document.querySelector("#imageWatermark"),
+  comfyOptions: document.querySelector("#comfyOptions"),
+  comfyWorkflowFile: document.querySelector("#comfyWorkflowFile"),
+  comfyWorkflow: document.querySelector("#comfyWorkflow"),
+  comfyNegativePrompt: document.querySelector("#comfyNegativePrompt"),
+  comfyOutputNode: document.querySelector("#comfyOutputNode"),
+  comfyPollInterval: document.querySelector("#comfyPollInterval"),
 };
 
 async function api(path, options = {}) {
@@ -352,6 +359,10 @@ function providerTemplate(kind = "image") {
       sequential: "disabled",
       response_format: "url",
       watermark: "true",
+      workflow_json: "",
+      negative_prompt: "",
+      output_node_id: "",
+      poll_interval: "1",
     } : {},
     created_at: Math.floor(Date.now() / 1000),
   };
@@ -398,6 +409,7 @@ function renderProviderDetail() {
   }
   el.providerKind.value = source.kind || "image";
   el.providerType.value = source.provider || "openai";
+  renderProviderBaseUrlField(source.provider);
   el.providerActive.value = state.providerConfig.active?.[source.kind] === source.id ? "true" : "false";
   el.providerLabel.value = source.label || "";
   el.providerBaseUrl.value = source.base_url || "";
@@ -409,8 +421,21 @@ function renderProviderDetail() {
   el.imageSequential.value = options.sequential || "";
   el.imageResponseFormat.value = options.response_format || "";
   el.imageWatermark.value = options.watermark || "true";
+  el.comfyWorkflow.value = options.workflow_json || "";
+  el.comfyNegativePrompt.value = options.negative_prompt || "";
+  el.comfyOutputNode.value = options.output_node_id || "";
+  el.comfyPollInterval.value = options.poll_interval || "1";
   el.imageOptions.hidden = source.kind !== "image";
+  el.comfyOptions.hidden = source.kind !== "image" || source.provider !== "comfyui";
   renderModelTable(source);
+}
+
+function renderProviderBaseUrlField(provider) {
+  const isComfyUI = provider === "comfyui";
+  el.providerBaseUrlLabel.textContent = isComfyUI ? "服务地址（HTTP）" : "请求地址";
+  el.providerBaseUrl.placeholder = isComfyUI
+    ? "CLI 默认 127.0.0.1:8188；Desktop 从 8000 起自动选端口"
+    : "https://api.example.com/v1";
 }
 
 function renderModelTable(source) {
@@ -464,6 +489,10 @@ function syncProviderForm() {
     sequential: el.imageSequential.value,
     response_format: el.imageResponseFormat.value,
     watermark: el.imageWatermark.value,
+    workflow_json: el.comfyWorkflow.value,
+    negative_prompt: el.comfyNegativePrompt.value,
+    output_node_id: el.comfyOutputNode.value.trim(),
+    poll_interval: el.comfyPollInterval.value || "1",
   } : {};
   if (previousKind !== source.kind && state.providerConfig.active?.[previousKind] === source.id) {
     state.providerConfig.active[previousKind] = "";
@@ -477,16 +506,21 @@ function syncProviderForm() {
 
 async function saveProviders() {
   syncProviderForm();
-  const data = await api("/api/providers", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ config: state.providerConfig }),
-  });
-  state.providerConfig = data.config;
-  renderProviderList();
-  renderProviderDetail();
-  await checkHealth();
-  el.health.textContent = "供应商配置已保存";
+  try {
+    const data = await api("/api/providers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: state.providerConfig }),
+    });
+    state.providerConfig = data.config;
+    renderProviderList();
+    renderProviderDetail();
+    await checkHealth();
+    el.health.textContent = "供应商配置已保存";
+  } catch (error) {
+    el.providerTestResult.textContent = error.message;
+    el.health.textContent = error.message;
+  }
 }
 
 async function testProvider() {
@@ -500,6 +534,10 @@ async function testProvider() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ source }),
     });
+    if (data.resolved_base_url) {
+      el.providerBaseUrl.value = data.resolved_base_url;
+      syncProviderForm();
+    }
     el.providerTestResult.textContent = JSON.stringify(data, null, 2);
   } catch (error) {
     el.providerTestResult.textContent = error.message;
@@ -643,7 +681,7 @@ function renderImageVersions() {
 
 function saveSelectedPrompt() {
   if (!state.selected) return;
-  state.selected.positive_prompt = el.promptBox.value;
+  window.FicFramePromptState.updateShotPositivePrompt(state.selected, el.promptBox.value);
 }
 
 function restoreSelectedPrompt() {
@@ -651,6 +689,8 @@ function restoreSelectedPrompt() {
   const original = state.originalShots.find((shot) => shot.id === state.selected.id);
   if (!original) return;
   state.selected.positive_prompt = original.positive_prompt || "";
+  state.selected.character_layout = clone(original.character_layout || []);
+  state.selected.regional_guidance = original.regional_guidance ?? null;
   el.promptBox.value = state.selected.positive_prompt;
   el.health.textContent = `${state.selected.id} prompt 已恢复到初始文本`;
   saveWorkspaceDraft();
@@ -659,7 +699,8 @@ function restoreSelectedPrompt() {
 function rebuildSelectedPrompt() {
   if (!state.selected) return;
   saveCharacterEditor();
-  state.selected.positive_prompt = buildPromptFromShot(state.selected);
+  window.FicFramePromptState.updateShotPositivePrompt(state.selected, buildPromptFromShot(state.selected));
+  state.selected.negative_prompt = buildNegativePromptFromShot(state.selected);
   el.promptBox.value = state.selected.positive_prompt;
   el.health.textContent = `${state.selected.id} prompt 已根据角色库重建`;
   saveWorkspaceDraft();
@@ -669,7 +710,8 @@ function rebuildAllPrompts(message = "全部 prompt 已根据角色库重建") {
   saveSelectedPrompt();
   saveCharacterEditor();
   for (const shot of state.shots) {
-    shot.positive_prompt = buildPromptFromShot(shot);
+    window.FicFramePromptState.updateShotPositivePrompt(shot, buildPromptFromShot(shot));
+    shot.negative_prompt = buildNegativePromptFromShot(shot);
   }
   if (state.selected) {
     el.promptBox.value = state.selected.positive_prompt;
@@ -687,10 +729,6 @@ function buildPromptFromShot(shot) {
       `Current visible state: ${currentAppearanceState(character, shot)}`,
     ].join("\n");
   }).join("\n");
-  const negativeConstraints = (shot.characters || []).map((name) => {
-    const character = state.characters.find((item) => item.name === name);
-    return character?.negative_identity_prompt || "";
-  }).filter(Boolean).join(", ");
   return [
     "high quality anime light novel illustration, cinematic composition",
     "",
@@ -710,10 +748,28 @@ function buildPromptFromShot(shot) {
     "",
     "Style:",
     "soft volumetric light, gentle rim light, natural skin tones, restrained teal and amber accents, clean detailed linework, subtle painterly texture, quiet emotional storytelling, detailed character design.",
-    "",
-    "Negative constraints:",
-    ["extra people, duplicate character, same face between different characters, merged characters, wrong character identity", negativeConstraints].filter(Boolean).join(", "),
   ].join("\n");
+}
+
+function buildNegativePromptFromShot(shot) {
+  const constraints = [
+    "extra people",
+    "duplicate character",
+    "same face between different characters",
+    "merged characters",
+    "wrong character identity",
+    ...(shot.characters || []).map((name) => {
+      const character = state.characters.find((item) => item.name === name);
+      return character?.negative_identity_prompt || "";
+    }),
+  ].filter(Boolean);
+  let result = (shot.negative_prompt || "").trim();
+  for (const constraint of constraints) {
+    if (!result.toLowerCase().includes(constraint.toLowerCase())) {
+      result = [result, constraint].filter(Boolean).join(", ");
+    }
+  }
+  return result;
 }
 
 function currentAppearanceState(character, shot) {
@@ -906,9 +962,14 @@ function addManualCharacter() {
 }
 
 function rebuildReferenceBindings() {
-  const previous = new Map(state.referenceBindings.map((item) => [item.filename, item]));
+  const previous = new Map();
+  for (const item of state.referenceBindings) {
+    const queue = previous.get(item.filename) || [];
+    queue.push(item);
+    previous.set(item.filename, queue);
+  }
   state.referenceBindings = Array.from(el.referenceImages.files).map((file) => {
-    const old = previous.get(file.name);
+    const old = previous.get(file.name)?.shift();
     return old || {
       filename: file.name,
       character: suggestCharacter(file.name),
@@ -1479,18 +1540,46 @@ el.addModelBtn.addEventListener("click", () => {
   source.models.push({ nickname: "新模型", model: "" });
   renderModelTable(source);
 });
-for (const node of [el.providerKind, el.providerType, el.providerActive, el.providerLabel, el.providerBaseUrl, el.providerKey, el.imageSteps, el.imageGuidance, el.imageBatch, el.imageSequential, el.imageResponseFormat, el.imageWatermark]) {
+el.providerType.addEventListener("change", () => {
+  const source = findProvider();
+  const knownCloudDefaults = [
+    "https://api.openai.com/v1",
+    "https://api.siliconflow.cn/v1",
+    "https://ark.cn-beijing.volces.com/api/v3",
+  ];
+  if (el.providerType.value === "comfyui" && source?.provider !== "comfyui" && (!el.providerBaseUrl.value || knownCloudDefaults.includes(el.providerBaseUrl.value))) {
+    el.providerBaseUrl.value = "http://127.0.0.1:8188";
+    el.providerKey.value = "";
+  }
+  renderProviderBaseUrlField(el.providerType.value);
+});
+for (const node of [el.providerKind, el.providerType, el.providerActive, el.providerLabel, el.providerBaseUrl, el.providerKey, el.imageSteps, el.imageGuidance, el.imageBatch, el.imageSequential, el.imageResponseFormat, el.imageWatermark, el.comfyWorkflow, el.comfyNegativePrompt, el.comfyOutputNode, el.comfyPollInterval]) {
   node.addEventListener("input", () => {
     syncProviderForm();
     renderProviderList();
     el.imageOptions.hidden = findProvider()?.kind !== "image";
+    el.comfyOptions.hidden = findProvider()?.kind !== "image" || findProvider()?.provider !== "comfyui";
   });
   node.addEventListener("change", () => {
     syncProviderForm();
     renderProviderList();
     el.imageOptions.hidden = findProvider()?.kind !== "image";
+    el.comfyOptions.hidden = findProvider()?.kind !== "image" || findProvider()?.provider !== "comfyui";
   });
 }
+el.comfyWorkflowFile.addEventListener("change", async () => {
+  const file = el.comfyWorkflowFile.files[0];
+  if (!file) return;
+  try {
+    const data = JSON.parse(await file.text());
+    const workflow = data?.prompt && typeof data.prompt === "object" ? data.prompt : data;
+    el.comfyWorkflow.value = JSON.stringify(workflow, null, 2);
+    syncProviderForm();
+    el.providerTestResult.textContent = `已导入 ${file.name}`;
+  } catch (error) {
+    el.providerTestResult.textContent = `工作流 JSON 无效：${error.message}`;
+  }
+});
 el.saveConfigBtn.addEventListener("click", saveProviders);
 el.refreshConfigBtn.addEventListener("click", async () => {
   await loadConfig();

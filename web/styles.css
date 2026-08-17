@@ -148,6 +148,12 @@ button:disabled {
   display: none;
 }
 
+.workflow-json {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  max-height: 320px;
+  resize: vertical;
+}
+
 fieldset {
   border: var(--rule-sm) solid var(--color-rule);
   border-radius: var(--radius-sm);
