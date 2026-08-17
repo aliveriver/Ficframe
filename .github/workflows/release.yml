@@ -1,6 +1,7 @@
 name: Build release packages
 
 on:
+  pull_request:
   workflow_dispatch:
     inputs:
       version:
