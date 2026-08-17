@@ -32,15 +32,17 @@ from .providers import EndpointConfig, OpenAICompatibleProvider, ProviderError, 
 from .prompt_bank import analyze_reference_visuals, build_character_prompt_bank
 from .qa import annotate_shots
 from .render import render_illustrated_novel, render_prompts, render_storyboard
+from .runtime_paths import env_file, outputs_root, providers_file, resource_root, user_data_root, web_root
 from .segmenter import segment_novel
 from .storyboard import build_storyboard
 
 
-ROOT = Path(__file__).resolve().parents[1]
-WEB = ROOT / "web"
-RUNS = ROOT / "outputs" / "web-runs"
-ENV_FILE = ROOT / ".env"
-PROVIDERS_FILE = ROOT / ".ficframe" / "providers.json"
+RESOURCE_ROOT = resource_root()
+ROOT = user_data_root()
+WEB = web_root()
+RUNS = outputs_root() / "web-runs"
+ENV_FILE = env_file()
+PROVIDERS_FILE = providers_file()
 RUNS.mkdir(parents=True, exist_ok=True)
 LOGS = setup_logging(ROOT)
 logger = get_logger("api")
@@ -213,7 +215,7 @@ def get_run(run_id: str) -> dict[str, Any]:
 @app.post("/api/logs/export")
 def export_logs(request: LogBundleRequest) -> FileResponse:
     config = public_provider_config(PROVIDERS_FILE, ENV_FILE)
-    bundle = build_log_bundle(ROOT, config=config, active_run_id=request.run_id)
+    bundle = build_log_bundle(ROOT, config=config, active_run_id=request.run_id, resource_root=RESOURCE_ROOT)
     logger.info("log bundle exported path=%s run_id=%s", bundle, request.run_id or "")
     return FileResponse(bundle, filename=bundle.name, media_type="application/zip")
 

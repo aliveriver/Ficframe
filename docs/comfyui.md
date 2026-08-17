@@ -216,13 +216,13 @@ FicFrame 支持下列占位符：
 
 ## 配置保存位置
 
-ComfyUI 地址和工作流保存在：
+安装版的 ComfyUI 地址和工作流保存在安装目录的 `data/` 下：
 
 ```text
-.ficframe/providers.json
-.ficframe/comfyui_workflow.json
+<安装目录>/data/.ficframe/providers.json
+<安装目录>/data/.ficframe/comfyui_workflow.json
 ```
 
-激活供应商后也会同步必要配置到 `.env`。这些文件默认不会提交到仓库。
+源码运行时对应路径是仓库根目录下的 `.ficframe/`。激活供应商后也会同步必要配置到数据目录的 `.env`。源码目录中的这些文件默认不会提交到仓库。
 
 遇到模型找不到、节点缺失、显存不足或参考图不生效时，参阅 [常见问题](faq.md)。

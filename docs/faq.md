@@ -1,11 +1,63 @@
 # FicFrame 常见问题
 
 - [返回 README](../README.md)
+- [Windows 与 Linux 发布包](distribution.md)
 - [ComfyUI 使用指南](comfyui.md)
 
 ## 启动与环境
 
-### 没有 uv 怎么办？
+### 安装版需要 Python 或 uv 吗？
+
+不需要。Windows `Setup.exe`、Windows 便携 ZIP、Linux `.run` 和 Linux `.tar.gz` 都已经内置 Python 与运行依赖。Python/uv 只用于从源码开发和构建发布包。
+
+### 安装版的数据保存在哪里？
+
+所有持续增长的数据都保存在用户选择的安装目录：
+
+```text
+<安装目录>/data/
+├── .env
+├── .ficframe/
+└── outputs/
+```
+
+因此可以把 FicFrame 安装在其他磁盘。Windows 仍会为安装临时文件、快捷方式和卸载登记使用少量系统盘空间，但程序主体、日志和生成结果都留在目标目录。
+
+### 如何升级、迁移或卸载？
+
+- 升级：新版本安装到原目录即可，安装器不会主动覆盖 `data/`。
+- 迁移：关闭 FicFrame 后复制整个安装目录，或至少复制 `data/`。
+- 卸载：Windows 卸载器默认保留非空的 `data/`；确认不再需要后可手动删除。Linux 关闭程序后直接删除安装目录即可。
+- 便携 ZIP / tar.gz：解压新版本时保留原来的 `data/`，不要把旧程序运行中的目录直接覆盖。
+
+API key 保存在 `data/.env` 和 `data/.ficframe/providers.json`，迁移文件时请按敏感信息处理。
+
+### Windows 提示 SmartScreen 怎么办？
+
+未签名的测试安装包可能触发 SmartScreen。应确认安装包来自项目的正式 Releases 页面；如果发布者提供了校验值，也应一并核对。公开分发版本建议使用代码签名证书。
+
+### Linux 安装后无法运行
+
+先确认执行权限：
+
+```bash
+chmod +x FicFrame-<版本>-linux-x86_64.run
+chmod +x /目标目录/FicFrame
+```
+
+Linux 构建依赖 glibc。若系统版本明显早于构建环境，建议在兼容的发行版上重新构建，或使用项目 CI 基于 Ubuntu 22.04 生成的包。
+
+### Linux 压缩包里为什么是 EXE？
+
+先区分文件类型：Linux 主程序本身也是“可执行文件”，文件管理器可能把它显示为 executable，这是正常的。正确文件名是 `FicFrame`，没有 `.exe` 后缀，执行以下命令应看到 `ELF 64-bit`：
+
+```bash
+file FicFrame
+```
+
+如果文件名是 `FicFrame.exe`，或者 `file` 显示 `PE32` / `PE32+`，说明压缩包是在 Windows、Git Bash 或 Windows Python 环境中错误构建的。PyInstaller 不支持交叉编译。请使用 GitHub Actions 的 Linux artifact，或在原生 Linux/Linux 虚拟机中重新运行 `bash scripts/build_linux.sh`。新版构建脚本会拒绝产生这种误标包。
+
+### 从源码运行但没有 uv 怎么办？
 
 直接运行 `start.bat`。脚本检测不到 `uv` 时，会自动使用 Python `venv + pip`。
 
@@ -18,7 +70,7 @@ python -m venv .venv
 
 ### 端口 8787 被占用
 
-换一个端口启动：
+安装版会从 8787 开始自动寻找可用端口，并打开实际地址，一般不需要手动处理。源码运行时可以换一个端口：
 
 ```powershell
 .\start.ps1 -Port 8788
@@ -38,7 +90,24 @@ Stop-Process -Id <PID> -Force
 
 ### 页面能打开，但健康检查失败
 
-检查后端终端和 `outputs/logs/errors.log`。如果刚修改了 `.env` 或供应商配置，重新启动 FicFrame 后再测试。
+检查后端终端和错误日志：
+
+- 安装版：`<安装目录>/data/outputs/logs/errors.log`
+- 源码运行：`outputs/logs/errors.log`
+
+如果刚修改了 `.env` 或供应商配置，重新启动 FicFrame 后再测试。
+
+### 如何关闭 FicFrame？
+
+关闭 FicFrame 启动窗口，或在窗口内按 `Ctrl+C`。只关闭浏览器标签页不会停止本地后端。
+
+## LLM 与 API
+
+### DeepSeek 为什么没有显示思考过程？
+
+这是预期行为。FicFrame 会让 DeepSeek 使用高强度思考，但解析时只保留最终回答，主动过滤 Responses 格式的 `reasoning` / `reasoning_text` 和 Chat 格式的 `reasoning_content`，避免它们混入结构化 JSON。
+
+DeepSeek 会优先请求 `/responses`。只有服务端返回明确的接口错误时才回退 `/chat/completions`；超时、连接失败、鉴权失败或限流不会回退，避免同一任务被重复提交。
 
 ## 图片生成
 
@@ -55,7 +124,7 @@ ComfyUI API 工作流通常要求 `宽x高`，例如 `1024x1024`。云端供应�
 
 ### 生成图片超时
 
-图片模型排队或本地首次加载较久时，可在 `.env` 中调大：
+图片模型排队或本地首次加载较久时，可在安装版的 `data/.env` 或源码根目录的 `.env` 中调大：
 
 ```env
 FICFRAME_IMAGE_TIMEOUT=1200

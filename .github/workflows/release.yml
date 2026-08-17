@@ -1,0 +1,94 @@
+name: Build release packages
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without the v prefix
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Resolve version
+        shell: pwsh
+        run: |
+          $version = "${{ inputs.version }}"
+          if (-not $version -and $env:GITHUB_REF_TYPE -eq "tag") {
+            $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          }
+          if (-not $version) {
+            $line = Select-String -Path pyproject.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+            $version = $line.Matches[0].Groups[1].Value
+          }
+          "FICFRAME_RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Build Windows installer
+        shell: pwsh
+        run: .\scripts\build_windows.ps1 -Version $env:FICFRAME_RELEASE_VERSION -RequireInstaller
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FicFrame-windows-x64
+          path: release/FicFrame-*-windows-x64-*
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Resolve version
+        shell: bash
+        run: |
+          version="${{ inputs.version }}"
+          if [[ -z "$version" && "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          if [[ -z "$version" ]]; then
+            version="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)"/\1/p' pyproject.toml | head -n 1)"
+          fi
+          echo "FICFRAME_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Build Linux installer
+        shell: bash
+        run: bash scripts/build_linux.sh "$FICFRAME_RELEASE_VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FicFrame-linux-x86_64
+          path: |
+            release/FicFrame-*-linux-x86_64.run
+            release/FicFrame-*-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

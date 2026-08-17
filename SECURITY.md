@@ -18,18 +18,21 @@ FicFrame 无法控制第三方服务商如何存储、处理或使用这些内�
 API key 可能保存在以下文件中：
 
 ```text
-.env
-.ficframe/providers.json
+安装版：<安装目录>/data/.env
+安装版：<安装目录>/data/.ficframe/providers.json
+源码运行：.env
+源码运行：.ficframe/providers.json
 ```
 
-这两个路径已经加入 `.gitignore`。请不要把它们提交到公开仓库，也不要在 issue、截图、日志或聊天中泄露自己的 API key。
+源码目录中的两个路径已经加入 `.gitignore`。安装版迁移、备份或分享整个目录时，需要特别注意 `data/` 中包含 API key。请不要把这些文件提交到公开仓库，也不要在 issue、截图、日志或聊天中泄露自己的 API key。
 
 ## 日志
 
 服务端日志默认写入：
 
 ```text
-outputs/logs/
+安装版：<安装目录>/data/outputs/logs/
+源码运行：outputs/logs/
 ```
 
 Web 顶部的“导出日志”会生成一个 zip 日志包。FicFrame 会尝试对 API key 和常见 token 格式做脱敏，但日志包仍然可能包含：
