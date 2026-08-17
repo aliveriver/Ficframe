@@ -65,6 +65,8 @@ jobs:
   windows:
     needs: prepare
     runs-on: windows-latest
+    env:
+      UV_DEFAULT_INDEX: https://pypi.org/simple
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -73,6 +75,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Use official PyPI on GitHub runner
+        shell: pwsh
+        run: |
+          $lockPath = Join-Path $PWD "uv.lock"
+          $content = [IO.File]::ReadAllText($lockPath)
+          $content = $content.Replace("https://pypi.tuna.tsinghua.edu.cn/simple", "https://pypi.org/simple")
+          $content = $content.Replace("https://pypi.tuna.tsinghua.edu.cn/packages", "https://files.pythonhosted.org/packages")
+          [IO.File]::WriteAllText($lockPath, $content)
+          uv lock --check
       - name: Build Windows installer
         shell: pwsh
         run: .\scripts\build_windows.ps1 -Version "${{ needs.prepare.outputs.version }}" -RequireInstaller
@@ -85,6 +96,8 @@ jobs:
   linux:
     needs: prepare
     runs-on: ubuntu-22.04
+    env:
+      UV_DEFAULT_INDEX: https://pypi.org/simple
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -93,6 +106,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Use official PyPI on GitHub runner
+        shell: bash
+        run: |
+          sed -i \
+            -e 's#https://pypi.tuna.tsinghua.edu.cn/simple#https://pypi.org/simple#g' \
+            -e 's#https://pypi.tuna.tsinghua.edu.cn/packages#https://files.pythonhosted.org/packages#g' \
+            uv.lock
+          uv lock --check
       - name: Build Linux installer
         shell: bash
         run: bash scripts/build_linux.sh "${{ needs.prepare.outputs.version }}"
