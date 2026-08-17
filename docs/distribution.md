@@ -162,3 +162,9 @@ PR 检查会验证三个版本号一致。普通功能 PR 可以继续沿用当�
 5. 再次点击 `Run workflow`。
 
 工作流会确认当前分支是 `main`、三个版本号一致且远端不存在同名 `v<版本>` 标签。Windows 或 Linux 任一构建失败时都不会创建 Release；全部成功后，Release job 会自动创建标签并发布四个文件，不需要手动执行 `git tag`。
+
+### CI 依赖源
+
+源码环境可以继续使用项目配置的清华 PyPI 镜像。GitHub Actions 的 Windows 与 Linux runner 会在临时检出的 `uv.lock` 中把下载地址切换到官方 PyPI，并执行 `uv lock --check`；只替换下载主机，不改变锁定的依赖版本和哈希，也不会修改仓库中的锁文件。
+
+如果构建日志出现镜像 URL 的 `403 Forbidden`，这是依赖下载源拒绝访问，不是 PyInstaller 或版本号错误。提交工作流修复后，应从新 commit 手动启动一次发布工作流；对旧任务点击“Re-run jobs”仍会执行旧 commit 中的工作流。
