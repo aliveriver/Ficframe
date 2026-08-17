@@ -104,6 +104,8 @@ chmod +x scripts/build_linux.sh
 
 PyInstaller 不是交叉编译器：Windows 包必须在 Windows 构建，Linux 包必须在原生 Linux、Linux 虚拟机、WSL 的 Linux Python 环境或 Linux CI 中构建。不能在 Windows PowerShell、CMD 或 Git Bash 中运行 `build_linux.sh` 来生成 Linux 包。构建脚本会检查系统类型，并在归档前用 `file` 确认主程序是 ELF；发现 `.exe` 或 Windows PE 文件会立即失败。
 
+在 WSL 中从 `/mnt/<盘符>/...` 的项目目录构建时，脚本会把 uv 环境、可选的受管 Python、PyInstaller 缓存和临时文件放到项目的 `build/package/linux/`，避免默认写入 WSL 用户目录所在的系统盘。
+
 正确的 Linux 解压结果中，主程序名为 `FicFrame`，没有 `.exe` 后缀。可以这样检查：
 
 ```bash
