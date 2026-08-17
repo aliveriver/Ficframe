@@ -16,9 +16,10 @@ from dotenv import load_dotenv
 
 from .logging_utils import get_logger
 from .comfyui import ComfyUIClient, ComfyUIError, load_api_workflow, render_api_workflow
+from .runtime_paths import env_file
 
 
-load_dotenv()
+load_dotenv(env_file())
 logger = get_logger("providers")
 
 
@@ -239,7 +240,30 @@ class OpenAICompatibleProvider:
                     {"role": "user", "content": [{"type": "input_text", "text": user}]},
                 ],
             }
-            data = self._post(endpoint, "llm", "responses", payload, purpose=purpose)
+            if is_deepseek_endpoint(endpoint):
+                payload["reasoning"] = {"effort": "high"}
+            try:
+                data = self._post(endpoint, "llm", "responses", payload, purpose=purpose)
+            except ProviderError as exc:
+                if not is_deepseek_endpoint(endpoint) or not can_fallback_deepseek_to_chat(exc):
+                    raise
+                logger.warning(
+                    "DeepSeek Responses API unavailable purpose=%s model=%s; retrying with chat/completions: %s",
+                    purpose,
+                    model or endpoint.model,
+                    exc,
+                )
+                chat_payload = {
+                    "model": model or endpoint.model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "reasoning_effort": "high",
+                    "thinking": {"type": "enabled"},
+                }
+                data = self._post(endpoint, "llm", "chat/completions", chat_payload, purpose=f"{purpose}:chat_fallback")
         return extract_response_text(data)
 
     def vision(self, system: str, prompt: str, image_paths: list[Path], model: str | None = None, purpose: str = "") -> str:
@@ -444,16 +468,30 @@ def effective_image_provider(endpoint: EndpointConfig) -> str:
 
 
 def effective_llm_provider(endpoint: EndpointConfig) -> str:
-    provider = endpoint.provider.lower()
-    host = urlparse(endpoint.base_url).netloc.lower()
-    model = endpoint.model.lower()
-    if provider in {"deepseek"} or "deepseek" in model or "api.deepseek.com" in host:
-        return "chat_completions"
+    # Both OpenAI and DeepSeek expose the Responses API. Keep text generation on
+    # one request/response shape instead of routing DeepSeek through legacy chat.
     return "responses"
 
 
 def llm_runtime_path(endpoint: EndpointConfig) -> str:
     return "chat/completions" if effective_llm_provider(endpoint) == "chat_completions" else "responses"
+
+
+def is_deepseek_endpoint(endpoint: EndpointConfig) -> bool:
+    provider = endpoint.provider.lower()
+    host = urlparse(endpoint.base_url).netloc.lower()
+    model = endpoint.model.lower()
+    return provider == "deepseek" or "deepseek" in model or host == "api.deepseek.com"
+
+
+def can_fallback_deepseek_to_chat(exc: ProviderError) -> bool:
+    message = str(exc).lstrip()
+    status_text = message.split(maxsplit=1)[0] if message else ""
+    if not status_text.isdigit():
+        # A timeout or connection failure may have happened after the server
+        # accepted the request. Retrying another endpoint could duplicate work.
+        return False
+    return int(status_text) not in {401, 403, 408, 409, 429}
 
 
 def effective_vlm_provider(endpoint: EndpointConfig) -> str:
@@ -641,11 +679,15 @@ def extract_response_text(data: dict[str, Any]) -> str:
     for item in data.get("output", []) or []:
         if not isinstance(item, dict):
             continue
+        if item.get("type") == "reasoning":
+            continue
         for content in item.get("content", []) or []:
             if isinstance(content, str):
                 pieces.append(content)
                 continue
             if not isinstance(content, dict):
+                continue
+            if content.get("type") == "reasoning_text":
                 continue
             text = content.get("text") or content.get("output_text")
             if isinstance(text, str):
@@ -667,10 +709,12 @@ def collect_response_text_fields(value: Any) -> list[str]:
     pieces: list[str] = []
     if isinstance(value, dict):
         value_type = str(value.get("type") or "")
-        direct_keys = {"output_text", "text", "content", "reasoning_content"}
+        if value_type in {"reasoning", "reasoning_text"}:
+            return pieces
+        direct_keys = {"output_text", "text", "content"}
         for key in direct_keys:
             item = value.get(key)
-            if isinstance(item, str) and item.strip() and ("text" in value_type or key in {"output_text", "text", "content", "reasoning_content"}):
+            if isinstance(item, str) and item.strip() and ("text" in value_type or key in direct_keys):
                 pieces.append(item)
             elif isinstance(item, (dict, list)):
                 pieces.extend(collect_response_text_fields(item))

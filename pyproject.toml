@@ -17,6 +17,10 @@ build-backend = "setuptools.build_meta"
 
 [project.scripts]
 ficframe = "ficframe.cli:main"
+ficframe-desktop = "ficframe.desktop:main"
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6.11"]
 
 [tool.setuptools.packages.find]
 include = ["ficframe*"]

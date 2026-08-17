@@ -102,6 +102,7 @@ def build_log_bundle(
     root: str | Path,
     config: dict[str, Any] | None = None,
     active_run_id: str | None = None,
+    resource_root: str | Path | None = None,
 ) -> Path:
     root_path = Path(root)
     logs_dir = root_path / "outputs" / "logs"
@@ -115,7 +116,7 @@ def build_log_bundle(
             if path == bundle_path:
                 continue
             archive.write(path, f"logs/{path.name}")
-        readme = root_path / "README.md"
+        readme = Path(resource_root) / "README.md" if resource_root else root_path / "README.md"
         if readme.exists():
             archive.write(readme, "project/README.md")
         if active_run_id:

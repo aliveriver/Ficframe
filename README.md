@@ -36,13 +36,29 @@ FicFrame 是一套本地运行的小说配图工作台，用来把小说正文�
 
 ## 文档
 
+- [Windows 与 Linux 发布包](docs/distribution.md)：免 Python 安装、目标目录、升级迁移和自动构建。
 - [ComfyUI 使用指南](docs/comfyui.md)：Desktop 接入、基础 SDXL、Illustrious XL、IP-Adapter、多参考图、LLM 布局和自定义工作流。
 - [常见问题](docs/faq.md)：启动、端口、图片 API、ComfyUI 节点、显存、参考图和导出排障。
 - [安全与隐私](SECURITY.md)：本地文件、第三方 API 和日志包注意事项。
 
 ## 快速开始
 
-### Windows 用户
+### 免 Python 安装包
+
+Windows 与 Linux 发布包已经内置 Python 和运行依赖。用户可以把程序安装到其他磁盘的自选目录；配置、日志和生成结果统一保存在安装目录下的 `data/`，不会持续占用系统盘。
+
+- Windows：运行 `FicFrame-<版本>-windows-x64-setup.exe`，在安装向导中选择目标目录。
+- Linux：运行 `.run` 安装器并通过 `--target` 指定目录，或解压便携 `.tar.gz`。
+- 安装后直接运行 `FicFrame.exe` 或 `FicFrame`；程序会启动本地服务并自动打开浏览器。
+- 关闭 FicFrame 启动窗口或按 `Ctrl+C` 即可停止服务。
+
+构建方法、静默安装参数、目录结构和平台限制见 [Windows 与 Linux 发布包](docs/distribution.md)。
+
+### 从源码运行（开发者）
+
+以下方式只适用于克隆源码后开发或调试。安装版用户不需要执行这些命令，也不需要 Python、uv 或 pip。
+
+#### Windows
 
 双击项目根目录下的：
 
@@ -65,7 +81,7 @@ start.bat
 http://127.0.0.1:8787
 ```
 
-### PowerShell
+#### PowerShell
 
 ```powershell
 .\start.ps1
@@ -77,7 +93,7 @@ http://127.0.0.1:8787
 .\start.ps1 -Port 8788
 ```
 
-### macOS / Linux
+#### macOS / Linux 源码环境
 
 ```bash
 chmod +x ./start.sh
@@ -90,7 +106,7 @@ chmod +x ./start.sh
 FICFRAME_PORT=8788 ./start.sh
 ```
 
-### 手动启动
+#### 手动启动
 
 使用 `uv`：
 
@@ -136,10 +152,10 @@ default = true
 14. 点击 `导出小说 MD`，得到插入配图后的完整小说 Markdown。
 15. 遇到问题时点击 `导出日志`，把 zip 日志包附到 issue。
 
-输出目录：
+安装版的 `<数据目录>` 是 `<安装目录>/data/`；源码运行时则是仓库根目录。输出目录：
 
 ```text
-outputs/web-runs/<run_id>/
+<数据目录>/outputs/web-runs/<run_id>/
 ├── pipeline.json
 ├── storyboard.md
 ├── prompts.md
@@ -152,13 +168,13 @@ outputs/web-runs/<run_id>/
 导出的小说 Markdown 会保存在：
 
 ```text
-outputs/web-runs/<run_id>/illustrated_novel.md
+<数据目录>/outputs/web-runs/<run_id>/illustrated_novel.md
 ```
 
 图片保存在：
 
 ```text
-outputs/web-runs/<run_id>/images/
+<数据目录>/outputs/web-runs/<run_id>/images/
 ```
 
 ## API 供应商配置
@@ -171,19 +187,26 @@ FicFrame 把 LLM、VLM 和图片模型分开配置。三类 API 可以使用完�
 - 供应商类型
 - 模型昵称
 
-配置入口在 Web 顶部 `API 管理`。配置会保存到：
+配置入口在 Web 顶部 `API 管理`。安装版配置保存在安装目录的 `data/` 下；源码运行时保存在仓库根目录：
 
 ```text
-.ficframe/providers.json
+<数据目录>/.ficframe/providers.json
 ```
 
-同时会同步写入 `.env`，便于命令行流程继续使用。`.env` 和 `.ficframe/` 默认不会提交到仓库。
+同时会同步写入 `<数据目录>/.env`。源码目录下的 `.env` 和 `.ficframe/` 默认不会提交到仓库。
+
+### DeepSeek LLM 调用
+
+选择 `DeepSeek 官方` 后，FicFrame 会优先调用 `/responses`，并使用高强度思考。若服务端明确拒绝或不兼容 Responses 请求，会回退到 `/chat/completions`。超时、连接失败、鉴权失败和限流不会自动回退，以避免重复请求或重复计费。
+
+DeepSeek 的思考内容仍可能由服务端返回，但 FicFrame 只提取最终回答，并过滤 `reasoning`、`reasoning_text` 和 `reasoning_content`，避免思考过程污染后续 JSON 解析。
 
 ### `.env` 示例
 
 ```env
 FICFRAME_LLM_API_KEY=sk-your-llm-key
 FICFRAME_LLM_BASE_URL=https://api.openai.com/v1
+FICFRAME_LLM_PROVIDER=openai
 FICFRAME_LLM_MODEL=gpt-5-mini
 FICFRAME_TIMEOUT=300
 
@@ -197,6 +220,15 @@ FICFRAME_IMAGE_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
 FICFRAME_IMAGE_PROVIDER=ark
 FICFRAME_IMAGE_MODEL=doubao-seedream-5-0-260128
 FICFRAME_IMAGE_TIMEOUT=900
+```
+
+DeepSeek 官方接口示例：
+
+```env
+FICFRAME_LLM_API_KEY=sk-your-deepseek-key
+FICFRAME_LLM_BASE_URL=https://api.deepseek.com
+FICFRAME_LLM_PROVIDER=deepseek
+FICFRAME_LLM_MODEL=deepseek-v4-flash
 ```
 
 没有配置 API key 时，Web 仍然可以生成本地分镜和基础 Prompt。只有 LLM 增强、VLM 参考图分析和图片生成需要对应的 API。
@@ -318,14 +350,14 @@ images/shot_03_1786123499999.png
 - `生成选中`：勾选任意多个分镜，只重生成这些分镜。
 - `pipeline.json`：保存当前 run 的角色、场景、分镜、Prompt、图片版本等完整状态。
 - 浏览器草稿：刷新页面后会尽量恢复当前分镜、Prompt 和图片状态。
-- `恢复最近`：从 `outputs/web-runs/` 恢复最近一次 Web run。
+- `恢复最近`：从 `<数据目录>/outputs/web-runs/` 恢复最近一次 Web run。
 
 ## 日志与问题反馈
 
 日志目录：
 
 ```text
-outputs/logs/
+<数据目录>/outputs/logs/
 ```
 
 主要文件：
@@ -407,6 +439,7 @@ examples/minimal/
 .
 ├── ficframe/                  # Python 后端与核心流水线
 │   ├── api.py                  # FastAPI Web API
+│   ├── desktop.py              # 安装版桌面启动入口
 │   ├── characters.py           # 人物 Markdown 解析
 │   ├── character_diff.py       # 角色差异分析
 │   ├── cli.py                  # 命令行入口
@@ -418,6 +451,7 @@ examples/minimal/
 │   ├── prompt_bank.py          # Prompt Bank 与 VLM 参考图分析
 │   ├── providers.py            # LLM / VLM / 图片 API 适配
 │   ├── render.py               # Markdown 导出
+│   ├── runtime_paths.py         # 安装资源与便携数据目录
 │   ├── segmenter.py            # 小说切段
 │   └── storyboard.py           # 分镜生成
 ├── web/                        # Web 前端
@@ -427,10 +461,13 @@ examples/minimal/
 │   └── tokens.css
 ├── docs/                       # 使用指南与常见问题
 │   ├── comfyui.md
+│   ├── distribution.md
 │   └── faq.md
+├── packaging/                  # PyInstaller、Windows 与 Linux 安装器配置
+├── scripts/                    # Windows / Linux 发布包构建脚本
 ├── examples/minimal/           # 最小公开示例
-├── outputs/                    # 运行输出，默认不提交
-├── .ficframe/                  # 本地供应商配置，默认不提交
+├── outputs/                    # 源码运行输出，默认不提交
+├── .ficframe/                  # 源码运行供应商配置，默认不提交
 ├── .env.example                # 环境变量示例
 ├── requirements.txt            # pip 依赖
 ├── pyproject.toml              # 项目配置与 uv 配置
@@ -467,7 +504,7 @@ node --test tests/frontend/test_prompt_state.js
 
 FicFrame 是本地应用，但当你启用 LLM、VLM 或图片生成时，小说正文、人设、Prompt、参考图或生成图可能会发送到你配置的第三方 API。请确认供应商符合你的隐私要求。
 
-默认不会提交以下本地文件：
+源码运行时默认不会提交以下本地文件：
 
 ```text
 .env
@@ -476,6 +513,8 @@ outputs/
 .venv/
 .uv-cache/
 ```
+
+安装版的相应文件全部位于安装目录的 `data/` 中。迁移或备份时复制整个 `data/` 即可。
 
 详细说明见 [SECURITY.md](SECURITY.md)。
 
