@@ -74,6 +74,8 @@ Windows 仍会为快捷方式、卸载登记和安装期间的临时解压使用
 - `uv`
 - Inno Setup 6（只生成便携 ZIP 时可以不安装）
 
+安装器只依赖 Inno Setup 自带的 `Default.isl`，不要求额外安装第三方语言包。
+
 ```powershell
 .\scripts\build_windows.ps1 -RequireInstaller
 ```
