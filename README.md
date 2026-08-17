@@ -500,6 +500,18 @@ node --check web/app.js
 node --test tests/frontend/test_prompt_state.js
 ```
 
+## 发布新版本
+
+PR 会构建 Windows 和 Linux 安装包用于验证，但不会创建 Release；合并到 `main` 也不会自动发布。需要发布时，由维护者在 GitHub Actions 手动输入版本号启动 `Build release packages`。工作流会：
+
+1. 从 `pyproject.toml` 读取版本，并校验 `ficframe/__init__.py` 与 `uv.lock` 一致。
+2. 并行构建 Windows 安装器、Windows 便携 ZIP、Linux `.run` 和 Linux `.tar.gz`。
+3. 两个平台全部成功后创建 `v<版本>` 标签和 GitHub Release，并上传四个产物。
+
+每个正式 Release 必须使用新版本号。先通过 PR 同时修改 `pyproject.toml` 和 `ficframe/__init__.py`，运行 `uv lock` 更新锁文件并合并到 `main`。随后在 Actions 页面选择 `main`，输入同一版本号手动运行工作流。版本不一致、从非 `main` 分支运行或 `v<版本>` 已存在时，发布会停止。
+
+完整流程见 [Windows 与 Linux 发布包](docs/distribution.md#自动发布)。
+
 ## 安全与隐私
 
 FicFrame 是本地应用，但当你启用 LLM、VLM 或图片生成时，小说正文、人设、Prompt、参考图或生成图可能会发送到你配置的第三方 API。请确认供应商符合你的隐私要求。

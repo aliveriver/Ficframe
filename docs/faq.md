@@ -109,6 +109,23 @@ Stop-Process -Id <PID> -Force
 
 DeepSeek 会优先请求 `/responses`。只有服务端返回明确的接口错误时才回退 `/chat/completions`；超时、连接失败、鉴权失败或限流不会回退，避免同一任务被重复提交。
 
+## 发布
+
+### PR 合并后为什么没有自动创建 Release？
+
+这是预期行为。PR 和合并到 `main` 都不会自动发布，以免每次合并都创建新版本。正式发布需要进入 Actions 页面手动运行 `Build release packages`，选择 `main` 并输入不带 `v` 的版本号。
+
+发布失败时检查：
+
+1. `pyproject.toml`、`ficframe/__init__.py` 和 `uv.lock` 的版本是否一致。
+2. Actions 中输入的版本是否与项目版本完全一致。
+3. 运行工作流时选择的分支是否为 `main`。
+4. 远端是否已经存在同名 `v<版本>` 标签。
+5. 仓库 Actions 是否允许工作流使用 `contents: write` 创建标签和 Release。
+6. `Build release packages` 的 `prepare`、`windows`、`linux` 和 `release` 四个 job 是否全部成功。
+
+工作流成功后会自动创建标签，不需要手动执行 `git tag`。完整操作见 [自动发布](distribution.md#自动发布)。
+
 ## 图片生成
 
 ### 图片尺寸不支持

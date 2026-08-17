@@ -123,4 +123,42 @@ file FicFrame
 
 ## 自动发布
 
-推送形如 `v0.1.0` 的 Git 标签会触发 `.github/workflows/release.yml`。工作流分别在 Windows 和 Ubuntu runner 上构建，然后把四种产物附加到同一个 GitHub Release。也可以在 Actions 页面手动运行工作流，只生成构建产物而不创建 Release。
+`.github/workflows/release.yml` 按事件执行不同操作：
+
+- PR：构建 Windows/Linux artifacts，验证两个平台能打包，但不发布。
+- 合并或直接推送到 `main`：不自动发布。
+- Actions 页面手动运行：必须选择 `main` 并输入版本号；两个平台构建成功后创建标签和 Release。
+
+### 发布前升级版本
+
+正式发布的版本来自 `pyproject.toml`。以下三个位置必须一致：
+
+```text
+pyproject.toml          version = "0.1.1"
+ficframe/__init__.py    __version__ = "0.1.1"
+uv.lock                 version = "0.1.1"（运行 uv lock 自动更新）
+```
+
+推荐步骤：
+
+```powershell
+# 1. 修改 pyproject.toml 与 ficframe/__init__.py
+$env:UV_CACHE_DIR=".uv-cache"
+uv lock
+
+# 2. 提交版本修改并创建 PR
+git add pyproject.toml ficframe/__init__.py uv.lock
+git commit -m "chore: bump version to 0.1.1"
+```
+
+PR 检查会验证三个版本号一致。普通功能 PR 可以继续沿用当前版本号，不需要每次合并都升级版本。
+
+版本 PR 合并后，在仓库的 `Actions` 页面执行：
+
+1. 选择 `Build release packages`。
+2. 点击 `Run workflow`。
+3. Branch 选择 `main`。
+4. 输入与 `pyproject.toml` 完全一致的版本号，例如 `0.1.1`，不要加 `v`。
+5. 再次点击 `Run workflow`。
+
+工作流会确认当前分支是 `main`、三个版本号一致且远端不存在同名 `v<版本>` 标签。Windows 或 Linux 任一构建失败时都不会创建 Release；全部成功后，Release job 会自动创建标签并发布四个文件，不需要手动执行 `git tag`。

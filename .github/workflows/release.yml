@@ -5,18 +5,65 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release version without the v prefix
-        required: false
+        description: Release version without the v prefix; must match pyproject.toml
+        required: true
         type: string
-  push:
-    tags:
-      - "v*"
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Resolve and validate version
+        id: version
+        shell: bash
+        run: |
+          version="${{ inputs.version }}"
+          project_version="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)"/\1/p' pyproject.toml | head -n 1)"
+          package_version="$(sed -nE 's/^__version__[[:space:]]*=[[:space:]]*"([^"]+)"/\1/p' ficframe/__init__.py | head -n 1)"
+          lock_version="$(awk '/^name = "ficframe"$/ { found=1; next } found && /^version = / { gsub(/^version = "|"$/, ""); print; exit }' uv.lock)"
+          if [[ -z "$version" ]]; then
+            version="$project_version"
+          fi
+          if [[ -z "$version" || ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid release version: $version"
+            exit 1
+          fi
+          if [[ "$project_version" != "$package_version" || "$project_version" != "$lock_version" ]]; then
+            echo "::error::Version mismatch: pyproject=$project_version package=$package_version lock=$lock_version"
+            exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+              echo "::error::Releases must be started from the main branch, not $GITHUB_REF"
+              exit 1
+            fi
+            if [[ "$version" != "$project_version" ]]; then
+              echo "::error::Requested release $version does not match project version $project_version"
+              exit 1
+            fi
+            if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1; then
+              echo "::error::Release v$version already exists. Choose a new version."
+              exit 1
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
   windows:
+    needs: prepare
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,21 +73,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Resolve version
-        shell: pwsh
-        run: |
-          $version = "${{ inputs.version }}"
-          if (-not $version -and $env:GITHUB_REF_TYPE -eq "tag") {
-            $version = $env:GITHUB_REF_NAME -replace '^v', ''
-          }
-          if (-not $version) {
-            $line = Select-String -Path pyproject.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
-            $version = $line.Matches[0].Groups[1].Value
-          }
-          "FICFRAME_RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Build Windows installer
         shell: pwsh
-        run: .\scripts\build_windows.ps1 -Version $env:FICFRAME_RELEASE_VERSION -RequireInstaller
+        run: .\scripts\build_windows.ps1 -Version "${{ needs.prepare.outputs.version }}" -RequireInstaller
       - uses: actions/upload-artifact@v4
         with:
           name: FicFrame-windows-x64
@@ -48,6 +83,7 @@ jobs:
           if-no-files-found: error
 
   linux:
+    needs: prepare
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -57,20 +93,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Resolve version
-        shell: bash
-        run: |
-          version="${{ inputs.version }}"
-          if [[ -z "$version" && "$GITHUB_REF_TYPE" == "tag" ]]; then
-            version="${GITHUB_REF_NAME#v}"
-          fi
-          if [[ -z "$version" ]]; then
-            version="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)"/\1/p' pyproject.toml | head -n 1)"
-          fi
-          echo "FICFRAME_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
       - name: Build Linux installer
         shell: bash
-        run: bash scripts/build_linux.sh "$FICFRAME_RELEASE_VERSION"
+        run: bash scripts/build_linux.sh "${{ needs.prepare.outputs.version }}"
       - uses: actions/upload-artifact@v4
         with:
           name: FicFrame-linux-x86_64
@@ -80,8 +105,8 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: github.ref_type == 'tag'
-    needs: [windows, linux]
+    if: github.event_name == 'workflow_dispatch'
+    needs: [prepare, windows, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -90,5 +115,10 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: FicFrame ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           files: artifacts/*
           generate_release_notes: true
+          fail_on_unmatched_files: true
+          make_latest: true
