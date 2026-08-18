@@ -13,10 +13,28 @@ JSON_RULE = "只输出 JSON，不要 Markdown，不要解释。"
 logger = get_logger("llm_pipeline")
 
 
-def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAICompatibleProvider, purpose: str | None = None) -> Shot:
+def polish_shot_prompt(
+    shot: Shot,
+    cards: list[CharacterCard],
+    provider: OpenAICompatibleProvider,
+    purpose: str | None = None,
+    feedback_history: list[dict] | None = None,
+) -> Shot:
+    feedback_context = [
+        {
+            "role": str(message.get("role") or ""),
+            "content": compact(str(message.get("content") or ""), 1200),
+            "action": message.get("action"),
+            "shot_ids": message.get("shot_ids"),
+        }
+        for message in (feedback_history or [])[-20:]
+        if isinstance(message, dict) and str(message.get("content") or "").strip()
+    ]
     system = (
         "你是小说插画分镜与文生图提示词专家。你的任务是把已有 prompt 精修得更适合生图，"
         "重点保持角色一致性、剧情准确、相邻画面连续。"
+        "如果提供了用户反馈，必须将其中针对当前分镜的问题落实到 Prompt，同时保留用户明确认可的优点；"
+        "不能因为反馈只讨论其他分镜，就无依据地改变当前分镜。"
         "positive_prompt 和 negative_prompt 必须主要使用英文，只有角色名、地名、作品内专有名词可以保留原文或中英并列。"
         "必须按 Scene, Composition, Characters, Relationships, Style, Negative constraints 的结构输出。"
         "如果画面有多名角色，必须明确 exactly N visible characters，并为每个角色写清楚独立身份、外观差异、动作和情绪功能。"
@@ -34,6 +52,7 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
                 "id": shot.id,
                 "title": shot.title,
                 "excerpt": shot.source_excerpt,
+                "source_text": shot.source_text,
                 "characters": shot.characters,
                 "location": shot.location,
                 "time": shot.time,
@@ -58,7 +77,9 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
                 }
                 for card in cards
             ],
+            "user_feedback_history": feedback_context,
             "required_schema": {
+                "source_excerpt": "verbatim substring copied from shot.source_text, identifying the novel passage this shot is based on",
                 "positive_prompt": "English string, structured with Scene, Composition, Characters, Relationships, Style",
                 "negative_prompt": "English string, must include extra people, duplicate character, same face between different characters, merged characters, wrong character identity",
                 "visual_goal": "string",
@@ -86,7 +107,15 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
     positive_prompt = data.get("positive_prompt") or shot.positive_prompt
     negative_prompt = data.get("negative_prompt") or shot.negative_prompt
     if not is_english_structured_prompt(positive_prompt):
-        repaired = repair_prompt_with_llm(shot, cards, provider, positive_prompt, negative_prompt, purpose=f"{purpose or 'pipeline:polish_shot_prompt'}:repair:{shot.id}")
+        repaired = repair_prompt_with_llm(
+            shot,
+            cards,
+            provider,
+            positive_prompt,
+            negative_prompt,
+            purpose=f"{purpose or 'pipeline:polish_shot_prompt'}:repair:{shot.id}",
+            feedback_history=feedback_history,
+        )
         if repaired:
             positive_prompt = repaired.get("positive_prompt") or positive_prompt
             negative_prompt = repaired.get("negative_prompt") or negative_prompt
@@ -96,6 +125,9 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
 
     shot.positive_prompt = positive_prompt
     shot.negative_prompt = negative_prompt
+    excerpt = str(data.get("source_excerpt") or "").strip()
+    if excerpt and (not shot.source_text or excerpt in shot.source_text):
+        shot.source_excerpt = excerpt
     shot.visual_goal = data.get("visual_goal") or shot.visual_goal
     layout = normalize_character_layout(data.get("character_layout"), shot.characters)
     if "character_layout" in data:
@@ -106,6 +138,151 @@ def polish_shot_prompt(shot: Shot, cards: list[CharacterCard], provider: OpenAIC
         shot.regional_guidance = True
     shot.qa_notes.extend(data.get("qa_notes") or [])
     return shot
+
+
+def generate_or_revise_shot_with_llm(
+    shot: Shot,
+    cards: list[CharacterCard],
+    provider: OpenAICompatibleProvider,
+    feedback_history: list[dict] | None = None,
+    purpose: str | None = None,
+) -> Shot:
+    """Generate/revise the complete storyboard record while keeping source and image identity stable."""
+    system = (
+        "你是小说插画分镜 Agent。根据用户指定的小说原文或画面描述，输出一条完整、可执行的分镜。"
+        "必须尊重历次反馈：做得好的地方继续保留，不妥之处明确修正。"
+        "若提供 source_text，source_excerpt 必须逐字摘自 source_text，不能改写或杜撰，以便界面回到原文高亮。"
+        "characters 只能使用 character_names 中的精确名称，不能新增原文没有的人。"
+        "positive_prompt 与 negative_prompt 主要使用英文，并保持角色身份清楚、画面人数准确。"
+        "只输出 JSON，不要 Markdown，不要解释。"
+    )
+    user = json.dumps(
+        {
+            "task": "revise" if feedback_history else "generate",
+            "source_text": shot.source_text,
+            "generation_description": shot.generation_description,
+            "current_shot": {
+                "id": shot.id,
+                "title": shot.title,
+                "source_excerpt": shot.source_excerpt,
+                "characters": shot.characters,
+                "location": shot.location,
+                "time": shot.time,
+                "mood": shot.mood,
+                "camera": shot.camera,
+                "composition": shot.composition,
+                "visual_goal": shot.visual_goal,
+                "continuity_notes": shot.continuity_notes,
+                "positive_prompt": shot.positive_prompt,
+                "negative_prompt": shot.negative_prompt,
+            },
+            "character_names": [card.name for card in cards],
+            "character_profiles": [
+                {
+                    "name": card.name,
+                    "identity_prompt": card.identity_prompt or card.prompt_en,
+                    "fixed_traits": card.fixed_traits,
+                    "relationships": card.relationships,
+                }
+                for card in cards
+            ],
+            "feedback_history": feedback_history or [],
+            "required_schema": {
+                "title": "string",
+                "source_excerpt": "verbatim substring of source_text, or concise basis when source_text is empty",
+                "characters": ["exact character name"],
+                "location": "string",
+                "time": "string",
+                "mood": ["string"],
+                "camera": "string",
+                "composition": "string",
+                "visual_goal": "string",
+                "continuity_notes": ["string"],
+                "positive_prompt": "English structured image prompt",
+                "negative_prompt": "English negative prompt",
+                "regional_guidance": "boolean",
+                "character_layout": [],
+                "change_summary": "Chinese string",
+            },
+        },
+        ensure_ascii=False,
+    )
+    data = parse_llm_json(provider.text(system, user, purpose=purpose or f"storyboard:revise:{shot.id}"))
+    for field in ["title", "location", "time", "camera", "composition", "visual_goal", "positive_prompt", "negative_prompt"]:
+        value = data.get(field)
+        if isinstance(value, str) and value.strip():
+            setattr(shot, field, value.strip())
+    excerpt = str(data.get("source_excerpt") or "").strip()
+    if excerpt and (not shot.source_text or excerpt in shot.source_text):
+        shot.source_excerpt = excerpt
+    allowed_names = {card.name for card in cards}
+    if isinstance(data.get("characters"), list):
+        shot.characters = [str(name) for name in data["characters"] if str(name) in allowed_names]
+    for field in ["mood", "continuity_notes"]:
+        value = data.get(field)
+        if isinstance(value, list):
+            setattr(shot, field, [str(item).strip() for item in value if str(item).strip()])
+    layout = normalize_character_layout(data.get("character_layout"), shot.characters)
+    if "character_layout" in data:
+        shot.character_layout = layout
+    if isinstance(data.get("regional_guidance"), bool):
+        shot.regional_guidance = data["regional_guidance"]
+    summary = str(data.get("change_summary") or "").strip()
+    if summary:
+        shot.qa_notes.append(summary)
+    return shot
+
+
+def respond_to_storyboard_feedback(
+    shots: list[Shot],
+    messages: list[dict],
+    cards: list[CharacterCard],
+    provider: OpenAICompatibleProvider,
+    purpose: str = "storyboard:feedback",
+) -> dict[str, object]:
+    system = (
+        "你是可以自主决定是否执行修改的小说分镜 Agent。结合当前分镜、角色约束和完整对话历史分析最新反馈。"
+        "若用户提出了明确的分镜修改、纠错或优化要求，action=regenerate，并只选择实际需要修改的 shot_ids；"
+        "若反馈针对整版且无法缩小范围，选择全部分镜。纯表扬、提问、信息不足或明确要求保留现状时 action=none。"
+        "混合反馈中，被表扬且无需修改的分镜不要重生成，但要把优点作为其他分镜的修改原则。"
+        "reply 要简洁说明你的判断；需要重生成时说明将立即处理哪些分镜，无需修改时说明原因或提出必要追问。"
+        "只能输出 JSON，不要 Markdown。"
+    )
+    user = json.dumps(
+        {
+            "storyboard": [
+                {
+                    "id": shot.id,
+                    "title": shot.title,
+                    "source_excerpt": shot.source_excerpt,
+                    "visual_goal": shot.visual_goal,
+                    "camera": shot.camera,
+                    "composition": shot.composition,
+                    "characters": shot.characters,
+                }
+                for shot in shots
+            ],
+            "character_names": [card.name for card in cards],
+            "conversation": messages,
+            "required_schema": {
+                "reply": "Chinese string",
+                "action": "none | regenerate",
+                "shot_ids": ["existing shot id"],
+                "reason": "Chinese string explaining why this action and scope were chosen",
+            },
+        },
+        ensure_ascii=False,
+    )
+    data = parse_llm_json(provider.text(system, user, purpose=purpose))
+    if not isinstance(data, dict):
+        raise TypeError("storyboard feedback decision must be a JSON object")
+    valid_ids = {shot.id for shot in shots}
+    requested_ids = data.get("shot_ids") if isinstance(data.get("shot_ids"), list) else []
+    shot_ids = [str(shot_id) for shot_id in requested_ids if str(shot_id) in valid_ids]
+    action = "regenerate" if data.get("action") == "regenerate" and shot_ids else "none"
+    reply = str(data.get("reply") or data.get("reason") or "已记录这条反馈。").strip()
+    reason = str(data.get("reason") or "").strip()
+    return {"reply": reply, "action": action, "shot_ids": shot_ids if action == "regenerate" else [], "reason": reason}
 
 
 def normalize_character_layout(value: object, character_names: list[str]) -> list[dict[str, object]]:
@@ -314,6 +491,7 @@ def repair_prompt_with_llm(
     positive_prompt: str,
     negative_prompt: str,
     purpose: str = "llm:repair_prompt",
+    feedback_history: list[dict] | None = None,
 ) -> dict | None:
     system = (
         "Rewrite this image-generation prompt into a consistent English prompt. "
@@ -344,6 +522,7 @@ def repair_prompt_with_llm(
                 "positive_prompt": "English string with Scene, Composition, Characters, Relationships, Style sections",
                 "negative_prompt": "English negative prompt string",
             },
+            "user_feedback_history": feedback_history or [],
         },
         ensure_ascii=False,
     )

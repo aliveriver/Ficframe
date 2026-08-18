@@ -14,6 +14,12 @@ const state = {
   providerConfig: { active: {}, sources: [] },
   selectedProviderId: null,
   referenceBindings: [],
+  novelText: "",
+  storyboardMessages: [],
+  promptFeedbackMessages: [],
+  storyboardVersions: {},
+  novelSelection: { start: null, end: null, text: "" },
+  novelDialogMode: "browse",
 };
 
 const WORKSPACE_KEY = "ficframe.workspace.v1";
@@ -57,10 +63,36 @@ const el = {
   characterDiffBox: document.querySelector("#characterDiffBox"),
   shotList: document.querySelector("#shotList"),
   runId: document.querySelector("#runId"),
+  openNovelBtn: document.querySelector("#openNovelBtn"),
+  addShotBtn: document.querySelector("#addShotBtn"),
+  regenerateSelectedBtn: document.querySelector("#regenerateSelectedBtn"),
+  regenerateAllBtn: document.querySelector("#regenerateAllBtn"),
+  feedbackHistory: document.querySelector("#feedbackHistory"),
+  feedbackInput: document.querySelector("#feedbackInput"),
+  sendFeedbackBtn: document.querySelector("#sendFeedbackBtn"),
+  promptFeedbackHistory: document.querySelector("#promptFeedbackHistory"),
+  promptFeedbackInput: document.querySelector("#promptFeedbackInput"),
+  savePromptFeedbackBtn: document.querySelector("#savePromptFeedbackBtn"),
+  locateSourceBtn: document.querySelector("#locateSourceBtn"),
+  saveShotBtn: document.querySelector("#saveShotBtn"),
+  deleteShotBtn: document.querySelector("#deleteShotBtn"),
+  shotTitle: document.querySelector("#shotTitle"),
+  shotLocation: document.querySelector("#shotLocation"),
+  shotTime: document.querySelector("#shotTime"),
+  shotCharacters: document.querySelector("#shotCharacters"),
+  shotMood: document.querySelector("#shotMood"),
+  shotCamera: document.querySelector("#shotCamera"),
+  shotComposition: document.querySelector("#shotComposition"),
+  shotVisualGoal: document.querySelector("#shotVisualGoal"),
+  shotSourceExcerpt: document.querySelector("#shotSourceExcerpt"),
+  storyboardVersionCount: document.querySelector("#storyboardVersionCount"),
+  storyboardVersions: document.querySelector("#storyboardVersions"),
   promptBox: document.querySelector("#promptBox"),
+  negativePromptBox: document.querySelector("#negativePromptBox"),
   copyBtn: document.querySelector("#copyBtn"),
   restorePromptBtn: document.querySelector("#restorePromptBtn"),
   rebuildPromptBtn: document.querySelector("#rebuildPromptBtn"),
+  llmPromptBtn: document.querySelector("#llmPromptBtn"),
   characterEditorSelect: document.querySelector("#characterEditorSelect"),
   identityPromptBox: document.querySelector("#identityPromptBox"),
   appearanceStatesBox: document.querySelector("#appearanceStatesBox"),
@@ -106,6 +138,15 @@ const el = {
   comfyNegativePrompt: document.querySelector("#comfyNegativePrompt"),
   comfyOutputNode: document.querySelector("#comfyOutputNode"),
   comfyPollInterval: document.querySelector("#comfyPollInterval"),
+  novelDialog: document.querySelector("#novelDialog"),
+  novelDialogTitle: document.querySelector("#novelDialogTitle"),
+  novelSelectionStatus: document.querySelector("#novelSelectionStatus"),
+  novelText: document.querySelector("#novelText"),
+  novelHighlightPreview: document.querySelector("#novelHighlightPreview"),
+  newShotDescription: document.querySelector("#newShotDescription"),
+  closeNovelBtn: document.querySelector("#closeNovelBtn"),
+  clearNovelSelectionBtn: document.querySelector("#clearNovelSelectionBtn"),
+  generateShotBtn: document.querySelector("#generateShotBtn"),
 };
 
 async function api(path, options = {}) {
@@ -117,8 +158,12 @@ async function api(path, options = {}) {
   return response.json();
 }
 
+const storyboardWorkspace = window.FicFrameStoryboardWorkspace;
+const storyboardClient = storyboardWorkspace.createClient(api);
+
 function saveWorkspaceDraft() {
   saveSelectedPrompt();
+  saveShotEditor();
   saveCharacterEditor();
   if (!state.runId && !state.shots.length && !state.characters.length && !state.manualCharacters.length) {
     localStorage.removeItem(WORKSPACE_KEY);
@@ -137,6 +182,10 @@ function saveWorkspaceDraft() {
     selectedShotId: state.selected?.id || null,
     selectedShotIds: Array.from(state.selectedShotIds),
     selectedCharacterIndex: state.selectedCharacterIndex,
+    novelText: state.novelText,
+    storyboardMessages: state.storyboardMessages,
+    promptFeedbackMessages: state.promptFeedbackMessages,
+    storyboardVersions: state.storyboardVersions,
     savedAt: Date.now(),
   }));
 }
@@ -161,6 +210,7 @@ function restoreWorkspaceDraft() {
 }
 
 function hydrateWorkspace(payload, preferredShotId = null) {
+  const previousRunId = state.runId;
   state.runId = payload.runId || payload.run_id;
   state.shots = payload.shots || [];
   state.scenes = payload.scenes || [];
@@ -172,11 +222,22 @@ function hydrateWorkspace(payload, preferredShotId = null) {
   state.originalShots = payload.originalShots || clone(state.shots);
   state.originalCharacters = payload.originalCharacters || clone(state.characters);
   state.differenceAnalysis = payload.differenceAnalysis || payload.difference_analysis || null;
+  state.novelText = storyboardWorkspace.normalizeNovelText(
+    payload.novelText || payload.novel_text || (previousRunId === state.runId ? state.novelText : "") || "",
+  );
+  state.storyboardMessages = payload.storyboardMessages || payload.storyboard_messages || [];
+  state.promptFeedbackMessages = payload.promptFeedbackMessages || payload.prompt_feedback_messages || [];
+  state.storyboardVersions = payload.storyboardVersions || payload.storyboard_versions || {};
   state.selectedShotIds = new Set(payload.selectedShotIds || []);
   state.selectedCharacterIndex = Math.min(payload.selectedCharacterIndex || 0, Math.max(0, state.characters.length - 1));
   el.runId.textContent = state.runId ? `run ${state.runId}` : "未运行";
   renderCharacters();
+  renderFeedbackHistory();
+  renderPromptFeedbackHistory();
   renderShots(preferredShotId || state.shots[0]?.id);
+  if (state.runId && !state.novelText) {
+    loadNovelForRun().catch(() => {});
+  }
 }
 
 function clearRunArtifacts(message = "新输入已选择，请重新生成分镜") {
@@ -186,12 +247,21 @@ function clearRunArtifacts(message = "新输入已选择，请重新生成分镜
   state.originalShots = [];
   state.selected = null;
   state.selectedShotIds.clear();
+  state.storyboardMessages = [];
+  state.promptFeedbackMessages = [];
+  state.storyboardVersions = {};
+  state.novelText = "";
   el.runId.textContent = "新输入未运行";
   el.shotList.innerHTML = "";
   el.promptBox.value = "";
+  el.negativePromptBox.value = "";
+  loadShotEditor();
+  renderStoryboardVersions();
   el.preview.innerHTML = "";
   el.imageVersions.innerHTML = "";
   el.qaBox.textContent = "";
+  renderFeedbackHistory();
+  renderPromptFeedbackHistory();
   el.health.textContent = message;
   saveWorkspaceDraft();
 }
@@ -211,9 +281,16 @@ function clearWorkspaceForRecording(message = "") {
   state.selectedShotIds.clear();
   state.selectedCharacterIndex = 0;
   state.referenceBindings = [];
+  state.novelText = "";
+  state.storyboardMessages = [];
+  state.promptFeedbackMessages = [];
+  state.storyboardVersions = {};
   el.runId.textContent = "未运行";
   el.shotList.innerHTML = "";
   el.promptBox.value = "";
+  el.negativePromptBox.value = "";
+  loadShotEditor();
+  renderStoryboardVersions();
   el.charactersBox.textContent = "";
   el.characterDiffBox.textContent = "";
   el.characterEditorSelect.innerHTML = "";
@@ -224,6 +301,8 @@ function clearWorkspaceForRecording(message = "") {
   el.preview.innerHTML = "";
   el.imageVersions.innerHTML = "";
   el.qaBox.textContent = "";
+  renderFeedbackHistory();
+  renderPromptFeedbackHistory();
   if (message) {
     el.health.textContent = message;
   }
@@ -635,15 +714,83 @@ function renderCharacterDiff() {
 
 function selectShot(index) {
   saveSelectedPrompt();
+  saveShotEditor();
   saveCharacterEditor();
   state.selected = state.shots[index];
   el.promptBox.value = state.selected?.positive_prompt || "";
+  el.negativePromptBox.value = state.selected?.negative_prompt || "";
+  loadShotEditor();
+  renderStoryboardVersions();
   el.qaBox.textContent = (state.selected?.qa_notes || []).join("\n");
   el.preview.innerHTML = state.selected?.image_url ? `<img alt="${state.selected.id}" src="${state.selected.image_url}" />` : "";
   renderImageVersions();
   document.querySelectorAll(".shot").forEach((node, nodeIndex) => {
     node.classList.toggle("active", nodeIndex === index);
   });
+}
+
+function loadShotEditor() {
+  const shot = state.selected;
+  const values = shot ? {
+    shotTitle: shot.title,
+    shotLocation: shot.location,
+    shotTime: shot.time,
+    shotCharacters: (shot.characters || []).join("、"),
+    shotMood: (shot.mood || []).join("、"),
+    shotCamera: shot.camera,
+    shotComposition: shot.composition,
+    shotVisualGoal: shot.visual_goal,
+  } : {};
+  for (const [key, value] of Object.entries(values)) {
+    el[key].value = value || "";
+  }
+  if (!shot) {
+    for (const key of ["shotTitle", "shotLocation", "shotTime", "shotCharacters", "shotMood", "shotCamera", "shotComposition", "shotVisualGoal"]) {
+      el[key].value = "";
+    }
+  }
+  el.shotSourceExcerpt.textContent = shot
+    ? (shot.source_text || shot.source_excerpt || shot.generation_description || "这条分镜没有绑定小说原文")
+    : "选择分镜后显示对应小说段落";
+}
+
+function saveShotEditor() {
+  if (!state.selected) return;
+  state.selected.title = el.shotTitle.value.trim();
+  state.selected.location = el.shotLocation.value.trim();
+  state.selected.time = el.shotTime.value.trim();
+  state.selected.characters = storyboardWorkspace.splitEditorList(el.shotCharacters.value);
+  state.selected.mood = storyboardWorkspace.splitEditorList(el.shotMood.value);
+  state.selected.camera = el.shotCamera.value.trim();
+  state.selected.composition = el.shotComposition.value.trim();
+  state.selected.visual_goal = el.shotVisualGoal.value.trim();
+}
+
+function renderStoryboardVersions() {
+  if (!el.storyboardVersions || !el.storyboardVersionCount) return;
+  const versions = state.selected ? (state.storyboardVersions[state.selected.id] || []) : [];
+  el.storyboardVersionCount.textContent = versions.length ? `${versions.length} 个历史版本` : "暂无历史版本";
+  el.storyboardVersions.innerHTML = storyboardWorkspace.versionHistoryMarkup(
+    versions,
+    state.selected?.id || "",
+    escapeHtml,
+  );
+  el.storyboardVersions.querySelectorAll("button[data-storyboard-version]").forEach((button) => {
+    button.addEventListener("click", () => restoreStoryboardVersion(button.dataset.storyboardVersion).catch((error) => {
+      el.health.textContent = `恢复失败：${error.message}`;
+    }));
+  });
+}
+
+async function restoreStoryboardVersion(versionId) {
+  if (!state.runId || !state.selected || !versionId) return;
+  const shotId = state.selected.id;
+  const data = await storyboardClient.restoreVersion(state.runId, shotId, versionId);
+  state.shots = data.shots || state.shots;
+  state.storyboardVersions = data.storyboard_versions || state.storyboardVersions;
+  renderShots(shotId);
+  saveWorkspaceDraft();
+  el.health.textContent = `${shotId} 已恢复历史版本；恢复前的版本和现有图片均已保留`;
 }
 
 function renderImageVersions() {
@@ -682,6 +829,7 @@ function renderImageVersions() {
 function saveSelectedPrompt() {
   if (!state.selected) return;
   window.FicFramePromptState.updateShotPositivePrompt(state.selected, el.promptBox.value);
+  state.selected.negative_prompt = el.negativePromptBox.value;
 }
 
 function restoreSelectedPrompt() {
@@ -689,9 +837,11 @@ function restoreSelectedPrompt() {
   const original = state.originalShots.find((shot) => shot.id === state.selected.id);
   if (!original) return;
   state.selected.positive_prompt = original.positive_prompt || "";
+  state.selected.negative_prompt = original.negative_prompt || "";
   state.selected.character_layout = clone(original.character_layout || []);
   state.selected.regional_guidance = original.regional_guidance ?? null;
   el.promptBox.value = state.selected.positive_prompt;
+  el.negativePromptBox.value = state.selected.negative_prompt;
   el.health.textContent = `${state.selected.id} prompt 已恢复到初始文本`;
   saveWorkspaceDraft();
 }
@@ -702,8 +852,28 @@ function rebuildSelectedPrompt() {
   window.FicFramePromptState.updateShotPositivePrompt(state.selected, buildPromptFromShot(state.selected));
   state.selected.negative_prompt = buildNegativePromptFromShot(state.selected);
   el.promptBox.value = state.selected.positive_prompt;
+  el.negativePromptBox.value = state.selected.negative_prompt;
   el.health.textContent = `${state.selected.id} prompt 已根据角色库重建`;
   saveWorkspaceDraft();
+}
+
+async function regenerateSelectedPromptWithLlm() {
+  if (!state.selected || !state.runId) return;
+  const shotId = state.selected.id;
+  setBusy(el.llmPromptBtn, true);
+  try {
+    await persistStoryboard({ quiet: true });
+    const data = await storyboardClient.regeneratePrompt(state.runId, shotId);
+    state.shots = data.shots || state.shots;
+    state.promptFeedbackMessages = data.prompt_feedback_messages || state.promptFeedbackMessages;
+    state.storyboardVersions = data.storyboard_versions || state.storyboardVersions;
+    renderShots(shotId);
+    renderPromptFeedbackHistory();
+    saveWorkspaceDraft();
+    el.health.textContent = `${shotId} 的生图 Prompt 已由 LLM 重建，旧版本已保存`;
+  } finally {
+    setBusy(el.llmPromptBtn, false);
+  }
 }
 
 function rebuildAllPrompts(message = "全部 prompt 已根据角色库重建") {
@@ -715,6 +885,7 @@ function rebuildAllPrompts(message = "全部 prompt 已根据角色库重建") {
   }
   if (state.selected) {
     el.promptBox.value = state.selected.positive_prompt;
+    el.negativePromptBox.value = state.selected.negative_prompt;
   }
   el.health.textContent = message;
   saveWorkspaceDraft();
@@ -803,9 +974,10 @@ function renderShots(preferredId = null) {
     button.type = "button";
     button.innerHTML = `
       <strong>${escapeHtml(shot.id)} · ${escapeHtml(shot.title)}</strong>
-      <small>${escapeHtml(shot.characters.join("、") || "无明确角色")} · ${escapeHtml(shot.location)} · ${escapeHtml(shot.time)}</small>
+      <small>${escapeHtml((shot.characters || []).join("、") || "无明确角色")} · ${escapeHtml(shot.location)} · ${escapeHtml(shot.time)}</small>
       <small>${shot.image_url ? "已生成图片" : "未生成图片"}</small>
       <small>${escapeHtml(shot.visual_goal)}</small>
+      <small>原文：${escapeHtml(shot.source_excerpt || shot.generation_description || "未绑定")}</small>
     `;
     button.addEventListener("click", () => selectShot(index));
     row.append(checkbox, button);
@@ -1053,6 +1225,218 @@ function selectedImageSize() {
   return el.customImageSize.value.trim() || el.imageSize.value;
 }
 
+async function loadNovelForRun() {
+  if (!state.runId) return "";
+  state.novelText = await storyboardClient.loadNovel(state.runId);
+  saveWorkspaceDraft();
+  return state.novelText;
+}
+
+function renderFeedbackHistory() {
+  if (!el.feedbackHistory) return;
+  const messages = Array.isArray(state.storyboardMessages) ? state.storyboardMessages : [];
+  el.feedbackHistory.innerHTML = storyboardWorkspace.feedbackHistoryMarkup(messages, escapeHtml);
+  el.feedbackHistory.scrollTop = el.feedbackHistory.scrollHeight;
+}
+
+function renderPromptFeedbackHistory() {
+  if (!el.promptFeedbackHistory) return;
+  const messages = Array.isArray(state.promptFeedbackMessages) ? state.promptFeedbackMessages : [];
+  el.promptFeedbackHistory.innerHTML = storyboardWorkspace.feedbackHistoryMarkup(
+    messages,
+    escapeHtml,
+    "Prompt LLM",
+  );
+  el.promptFeedbackHistory.scrollTop = el.promptFeedbackHistory.scrollHeight;
+}
+
+async function persistStoryboard({ quiet = false } = {}) {
+  if (!state.runId) return;
+  saveSelectedPrompt();
+  saveShotEditor();
+  const preferredId = state.selected?.id || null;
+  const data = await storyboardClient.save(state.runId, state.shots);
+  state.shots = data.shots || state.shots;
+  state.storyboardMessages = data.storyboard_messages || state.storyboardMessages;
+  state.promptFeedbackMessages = data.prompt_feedback_messages || state.promptFeedbackMessages;
+  state.storyboardVersions = data.storyboard_versions || state.storyboardVersions;
+  renderShots(preferredId);
+  renderFeedbackHistory();
+  renderPromptFeedbackHistory();
+  saveWorkspaceDraft();
+  if (!quiet) el.health.textContent = "分镜修改已保存到当前 run";
+}
+
+async function deleteSelectedShot() {
+  if (!state.selected || !state.runId) return;
+  const targetId = state.selected.id;
+  if (!window.confirm(`确定删除 ${targetId}？已生成的图片文件仍会保留在 run 目录中。`)) return;
+  saveSelectedPrompt();
+  saveShotEditor();
+  const index = state.shots.findIndex((shot) => shot.id === targetId);
+  state.shots = state.shots.filter((shot) => shot.id !== targetId);
+  state.selectedShotIds.delete(targetId);
+  state.selected = state.shots[Math.min(index, state.shots.length - 1)] || null;
+  await persistStoryboard({ quiet: true });
+  renderShots(state.selected?.id);
+  el.health.textContent = `${targetId} 已删除；图片文件未删除`;
+}
+
+async function openNovelDialog(mode = "browse") {
+  if (!state.runId) {
+    el.health.textContent = "请先生成或恢复一个分镜 run";
+    return;
+  }
+  if (!state.novelText) await loadNovelForRun();
+  if (el.novelDialog.open) el.novelDialog.close();
+  state.novelText = storyboardWorkspace.normalizeNovelText(state.novelText);
+  state.novelDialogMode = mode;
+  el.novelDialog.dataset.mode = mode;
+  el.novelText.value = state.novelText;
+  el.newShotDescription.value = "";
+  const adding = mode === "add";
+  el.novelDialogTitle.textContent = adding ? "选择新分镜对应的小说段落" : "小说原文定位";
+  el.newShotDescription.closest("label").hidden = !adding;
+  el.generateShotBtn.hidden = !adding;
+  el.clearNovelSelectionBtn.hidden = !adding;
+
+  state.novelSelection = !adding && state.selected
+    ? storyboardWorkspace.resolveShotSourceSelection(state.novelText, state.selected)
+    : { start: 0, end: 0, text: "" };
+  renderNovelSelection();
+  el.novelDialog.showModal();
+  setTimeout(() => {
+    el.novelText.focus();
+    el.novelText.setSelectionRange(state.novelSelection.start || 0, state.novelSelection.end || 0);
+    const before = state.novelText.slice(0, state.novelSelection.start || 0);
+    el.novelText.scrollTop = Math.max(0, before.split("\n").length * 28 - el.novelText.clientHeight / 3);
+  }, 0);
+}
+
+function updateNovelSelection() {
+  const start = el.novelText.selectionStart;
+  const end = el.novelText.selectionEnd;
+  state.novelSelection = { start, end, text: state.novelText.slice(start, end) };
+  renderNovelSelection();
+}
+
+function renderNovelSelection() {
+  const { start, end, text } = state.novelSelection;
+  if (!text) {
+    el.novelSelectionStatus.textContent = state.novelDialogMode === "add"
+      ? "拖动选择文字，选区会作为新分镜的生成依据。"
+      : "这条分镜没有可定位的小说原文（可能由文本描述生成）。";
+    el.novelHighlightPreview.innerHTML = state.novelText
+      ? storyboardWorkspace.highlightedDocumentMarkup(state.novelText, 0, 0, escapeHtml)
+      : "";
+    el.novelHighlightPreview.scrollTop = 0;
+    return;
+  }
+  el.novelSelectionStatus.textContent = `已高亮 ${text.length} 个字符 · 位置 ${start + 1}–${end}`;
+  el.novelHighlightPreview.innerHTML = storyboardWorkspace.highlightedDocumentMarkup(
+    state.novelText,
+    start,
+    end,
+    escapeHtml,
+  );
+  const mark = el.novelHighlightPreview.querySelector("mark");
+  if (mark) {
+    el.novelHighlightPreview.scrollTop = Math.max(
+      0,
+      mark.offsetTop - el.novelHighlightPreview.clientHeight / 2,
+    );
+  }
+}
+
+async function generateNewShot() {
+  if (!state.runId) return;
+  updateNovelSelection();
+  const description = el.newShotDescription.value.trim();
+  if (!state.novelSelection.text.trim() && !description) {
+    el.novelSelectionStatus.textContent = "请先选择一段小说原文，或填写画面描述。";
+    return;
+  }
+  setBusy(el.generateShotBtn, true);
+  try {
+    await persistStoryboard({ quiet: true });
+    const data = await storyboardClient.generate(state.runId, {
+      source_text: state.novelSelection.text,
+      source_start: state.novelSelection.text ? state.novelSelection.start : null,
+      source_end: state.novelSelection.text ? state.novelSelection.end : null,
+      description,
+      insert_after: state.selected?.id || null,
+    });
+    state.shots = data.shots || [...state.shots, data.shot];
+    state.originalShots.push(clone(data.shot));
+    el.novelDialog.close();
+    renderShots(data.shot.id);
+    saveWorkspaceDraft();
+    el.health.textContent = `${data.shot.id} 已由 LLM 添加`;
+  } finally {
+    setBusy(el.generateShotBtn, false);
+  }
+}
+
+async function sendStoryboardFeedback() {
+  const content = el.feedbackInput.value.trim();
+  if (!state.runId || !content) return;
+  setBusy(el.sendFeedbackBtn, true);
+  try {
+    await persistStoryboard({ quiet: true });
+    const data = await storyboardClient.feedback(state.runId, content);
+    const preferredId = state.selected?.id;
+    state.shots = data.shots || state.shots;
+    state.storyboardMessages = data.storyboard_messages || [];
+    state.storyboardVersions = data.storyboard_versions || state.storyboardVersions;
+    el.feedbackInput.value = "";
+    renderShots(preferredId);
+    renderFeedbackHistory();
+    saveWorkspaceDraft();
+    const regenerated = data.regenerated_shot_ids || [];
+    el.health.textContent = storyboardWorkspace.feedbackOutcomeText(regenerated);
+  } finally {
+    setBusy(el.sendFeedbackBtn, false);
+  }
+}
+
+async function savePromptFeedback() {
+  const content = el.promptFeedbackInput.value.trim();
+  if (!state.runId || !content) return;
+  setBusy(el.savePromptFeedbackBtn, true);
+  try {
+    const data = await storyboardClient.promptFeedback(state.runId, content);
+    state.promptFeedbackMessages = data.prompt_feedback_messages || [];
+    el.promptFeedbackInput.value = "";
+    renderPromptFeedbackHistory();
+    saveWorkspaceDraft();
+    el.health.textContent = "Prompt 重建意见已保存，只会用于生图 Prompt 的 LLM 重建";
+  } finally {
+    setBusy(el.savePromptFeedbackBtn, false);
+  }
+}
+
+async function regenerateStoryboard(shotIds, button) {
+  if (!state.runId || !shotIds.length) {
+    el.health.textContent = "请先勾选要重新生成的分镜";
+    return;
+  }
+  setBusy(button, true);
+  const preferredId = state.selected?.id;
+  try {
+    await persistStoryboard({ quiet: true });
+    const data = await storyboardClient.regenerate(state.runId, shotIds);
+    state.shots = data.shots || state.shots;
+    state.storyboardMessages = data.storyboard_messages || state.storyboardMessages;
+    state.storyboardVersions = data.storyboard_versions || state.storyboardVersions;
+    renderShots(preferredId);
+    renderFeedbackHistory();
+    saveWorkspaceDraft();
+    el.health.textContent = `已重新生成 ${shotIds.length} 条分镜，原有图片全部保留`;
+  } finally {
+    setBusy(button, false);
+  }
+}
+
 async function runPipeline() {
   const inputError = validateInputFiles();
   if (inputError) {
@@ -1078,6 +1462,10 @@ async function runPipeline() {
     state.runId = data.run_id;
     state.shots = data.shots;
     state.scenes = data.scenes || [];
+    state.novelText = storyboardWorkspace.normalizeNovelText(await el.novelFile.files[0].text());
+    state.storyboardMessages = data.storyboard_messages || [];
+    state.promptFeedbackMessages = data.prompt_feedback_messages || [];
+    state.storyboardVersions = data.storyboard_versions || {};
     const partitioned = partitionCharacters(data.characters || []);
     state.autoCharacters = partitioned.auto;
     state.manualCharacters = partitioned.manual;
@@ -1087,6 +1475,8 @@ async function runPipeline() {
     state.differenceAnalysis = data.difference_analysis || null;
     el.runId.textContent = `run ${state.runId}`;
     renderCharacters();
+    renderFeedbackHistory();
+    renderPromptFeedbackHistory();
     renderShots(state.selected?.id);
     saveWorkspaceDraft();
     el.health.textContent = `已生成 ${state.shots.length} 张分镜`;
@@ -1590,6 +1980,16 @@ el.promptBox.addEventListener("input", () => {
   saveSelectedPrompt();
   scheduleWorkspaceDraftSave();
 });
+el.negativePromptBox.addEventListener("input", () => {
+  saveSelectedPrompt();
+  scheduleWorkspaceDraftSave();
+});
+for (const node of [el.shotTitle, el.shotLocation, el.shotTime, el.shotCharacters, el.shotMood, el.shotCamera, el.shotComposition, el.shotVisualGoal]) {
+  node.addEventListener("input", () => {
+    saveShotEditor();
+    scheduleWorkspaceDraftSave();
+  });
+}
 el.characterEditorSelect.addEventListener("change", () => {
   saveCharacterEditor();
   state.selectedCharacterIndex = Number(el.characterEditorSelect.value || 0);
@@ -1603,6 +2003,18 @@ for (const node of [el.identityPromptBox, el.appearanceStatesBox, el.negativeIde
 }
 el.restorePromptBtn.addEventListener("click", restoreSelectedPrompt);
 el.rebuildPromptBtn.addEventListener("click", rebuildSelectedPrompt);
+el.llmPromptBtn.addEventListener("click", () => regenerateSelectedPromptWithLlm().catch((error) => {
+  el.health.textContent = `LLM Prompt 重建失败：${error.message}`;
+}));
+el.savePromptFeedbackBtn.addEventListener("click", () => savePromptFeedback().catch((error) => {
+  el.health.textContent = `保存 Prompt 意见失败：${error.message}`;
+}));
+el.promptFeedbackInput.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+    event.preventDefault();
+    el.savePromptFeedbackBtn.click();
+  }
+});
 el.restoreCharacterBtn.addEventListener("click", restoreSelectedCharacter);
 el.rebuildAllPromptsBtn.addEventListener("click", rebuildAllPrompts);
 el.imageBtn.addEventListener("click", generateImage);
@@ -1614,6 +2026,62 @@ el.copyBtn.addEventListener("click", async () => {
   saveSelectedPrompt();
   await navigator.clipboard.writeText(el.promptBox.value);
   el.health.textContent = "Prompt 已复制";
+});
+el.openNovelBtn.addEventListener("click", () => openNovelDialog("locate").catch((error) => {
+  el.health.textContent = error.message;
+}));
+el.addShotBtn.addEventListener("click", () => openNovelDialog("add").catch((error) => {
+  el.health.textContent = error.message;
+}));
+el.locateSourceBtn.addEventListener("click", () => openNovelDialog("locate").catch((error) => {
+  el.health.textContent = error.message;
+}));
+el.closeNovelBtn.addEventListener("click", () => el.novelDialog.close());
+el.novelDialog.addEventListener("close", () => {
+  state.novelDialogMode = "browse";
+  el.novelDialog.dataset.mode = "browse";
+  el.newShotDescription.closest("label").hidden = true;
+  el.generateShotBtn.hidden = true;
+  el.clearNovelSelectionBtn.hidden = true;
+});
+el.novelText.addEventListener("select", updateNovelSelection);
+el.novelText.addEventListener("mouseup", updateNovelSelection);
+el.novelText.addEventListener("keyup", updateNovelSelection);
+el.clearNovelSelectionBtn.addEventListener("click", () => {
+  state.novelSelection = { start: 0, end: 0, text: "" };
+  el.novelText.focus();
+  el.novelText.setSelectionRange(0, 0);
+  renderNovelSelection();
+});
+el.generateShotBtn.addEventListener("click", () => generateNewShot().catch((error) => {
+  el.health.textContent = error.message;
+}));
+el.saveShotBtn.addEventListener("click", () => persistStoryboard().catch((error) => {
+  el.health.textContent = `保存失败：${error.message}`;
+}));
+el.deleteShotBtn.addEventListener("click", () => deleteSelectedShot().catch((error) => {
+  el.health.textContent = `删除失败：${error.message}`;
+}));
+el.sendFeedbackBtn.addEventListener("click", () => sendStoryboardFeedback().catch((error) => {
+  el.health.textContent = error.message;
+}));
+el.regenerateSelectedBtn.addEventListener("click", () => regenerateStoryboard(
+  state.shots.filter((shot) => state.selectedShotIds.has(shot.id)).map((shot) => shot.id),
+  el.regenerateSelectedBtn,
+).catch((error) => {
+  el.health.textContent = error.message;
+}));
+el.regenerateAllBtn.addEventListener("click", () => regenerateStoryboard(
+  state.shots.map((shot) => shot.id),
+  el.regenerateAllBtn,
+).catch((error) => {
+  el.health.textContent = error.message;
+}));
+el.feedbackInput.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+    event.preventDefault();
+    el.sendFeedbackBtn.click();
+  }
 });
 
 window.addEventListener("beforeunload", saveWorkspaceDraft);

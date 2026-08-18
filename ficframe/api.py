@@ -23,8 +23,10 @@ from .io import read_text, write_json, write_text
 from .llm_pipeline import (
     enhance_character_cards_with_llm,
     extract_character_cards_with_llm_detailed,
+    generate_or_revise_shot_with_llm,
     polish_shot_prompt,
     refine_scenes_with_llm,
+    respond_to_storyboard_feedback,
 )
 from .logging_utils import build_log_bundle, get_logger, redact, setup_logging
 from .models import CharacterCard, Scene, Shot, to_dict
@@ -33,8 +35,19 @@ from .prompt_bank import analyze_reference_visuals, build_character_prompt_bank
 from .qa import annotate_shots
 from .render import render_illustrated_novel, render_prompts, render_storyboard
 from .runtime_paths import env_file, outputs_root, providers_file, resource_root, user_data_root, web_root
-from .segmenter import segment_novel
-from .storyboard import build_storyboard
+from .segmenter import detect_characters, detect_location, detect_mood, detect_time, make_summary, priority, segment_novel, visual_type
+from .storyboard import build_storyboard, scene_to_shot
+from .storyboard_workflow import (
+    StoryboardRevisionError,
+    archive_storyboard_versions,
+    backfill_storyboard_sources,
+    normalize_requested_source,
+    persist_storyboard_payload,
+    revise_storyboard_items,
+    storyboard_message,
+    storyboard_snapshot,
+    normalize_novel_text,
+)
 
 
 RESOURCE_ROOT = resource_root()
@@ -128,6 +141,46 @@ class LogBundleRequest(BaseModel):
     run_id: str | None = None
 
 
+class StoryboardSaveRequest(BaseModel):
+    run_id: str
+    shots: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class StoryboardGenerateRequest(BaseModel):
+    run_id: str
+    source_text: str = ""
+    source_start: int | None = None
+    source_end: int | None = None
+    description: str = ""
+    insert_after: str | None = None
+
+
+class StoryboardFeedbackRequest(BaseModel):
+    run_id: str
+    content: str
+
+
+class StoryboardPromptFeedbackRequest(BaseModel):
+    run_id: str
+    content: str
+
+
+class StoryboardRegenerateRequest(BaseModel):
+    run_id: str
+    shot_ids: list[str] = Field(default_factory=list)
+
+
+class StoryboardVersionRequest(BaseModel):
+    run_id: str
+    shot_id: str
+    version_id: str
+
+
+class StoryboardPromptRequest(BaseModel):
+    run_id: str
+    shot_id: str
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(WEB / "index.html")
@@ -204,12 +257,27 @@ def list_runs() -> dict[str, Any]:
 
 @app.get("/api/runs/{run_id}")
 def get_run(run_id: str) -> dict[str, Any]:
-    pipeline_path = run_directory(run_id) / "pipeline.json"
+    run_dir = run_directory(run_id)
+    pipeline_path = run_dir / "pipeline.json"
     if not pipeline_path.exists():
         raise HTTPException(status_code=404, detail="未找到该 run")
     payload = json.loads(read_text(pipeline_path))
     payload.setdefault("run_id", run_id)
+    payload.setdefault("storyboard_messages", [])
+    payload.setdefault("prompt_feedback_messages", [])
+    payload.setdefault("storyboard_versions", {})
+    novel_path = run_dir / "novel.md"
+    if novel_path.exists() and backfill_storyboard_sources(payload, normalize_novel_text(read_text(novel_path))):
+        write_json(pipeline_path, payload)
     return payload
+
+
+@app.get("/api/runs/{run_id}/novel", response_class=PlainTextResponse)
+def get_run_novel(run_id: str) -> str:
+    novel_path = run_directory(run_id) / "novel.md"
+    if not novel_path.exists():
+        raise HTTPException(status_code=404, detail="未找到小说原文")
+    return normalize_novel_text(read_text(novel_path))
 
 
 @app.post("/api/logs/export")
@@ -717,7 +785,7 @@ async def pipeline(
     run_id = str(int(time.time()))
     run_dir = RUNS / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    novel_text = (await novel.read()).decode("utf-8-sig")
+    novel_text = normalize_novel_text((await novel.read()).decode("utf-8-sig"))
     character_text = (await characters.read()).decode("utf-8-sig")
     if not novel_text.strip():
         logger.warning("pipeline rejected empty novel filename=%s", novel.filename)
@@ -794,6 +862,9 @@ async def pipeline(
     difference_analysis = analyze_character_differences(cards, provider if full_llm else None, purpose=f"pipeline:{run_id}:character_diff")
     state = initial_state(cards)
     shots, state = build_storyboard(scenes, cards, state, max_shots=max_shots, difference_analysis=difference_analysis)
+    for shot in shots:
+        if shot.source_start is not None and shot.source_end is not None:
+            shot.source_text = novel_text[shot.source_start:shot.source_end]
     annotate_shots(shots, cards)
     if full_llm:
         shots = polish_shots_with_llm(shots, cards, provider, llm_concurrency, run_id=run_id)
@@ -808,6 +879,10 @@ async def pipeline(
         "scenes": to_dict(scenes),
         "shots": to_dict(shots),
         "continuity": to_dict(state),
+        "storyboard_messages": [],
+        "prompt_feedback_messages": [],
+        "storyboard_versions": {},
+        "next_shot_number": len(shots) + 1,
     }
     write_json(run_dir / "pipeline.json", payload)
     write_json(run_dir / "continuity.json", payload["continuity"])
@@ -815,6 +890,321 @@ async def pipeline(
     write_text(run_dir / "prompts.md", render_prompts(shots))
     logger.info("pipeline completed run_id=%s character_count=%s scene_count=%s shot_count=%s", run_id, len(cards), len(scenes), len(shots))
     return payload
+
+
+@app.post("/api/storyboard/save")
+def save_storyboard(request: StoryboardSaveRequest) -> dict[str, Any]:
+    payload, pipeline_path = load_run_payload(request.run_id)
+    existing = {str(item.get("id")): item for item in payload.get("shots", []) if isinstance(item, dict)}
+    saved: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in request.shots:
+        shot = Shot(**item)
+        if not shot.id or shot.id in seen:
+            raise HTTPException(status_code=400, detail="分镜 ID 不能为空或重复")
+        seen.add(shot.id)
+        old = existing.get(shot.id, {})
+        # Images belong to the shot identity and are never discarded by text edits.
+        for field in ["image_path", "image_url", "image_versions"]:
+            if field in old:
+                setattr(shot, field, old[field])
+        saved.append(to_dict(shot))
+    saved_by_id = {str(item.get("id")): item for item in saved}
+    changed_items = [
+        item for shot_id, item in existing.items()
+        if shot_id not in saved_by_id or storyboard_snapshot(item) != storyboard_snapshot(saved_by_id[shot_id])
+    ]
+    if changed_items:
+        archive_storyboard_versions(payload, changed_items, reason="保存修改或删除前的版本", source="manual_edit")
+    payload["shots"] = saved
+    persist_storyboard_payload(pipeline_path, payload)
+    logger.info("storyboard saved run_id=%s shot_count=%s", request.run_id, len(saved))
+    return {
+        "ok": True,
+        "shots": saved,
+        "storyboard_messages": payload.get("storyboard_messages", []),
+        "prompt_feedback_messages": payload.get("prompt_feedback_messages", []),
+        "storyboard_versions": payload.get("storyboard_versions", {}),
+    }
+
+
+@app.post("/api/storyboard/generate")
+def generate_storyboard_shot(request: StoryboardGenerateRequest) -> dict[str, Any]:
+    payload, pipeline_path = load_run_payload(request.run_id)
+    provider = require_llm_provider()
+    cards = parse_character_payload(payload.get("characters", []))
+    novel_text = normalize_novel_text(read_text(run_directory(request.run_id) / "novel.md"))
+    try:
+        source_text, source_start, source_end = normalize_requested_source(
+            novel_text, request.source_text, request.source_start, request.source_end
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    description = request.description.strip()
+    if not source_text and not description:
+        raise HTTPException(status_code=400, detail="请在小说中选择一段文字，或填写画面描述")
+
+    number = safe_int(payload.get("next_shot_number"), len(payload.get("shots", [])) + 1)
+    payload["next_shot_number"] = number + 1
+    basis = source_text or description
+    characters = detect_characters(basis, cards)
+    scene = Scene(
+        id=f"manual_scene_{number:02d}",
+        chapter="手动添加",
+        index=len(payload.get("scenes", [])) + 1,
+        text=basis,
+        summary=make_summary(basis),
+        characters=characters,
+        location=detect_location(basis),
+        time=detect_time(basis),
+        mood=detect_mood(basis),
+        visual_type=visual_type(basis, characters),
+        visual_priority=priority(basis),
+        source_start=source_start,
+        source_end=source_end,
+    )
+    shot = scene_to_shot(scene, cards, initial_state(cards), number, payload.get("difference_analysis"))
+    shot.generation_mode = "novel" if source_text else "description"
+    shot.generation_description = description
+    if not source_text:
+        shot.source_text = ""
+        shot.source_excerpt = description
+    try:
+        shot = generate_or_revise_shot_with_llm(
+            shot,
+            cards,
+            provider,
+            feedback_history=payload.get("storyboard_messages", []),
+            purpose=f"storyboard:{request.run_id}:generate:{shot.id}",
+        )
+    except (ProviderError, json.JSONDecodeError, TypeError) as exc:
+        raise HTTPException(status_code=502, detail=f"LLM 生成分镜失败：{exc}") from exc
+
+    payload.setdefault("scenes", []).append(to_dict(scene))
+    shots = payload.setdefault("shots", [])
+    insert_index = len(shots)
+    if request.insert_after:
+        matched = next((index for index, item in enumerate(shots) if item.get("id") == request.insert_after), None)
+        if matched is not None:
+            insert_index = matched + 1
+    shots.insert(insert_index, to_dict(shot))
+    persist_storyboard_payload(pipeline_path, payload)
+    logger.info("storyboard shot generated run_id=%s shot_id=%s mode=%s", request.run_id, shot.id, shot.generation_mode)
+    return {"ok": True, "shot": to_dict(shot), "shots": shots}
+
+
+@app.post("/api/storyboard/feedback")
+def storyboard_feedback(request: StoryboardFeedbackRequest) -> dict[str, Any]:
+    content = request.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="反馈内容不能为空")
+    payload, pipeline_path = load_run_payload(request.run_id)
+    provider = require_llm_provider()
+    messages = payload.setdefault("storyboard_messages", [])
+    messages.append(storyboard_message("user", content))
+    shots = [Shot(**item) for item in payload.get("shots", [])]
+    cards = parse_character_payload(payload.get("characters", []))
+    try:
+        decision = respond_to_storyboard_feedback(
+            shots, messages, cards, provider, purpose=f"storyboard:{request.run_id}:feedback"
+        )
+    except (ProviderError, json.JSONDecodeError, TypeError) as exc:
+        messages.pop()
+        raise HTTPException(status_code=502, detail=f"LLM 反馈失败：{exc}") from exc
+
+    target_ids = set(decision.get("shot_ids", [])) if decision.get("action") == "regenerate" else set()
+    assistant_message = storyboard_message("assistant", str(decision.get("reply") or "已记录这条反馈。"))
+    assistant_message["action"] = decision.get("action", "none")
+    assistant_message["shot_ids"] = sorted(target_ids)
+    assistant_message["reason"] = str(decision.get("reason") or "")
+    messages.append(assistant_message)
+    if target_ids:
+        archive_storyboard_versions(
+            payload,
+            [item for item in payload.get("shots", []) if item.get("id") in target_ids],
+            reason=str(decision.get("reason") or "Agent 根据用户反馈决定重新生成"),
+            source="agent_feedback",
+        )
+        try:
+            payload["shots"] = revise_storyboard_items(
+                payload.get("shots", []),
+                target_ids,
+                cards,
+                provider,
+                messages,
+                purpose_prefix=f"storyboard:{request.run_id}:auto_regenerate",
+                revise_shot=generate_or_revise_shot_with_llm,
+            )
+        except StoryboardRevisionError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        assistant_message["content"] = (
+            f"{assistant_message['content']}\n\n已自动重新生成：{', '.join(sorted(target_ids))}。原有图片及图片版本均已保留。"
+        )
+    persist_storyboard_payload(pipeline_path, payload)
+    logger.info(
+        "storyboard feedback decision run_id=%s action=%s shot_ids=%s",
+        request.run_id,
+        decision.get("action", "none"),
+        sorted(target_ids),
+    )
+    return {
+        "ok": True,
+        "decision": decision,
+        "regenerated_shot_ids": sorted(target_ids),
+        "shots": payload.get("shots", []),
+        "storyboard_messages": messages,
+        "storyboard_versions": payload.get("storyboard_versions", {}),
+    }
+
+
+@app.post("/api/storyboard/prompt-feedback")
+def storyboard_prompt_feedback(request: StoryboardPromptFeedbackRequest) -> dict[str, Any]:
+    """Store feedback used only when rebuilding image-generation prompts."""
+    content = request.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Prompt 反馈内容不能为空")
+    payload, pipeline_path = load_run_payload(request.run_id)
+    messages = payload.setdefault("prompt_feedback_messages", [])
+    messages.append(storyboard_message("user", content))
+    persist_storyboard_payload(pipeline_path, payload)
+    return {"ok": True, "prompt_feedback_messages": messages}
+
+
+@app.post("/api/storyboard/regenerate")
+def regenerate_storyboard(request: StoryboardRegenerateRequest) -> dict[str, Any]:
+    payload, pipeline_path = load_run_payload(request.run_id)
+    provider = require_llm_provider()
+    cards = parse_character_payload(payload.get("characters", []))
+    target_ids = set(request.shot_ids)
+    if not target_ids:
+        raise HTTPException(status_code=400, detail="请选择要重新生成的分镜")
+    unknown = target_ids - {str(item.get("id")) for item in payload.get("shots", [])}
+    if unknown:
+        raise HTTPException(status_code=404, detail=f"未找到分镜：{', '.join(sorted(unknown))}")
+
+    archive_storyboard_versions(
+        payload,
+        [item for item in payload.get("shots", []) if item.get("id") in target_ids],
+        reason="用户手动触发重新生成",
+        source="manual_regenerate",
+    )
+    try:
+        revised = revise_storyboard_items(
+            payload.get("shots", []),
+            target_ids,
+            cards,
+            provider,
+            payload.get("storyboard_messages", []),
+            purpose_prefix=f"storyboard:{request.run_id}:regenerate",
+            revise_shot=generate_or_revise_shot_with_llm,
+        )
+    except StoryboardRevisionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    payload["shots"] = revised
+    messages = payload.setdefault("storyboard_messages", [])
+    messages.append(storyboard_message("assistant", f"已按当前对话反馈重新生成 {len(target_ids)} 条分镜；原有图片及图片版本均已保留。"))
+    persist_storyboard_payload(pipeline_path, payload)
+    logger.info("storyboard regenerated run_id=%s shot_ids=%s", request.run_id, sorted(target_ids))
+    return {
+        "ok": True,
+        "shots": revised,
+        "storyboard_messages": messages,
+        "storyboard_versions": payload.get("storyboard_versions", {}),
+    }
+
+
+@app.post("/api/storyboard/version")
+def restore_storyboard_version(request: StoryboardVersionRequest) -> dict[str, Any]:
+    payload, pipeline_path = load_run_payload(request.run_id)
+    versions = payload.get("storyboard_versions", {}).get(request.shot_id, [])
+    version = next((item for item in versions if item.get("version_id") == request.version_id), None)
+    if not version:
+        raise HTTPException(status_code=404, detail="未找到该分镜历史版本")
+    current_index = next(
+        (index for index, item in enumerate(payload.get("shots", [])) if item.get("id") == request.shot_id),
+        None,
+    )
+    if current_index is None:
+        raise HTTPException(status_code=404, detail="当前分镜已不存在，暂不能直接恢复")
+    current = payload["shots"][current_index]
+    archive_storyboard_versions(payload, [current], reason="恢复历史版本前的当前版本", source="version_restore")
+    restored = Shot(**version.get("shot", {}))
+    restored.id = request.shot_id
+    restored.image_path = current.get("image_path")
+    restored.image_url = current.get("image_url")
+    restored.image_versions = current.get("image_versions", [])
+    payload["shots"][current_index] = to_dict(restored)
+    persist_storyboard_payload(pipeline_path, payload)
+    logger.info(
+        "storyboard version restored run_id=%s shot_id=%s version_id=%s",
+        request.run_id,
+        request.shot_id,
+        request.version_id,
+    )
+    return {
+        "ok": True,
+        "shot": to_dict(restored),
+        "shots": payload["shots"],
+        "storyboard_versions": payload.get("storyboard_versions", {}),
+    }
+
+
+@app.post("/api/storyboard/prompt")
+def regenerate_storyboard_prompt(request: StoryboardPromptRequest) -> dict[str, Any]:
+    payload, pipeline_path = load_run_payload(request.run_id)
+    provider = require_llm_provider()
+    cards = parse_character_payload(payload.get("characters", []))
+    target_index = next(
+        (index for index, item in enumerate(payload.get("shots", [])) if item.get("id") == request.shot_id),
+        None,
+    )
+    if target_index is None:
+        raise HTTPException(status_code=404, detail="未找到该分镜")
+    current = payload["shots"][target_index]
+    archive_storyboard_versions(
+        payload,
+        [current],
+        reason="LLM 重建生图 Prompt 前的版本",
+        source="llm_prompt",
+    )
+    shot = Shot(**current)
+    try:
+        updated = polish_shot_prompt(
+            shot,
+            cards,
+            provider,
+            purpose=f"storyboard:{request.run_id}:prompt:{request.shot_id}",
+            feedback_history=payload.get("prompt_feedback_messages", []),
+        )
+    except (ProviderError, json.JSONDecodeError, TypeError) as exc:
+        raise HTTPException(status_code=502, detail=f"LLM Prompt 重建失败：{exc}") from exc
+    payload["shots"][target_index] = to_dict(updated)
+    persist_storyboard_payload(pipeline_path, payload)
+    return {
+        "ok": True,
+        "shot": to_dict(updated),
+        "shots": payload["shots"],
+        "prompt_feedback_messages": payload.get("prompt_feedback_messages", []),
+        "storyboard_versions": payload.get("storyboard_versions", {}),
+    }
+
+
+def load_run_payload(run_id: str) -> tuple[dict[str, Any], Path]:
+    pipeline_path = run_directory(run_id) / "pipeline.json"
+    if not pipeline_path.exists():
+        raise HTTPException(status_code=404, detail="run 不存在")
+    payload = json.loads(read_text(pipeline_path))
+    payload.setdefault("storyboard_messages", [])
+    payload.setdefault("prompt_feedback_messages", [])
+    payload.setdefault("storyboard_versions", {})
+    return payload, pipeline_path
+
+
+def require_llm_provider() -> OpenAICompatibleProvider:
+    provider = OpenAICompatibleProvider()
+    if not provider.config.llm.api_key:
+        raise HTTPException(status_code=400, detail="未配置 LLM API key")
+    return provider
 
 
 def parse_manual_characters(raw: str | None) -> list[CharacterCard]:
@@ -970,6 +1360,8 @@ def parse_scene_payload(items: list[dict[str, Any]]) -> list[Scene]:
                 mood=safe_string_list(item.get("mood")),
                 visual_type=str(item.get("visual_type") or ""),
                 visual_priority=safe_int(item.get("visual_priority"), 1),
+                source_start=safe_optional_int(item.get("source_start")),
+                source_end=safe_optional_int(item.get("source_end")),
             )
         )
     return scenes
@@ -980,6 +1372,13 @@ def safe_int(value: object, fallback: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def safe_optional_int(value: object) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def safe_string_list(value: object) -> list[str]:

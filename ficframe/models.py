@@ -38,6 +38,8 @@ class Scene:
     mood: list[str]
     visual_type: str
     visual_priority: int
+    source_start: int | None = None
+    source_end: int | None = None
 
 
 @dataclass
@@ -56,6 +58,11 @@ class Shot:
     continuity_notes: list[str]
     positive_prompt: str
     negative_prompt: str
+    source_text: str = ""
+    source_start: int | None = None
+    source_end: int | None = None
+    generation_mode: str = "novel"
+    generation_description: str = ""
     character_layout: list[dict[str, Any]] = field(default_factory=list)
     regional_guidance: bool | None = None
     qa_notes: list[str] = field(default_factory=list)

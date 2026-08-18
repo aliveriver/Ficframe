@@ -169,9 +169,13 @@ def make_summary(text: str) -> str:
 def segment_novel(raw_text: str, cards: list[CharacterCard]) -> list[Scene]:
     scenes: list[Scene] = []
     scene_index = 1
+    search_cursor = 0
     for chapter_index, (chapter, chunks) in enumerate(split_novel_chapters(raw_text), start=1):
         for chunk_index, chunk in enumerate(chunks, start=1):
             chars = detect_characters(chunk, cards)
+            source_start, source_end = locate_source_span(raw_text, chunk, search_cursor)
+            if source_end is not None:
+                search_cursor = source_end
             scenes.append(
                 Scene(
                     id=f"ch{chapter_index:02d}_scene_{chunk_index:02d}",
@@ -185,7 +189,29 @@ def segment_novel(raw_text: str, cards: list[CharacterCard]) -> list[Scene]:
                     mood=detect_mood(chunk),
                     visual_type=visual_type(chunk, chars),
                     visual_priority=priority(chunk),
+                    source_start=source_start,
+                    source_end=source_end,
                 )
             )
             scene_index += 1
     return scenes
+
+
+def locate_source_span(raw_text: str, chunk: str, start_at: int = 0) -> tuple[int | None, int | None]:
+    """Locate a cleaned scene chunk in the original novel without losing blank lines."""
+    exact = raw_text.find(chunk, start_at)
+    if exact >= 0:
+        return exact, exact + len(chunk)
+
+    lines = [line.strip() for line in chunk.splitlines() if line.strip()]
+    if not lines:
+        return None, None
+    first = raw_text.find(lines[0], start_at)
+    if first < 0:
+        first = raw_text.find(lines[0])
+    if first < 0:
+        return None, None
+    last = raw_text.find(lines[-1], first)
+    if last < 0:
+        return first, first + len(lines[0])
+    return first, last + len(lines[-1])

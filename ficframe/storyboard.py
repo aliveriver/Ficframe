@@ -30,6 +30,9 @@ def scene_to_shot(
         continuity_notes=notes,
         positive_prompt=build_positive_prompt(scene, cards, notes, state.style, difference_analysis),
         negative_prompt=build_negative_prompt_for_scene(scene, cards, state.style, difference_analysis),
+        source_text=scene.text,
+        source_start=scene.source_start,
+        source_end=scene.source_end,
     )
 
 

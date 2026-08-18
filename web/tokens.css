@@ -9,6 +9,8 @@
   --color-accent-strong: oklch(43% 0.14 205);
   --color-warm: oklch(75% 0.08 75);
   --color-danger: oklch(55% 0.18 25);
+  --color-selection: oklch(89% 0.15 90);
+  --color-selection-ink: oklch(28% 0.05 85);
   --font-display: Georgia, "Times New Roman", serif;
   --font-body: "Segoe UI", system-ui, sans-serif;
   --font-mono: "Cascadia Mono", Consolas, monospace;
