@@ -1,6 +1,6 @@
 [project]
 name = "ficframe"
-version = "1.1.0"
+version = "1.2.0"
 description = "A local toolkit for turning fan-fiction chapters and character notes into consistent image prompts."
 requires-python = ">=3.10"
 dependencies = [
