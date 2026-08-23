@@ -240,6 +240,26 @@ class StoryboardWorkflowTests(unittest.TestCase):
             self.assertEqual(result["shot"]["image_url"], original.image_url)
             self.assertEqual(len(result["storyboard_versions"]["shot_01"]), 2)
 
+            current_version = next(
+                item for item in result["storyboard_versions"]["shot_01"]
+                if item["shot"]["title"] == "第二版标题"
+            )
+            with patch.object(api, "RUNS", runs):
+                restored_current = api.restore_storyboard_version(
+                    api.StoryboardVersionRequest(
+                        run_id="123", shot_id="shot_01", version_id=current_version["version_id"]
+                    )
+                )
+            self.assertEqual(restored_current["shot"]["title"], "第二版标题")
+            self.assertEqual(len(restored_current["storyboard_versions"]["shot_01"]), 2)
+
+            with patch.object(api, "RUNS", runs):
+                restored_original_again = api.restore_storyboard_version(
+                    api.StoryboardVersionRequest(run_id="123", shot_id="shot_01", version_id="sv_old")
+                )
+            self.assertEqual(restored_original_again["shot"]["title"], original.title)
+            self.assertEqual(len(restored_original_again["storyboard_versions"]["shot_01"]), 2)
+
     def test_llm_prompt_regeneration_archives_storyboard_and_keeps_images(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             runs = Path(temp)

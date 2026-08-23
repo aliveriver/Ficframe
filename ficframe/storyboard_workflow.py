@@ -4,13 +4,17 @@ import json
 import re
 import time
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
-from .io import write_json, write_text
 from .models import CharacterCard, Shot, to_dict
-from .render import render_prompts, render_storyboard
 from .segmenter import locate_source_span
+from .source_reference import (
+    build_description_source_ref,
+    build_novel_source_ref,
+    resolve_source_ref,
+    source_ref_from_legacy,
+    sync_legacy_source_fields,
+)
 
 
 MAX_STORYBOARD_VERSIONS = 50
@@ -18,9 +22,9 @@ IMAGE_FIELDS = {"image_path", "image_url", "image_versions"}
 
 
 def normalize_novel_text(text: str) -> str:
-    """Use the browser textarea's LF coordinate system everywhere."""
-    # Some older Windows runs contain CRCRLF after being written more than once.
-    # Treat any CR run immediately before LF as one logical newline.
+    """统一使用浏览器 textarea 的 LF 坐标系。"""
+    # 某些旧 Windows run 经多次写入后会包含 CRCRLF。
+    # 将 LF 前连续出现的 CR 视为一个逻辑换行。
     normalized = re.sub(r"\r+\n", "\n", text).replace("\r", "\n")
     return re.sub(r"\n{3,}", "\n\n", normalized)
 
@@ -32,16 +36,8 @@ class StoryboardRevisionError(RuntimeError):
         self.cause = cause
 
 
-def persist_storyboard_payload(pipeline_path: Path, payload: dict[str, Any]) -> None:
-    """Persist the canonical run payload and its human-readable projections."""
-    write_json(pipeline_path, payload)
-    shots = [Shot(**item) for item in payload.get("shots", [])]
-    write_text(pipeline_path.parent / "storyboard.md", render_storyboard(shots))
-    write_text(pipeline_path.parent / "prompts.md", render_prompts(shots))
-
-
 def storyboard_snapshot(item: dict[str, Any]) -> dict[str, Any]:
-    """Copy storyboard data without coupling text history to image history."""
+    """复制分镜数据，同时保持文本历史与图片历史相互独立。"""
     snapshot = {key: value for key, value in item.items() if key not in IMAGE_FIELDS}
     return json.loads(json.dumps(snapshot, ensure_ascii=False))
 
@@ -58,17 +54,40 @@ def archive_storyboard_versions(
         if not shot_id:
             continue
         history = histories.setdefault(shot_id, [])
+        unique_history: list[dict[str, Any]] = []
+        known_snapshots: set[str] = set()
+        for version in history:
+            if not isinstance(version, dict) or not isinstance(version.get("shot"), dict):
+                unique_history.append(version)
+                continue
+            snapshot_key = storyboard_snapshot_key(version["shot"])
+            if snapshot_key in known_snapshots:
+                continue
+            known_snapshots.add(snapshot_key)
+            unique_history.append(version)
+        if len(unique_history) != len(history):
+            history[:] = unique_history
+
+        snapshot = storyboard_snapshot(item)
+        snapshot_key = storyboard_snapshot_key(snapshot)
+        if snapshot_key in known_snapshots:
+            continue
         history.append(
             {
                 "version_id": f"sv_{time.time_ns()}",
                 "created_at": int(time.time()),
                 "reason": reason,
                 "source": source,
-                "shot": storyboard_snapshot(item),
+                "shot": snapshot,
             }
         )
         if len(history) > MAX_STORYBOARD_VERSIONS:
             del history[:-MAX_STORYBOARD_VERSIONS]
+
+
+def storyboard_snapshot_key(snapshot: dict[str, Any]) -> str:
+    """生成稳定的文本版本标识，用于避免恢复操作制造重复历史。"""
+    return json.dumps(storyboard_snapshot(snapshot), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def revise_storyboard_items(
@@ -80,7 +99,7 @@ def revise_storyboard_items(
     purpose_prefix: str,
     revise_shot: Callable[..., Shot],
 ) -> list[dict[str, Any]]:
-    """Revise selected shots while enforcing image preservation at the domain boundary."""
+    """重建选中的分镜，并在业务边界上强制保留已有图片。"""
     revised: list[dict[str, Any]] = []
     for item in items:
         if item.get("id") not in target_ids:
@@ -109,63 +128,74 @@ def normalize_requested_source(
     source_text: str,
     source_start: int | None,
     source_end: int | None,
+    source_ref: dict[str, Any] | None = None,
 ) -> tuple[str, int | None, int | None]:
+    reference = normalize_source_reference(novel_text, source_text, source_start, source_end, source_ref)
+    if reference.get("kind") == "description":
+        return "", None, None
+    return str(reference.get("quote") or ""), reference.get("start"), reference.get("end")
+
+
+def normalize_source_reference(
+    novel_text: str,
+    source_text: str,
+    source_start: int | None,
+    source_end: int | None,
+    source_ref: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """将旧版选择字段或规范引用转换为可验证的 source_ref。"""
+    if isinstance(source_ref, dict) and source_ref:
+        resolved = resolve_source_ref(novel_text, source_ref)
+        if resolved.get("kind") == "novel" and resolved.get("status") == "unresolved":
+            raise ValueError("选中的文字无法在当前小说原文中定位")
+        return resolved
     if source_start is not None and source_end is not None and 0 <= source_start < source_end <= len(novel_text):
         selected = novel_text[source_start:source_end]
         if not source_text.strip() or selected == source_text:
-            return selected, source_start, source_end
+            return build_novel_source_ref(novel_text, source_start, source_end)
     cleaned = source_text.strip()
     if not cleaned:
-        return "", None, None
+        return build_description_source_ref("")
     found = novel_text.find(cleaned)
     if found < 0:
         raise ValueError("选中的文字不属于当前小说原文")
-    return cleaned, found, found + len(cleaned)
+    return build_novel_source_ref(novel_text, found, found + len(cleaned))
 
 
 def backfill_storyboard_sources(payload: dict[str, Any], novel_text: str) -> bool:
-    """Migrate older runs so their shots can use the novel highlighter."""
+    """迁移并校验旧 run 的原文引用，同时刷新兼容字段。"""
     changed = False
     scenes = {str(item.get("id")): item for item in payload.get("scenes", []) if isinstance(item, dict)}
-    cursor = 0
+    for scene in scenes.values():
+        before = json.dumps(scene, ensure_ascii=False, sort_keys=True)
+        for field in ("text", "source_text", "source_excerpt"):
+            if field in scene:
+                scene[field] = normalize_novel_text(str(scene.get(field) or ""))
+        reference = source_ref_from_legacy(scene, novel_text)
+        scene["source_ref"] = reference
+        if reference.get("kind") == "novel" and reference.get("status") != "unresolved":
+            scene["source_start"] = reference.get("start")
+            scene["source_end"] = reference.get("end")
+        after = json.dumps(scene, ensure_ascii=False, sort_keys=True)
+        changed = changed or before != after
     for shot in payload.get("shots", []):
         if not isinstance(shot, dict):
             continue
-        existing_source = normalize_novel_text(str(shot.get("source_text") or ""))
-        if existing_source:
-            start = _optional_int(shot.get("source_start"))
-            end = _optional_int(shot.get("source_end"))
-            if start is None or end is None or novel_text[start:end] != existing_source:
-                found = novel_text.find(existing_source, cursor)
-                if found < 0:
-                    found = novel_text.find(existing_source)
-                if found >= 0:
-                    shot["source_start"] = found
-                    shot["source_end"] = found + len(existing_source)
-                    shot["source_text"] = existing_source
-                    changed = True
-                    cursor = found + len(existing_source)
-            elif shot.get("source_text") != existing_source:
-                shot["source_text"] = existing_source
-                changed = True
-            continue
-        scene = scenes.get(str(shot.get("scene_id")))
-        if not scene:
-            continue
-        start = _optional_int(scene.get("source_start"))
-        end = _optional_int(scene.get("source_end"))
-        if start is None or end is None or not (0 <= start < end <= len(novel_text)):
-            start, end = locate_source_span(novel_text, str(scene.get("text") or ""), cursor)
-        if start is None or end is None:
-            continue
-        cursor = end
-        scene["source_start"] = start
-        scene["source_end"] = end
-        shot["source_start"] = start
-        shot["source_end"] = end
-        shot["source_text"] = novel_text[start:end]
-        shot.setdefault("generation_mode", "novel")
-        changed = True
+        before = json.dumps(shot, ensure_ascii=False, sort_keys=True)
+        for field in ("source_text", "source_excerpt"):
+            if field in shot:
+                shot[field] = normalize_novel_text(str(shot.get(field) or ""))
+        legacy_source = str(shot.get("source_text") or "").strip()
+        if not shot.get("source_ref") and not legacy_source:
+            scene = scenes.get(str(shot.get("scene_id")))
+            if scene and isinstance(scene.get("source_ref"), dict):
+                shot["source_ref"] = scene["source_ref"]
+        reference = source_ref_from_legacy(shot, novel_text)
+        sync_legacy_source_fields(shot, reference)
+        if reference.get("kind") == "novel":
+            shot.setdefault("generation_mode", "novel")
+        after = json.dumps(shot, ensure_ascii=False, sort_keys=True)
+        changed = changed or before != after
     return changed
 
 

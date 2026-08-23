@@ -63,6 +63,24 @@ class StoryboardWorkflowUnitTests(unittest.TestCase):
         self.assertNotIn("image_url", history[-1]["shot"])
         self.assertEqual(history[-1]["shot"]["title"], f"版本 {MAX_STORYBOARD_VERSIONS + 2}")
 
+    def test_version_archive_removes_existing_duplicates_and_skips_same_snapshot(self) -> None:
+        shot = to_dict(workflow_shot())
+        snapshot = {key: value for key, value in shot.items() if key not in {"image_path", "image_url", "image_versions"}}
+        payload = {
+            "storyboard_versions": {
+                "shot_01": [
+                    {"version_id": "sv_first", "shot": snapshot, "source": "manual_edit"},
+                    {"version_id": "sv_duplicate", "shot": snapshot, "source": "version_restore"},
+                ]
+            }
+        }
+
+        archive_storyboard_versions(payload, [shot], reason="再次恢复", source="version_restore")
+
+        history = payload["storyboard_versions"]["shot_01"]
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["version_id"], "sv_first")
+
     def test_revision_boundary_restores_images_even_if_reviser_changes_them(self) -> None:
         original = workflow_shot()
 

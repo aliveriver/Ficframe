@@ -7,14 +7,23 @@
       generate(runId, input) {
         return postJson(jsonRequest, "/api/storyboard/generate", { run_id: runId, ...input });
       },
+      generateTask(runId, input) {
+        return postJson(jsonRequest, "/api/storyboard/generate-task", { run_id: runId, ...input });
+      },
       feedback(runId, content) {
         return postJson(jsonRequest, "/api/storyboard/feedback", { run_id: runId, content });
+      },
+      feedbackTask(runId, content) {
+        return postJson(jsonRequest, "/api/storyboard/feedback-task", { run_id: runId, content });
       },
       promptFeedback(runId, content) {
         return postJson(jsonRequest, "/api/storyboard/prompt-feedback", { run_id: runId, content });
       },
       regenerate(runId, shotIds) {
         return postJson(jsonRequest, "/api/storyboard/regenerate", { run_id: runId, shot_ids: shotIds });
+      },
+      regenerateTask(runId, shotIds) {
+        return postJson(jsonRequest, "/api/storyboard/regenerate-task", { run_id: runId, shot_ids: shotIds });
       },
       restoreVersion(runId, shotId, versionId) {
         return postJson(jsonRequest, "/api/storyboard/version", {
@@ -25,6 +34,12 @@
       },
       regeneratePrompt(runId, shotId) {
         return postJson(jsonRequest, "/api/storyboard/prompt", {
+          run_id: runId,
+          shot_id: shotId,
+        });
+      },
+      regeneratePromptTask(runId, shotId) {
+        return postJson(jsonRequest, "/api/storyboard/prompt-task", {
           run_id: runId,
           shot_id: shotId,
         });
@@ -100,16 +115,27 @@
 
   function resolveShotSourceSelection(novelText, shot) {
     const text = normalizeNovelText(novelText);
-    const sourceText = normalizeNovelText(shot?.source_text || "");
-    let start = Number.isInteger(shot?.source_start) ? shot.source_start : -1;
-    let end = Number.isInteger(shot?.source_end) ? shot.source_end : -1;
+    const reference = shot?.source_ref || {};
+    const hasReference = Boolean(shot?.source_ref);
+    if (reference.kind === "description" || reference.status === "unresolved") {
+      const selection = { start: 0, end: 0, text: "" };
+      if (hasReference) selection.status = reference.status || "description";
+      return selection;
+    }
+    const sourceText = normalizeNovelText(reference.quote || shot?.source_text || "");
+    let start = Number.isInteger(reference.start) ? reference.start : (Number.isInteger(shot?.source_start) ? shot.source_start : -1);
+    let end = Number.isInteger(reference.end) ? reference.end : (Number.isInteger(shot?.source_end) ? shot.source_end : -1);
     if (start >= 0 && end > start && text.slice(start, end) === sourceText) {
-      return { start, end, text: sourceText };
+      const selection = { start, end, text: sourceText };
+      if (hasReference) selection.status = reference.status || "exact";
+      return selection;
     }
     const fallback = sourceText || (shot?.generation_mode === "description" ? "" : normalizeNovelText(shot?.source_excerpt || ""));
     start = fallback ? text.indexOf(fallback) : -1;
     end = start >= 0 ? start + fallback.length : 0;
-    return { start: Math.max(0, start), end: Math.max(0, end), text: start >= 0 ? text.slice(start, end) : "" };
+    const selection = { start: Math.max(0, start), end: Math.max(0, end), text: start >= 0 ? text.slice(start, end) : "" };
+    if (hasReference) selection.status = start >= 0 ? "relocated" : "unresolved";
+    return selection;
   }
 
   function feedbackOutcomeText(regeneratedShotIds) {

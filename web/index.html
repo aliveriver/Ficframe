@@ -21,6 +21,19 @@
           <button id="runBtn" class="primary" type="button">生成分镜</button>
         </div>
       </section>
+      <section id="taskPanel" class="task-panel" hidden aria-live="polite">
+        <div class="task-copy">
+          <strong id="taskKind">后台任务</strong>
+          <span id="taskStage">排队中</span>
+          <small id="taskMessage">等待任务状态</small>
+          <small id="taskError" class="task-error" hidden></small>
+        </div>
+        <div class="task-progress">
+          <progress id="taskProgress" max="100" value="0"></progress>
+          <span id="taskProgressText">0%</span>
+        </div>
+        <pre id="taskLogs" hidden></pre>
+      </section>
 
       <section id="configPanel" class="panel config-panel" hidden>
         <div class="provider-manager">
@@ -472,7 +485,11 @@
     </dialog>
 
     <script src="/assets/prompt_state.js?v=20260818-0011"></script>
+    <script src="/assets/workspace_state.js?v=20260823-0015"></script>
     <script src="/assets/storyboard_workspace.js?v=20260819-0014"></script>
-    <script src="/assets/app.js?v=20260819-0014"></script>
+    <script src="/assets/novel_source.js?v=20260823-0015"></script>
+    <script src="/assets/task_monitor.js?v=20260823-0016"></script>
+    <script src="/assets/image_workflow.js?v=20260823-0017"></script>
+    <script src="/assets/app.js?v=20260823-0020"></script>
   </body>
 </html>

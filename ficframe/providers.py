@@ -23,6 +23,9 @@ load_dotenv(env_file())
 logger = get_logger("providers")
 
 
+DEEPSEEK_JSON_MAX_OUTPUT_TOKENS = 32768
+
+
 class ProviderError(RuntimeError):
     pass
 
@@ -242,6 +245,10 @@ class OpenAICompatibleProvider:
             }
             if is_deepseek_endpoint(endpoint):
                 payload["reasoning"] = {"effort": "high"}
+                # DeepSeek Responses API 使用 text.format 开启 JSON 模式；
+                # max_output_tokens 同时包含推理与最终回答，需要为长 JSON 留出空间。
+                payload["text"] = {"format": {"type": "json_object"}}
+                payload["max_output_tokens"] = DEEPSEEK_JSON_MAX_OUTPUT_TOKENS
             try:
                 data = self._post(endpoint, "llm", "responses", payload, purpose=purpose)
             except ProviderError as exc:
@@ -264,6 +271,7 @@ class OpenAICompatibleProvider:
                     "thinking": {"type": "enabled"},
                 }
                 data = self._post(endpoint, "llm", "chat/completions", chat_payload, purpose=f"{purpose}:chat_fallback")
+        ensure_response_completed(data)
         return extract_response_text(data)
 
     def vision(self, system: str, prompt: str, image_paths: list[Path], model: str | None = None, purpose: str = "") -> str:
@@ -468,8 +476,8 @@ def effective_image_provider(endpoint: EndpointConfig) -> str:
 
 
 def effective_llm_provider(endpoint: EndpointConfig) -> str:
-    # Both OpenAI and DeepSeek expose the Responses API. Keep text generation on
-    # one request/response shape instead of routing DeepSeek through legacy chat.
+    # OpenAI 和 DeepSeek 都提供 Responses API，因此文本生成统一使用一种
+    # 请求与响应结构，不再将 DeepSeek 转发到旧版 Chat API。
     return "responses"
 
 
@@ -488,8 +496,8 @@ def can_fallback_deepseek_to_chat(exc: ProviderError) -> bool:
     message = str(exc).lstrip()
     status_text = message.split(maxsplit=1)[0] if message else ""
     if not status_text.isdigit():
-        # A timeout or connection failure may have happened after the server
-        # accepted the request. Retrying another endpoint could duplicate work.
+        # 超时或连接失败可能发生在服务器接受请求之后；
+        # 此时重试其他 endpoint 可能造成重复任务。
         return False
     return int(status_text) not in {401, 403, 408, 409, 429}
 
@@ -703,6 +711,29 @@ def extract_response_text(data: dict[str, Any]) -> str:
     if fallback_pieces:
         return "\n".join(fallback_pieces)
     return json.dumps(data, ensure_ascii=False)
+
+
+def ensure_response_completed(data: dict[str, Any]) -> None:
+    """在解析 JSON 前识别 Responses API 的失败或截断状态。"""
+    status = str(data.get("status") or "").lower()
+    error = data.get("error")
+    if status == "failed" or error:
+        if isinstance(error, dict):
+            message = str(error.get("message") or error.get("code") or "未知错误")
+        else:
+            message = str(error or "未知错误")
+        raise ProviderError(f"LLM Responses 请求失败：{message}")
+    if status != "incomplete" and not data.get("incomplete_details"):
+        return
+    details = data.get("incomplete_details")
+    reason = str(details.get("reason") or "unknown") if isinstance(details, dict) else str(details or "unknown")
+    if reason == "max_output_tokens":
+        raise ProviderError(
+            f"LLM Responses 输出因达到 max_output_tokens 而被截断（当前 {DEEPSEEK_JSON_MAX_OUTPUT_TOKENS}），未使用不完整 JSON"
+        )
+    if reason == "content_filter":
+        raise ProviderError("LLM Responses 输出被内容过滤器中止，未使用不完整 JSON")
+    raise ProviderError(f"LLM Responses 输出不完整：{reason}")
 
 
 def collect_response_text_fields(value: Any) -> list[str]:

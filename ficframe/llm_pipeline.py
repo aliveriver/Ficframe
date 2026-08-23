@@ -147,7 +147,7 @@ def generate_or_revise_shot_with_llm(
     feedback_history: list[dict] | None = None,
     purpose: str | None = None,
 ) -> Shot:
-    """Generate/revise the complete storyboard record while keeping source and image identity stable."""
+    """生成或重建完整分镜记录，同时保持原文来源和图片身份稳定。"""
     system = (
         "你是小说插画分镜 Agent。根据用户指定的小说原文或画面描述，输出一条完整、可执行的分镜。"
         "必须尊重历次反馈：做得好的地方继续保留，不妥之处明确修正。"

@@ -40,6 +40,7 @@ class Scene:
     visual_priority: int
     source_start: int | None = None
     source_end: int | None = None
+    source_ref: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -61,6 +62,7 @@ class Shot:
     source_text: str = ""
     source_start: int | None = None
     source_end: int | None = None
+    source_ref: dict[str, Any] = field(default_factory=dict)
     generation_mode: str = "novel"
     generation_description: str = ""
     character_layout: list[dict[str, Any]] = field(default_factory=list)

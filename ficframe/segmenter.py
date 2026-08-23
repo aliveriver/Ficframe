@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from .models import CharacterCard, Scene
+from .source_reference import build_novel_source_ref
 from .text_utils import clean_lines, compact, split_sentences, unique_keep_order
 
 
@@ -176,6 +177,10 @@ def segment_novel(raw_text: str, cards: list[CharacterCard]) -> list[Scene]:
             source_start, source_end = locate_source_span(raw_text, chunk, search_cursor)
             if source_end is not None:
                 search_cursor = source_end
+            source_ref = (
+                build_novel_source_ref(raw_text, source_start, source_end)
+                if source_start is not None and source_end is not None else {}
+            )
             scenes.append(
                 Scene(
                     id=f"ch{chapter_index:02d}_scene_{chunk_index:02d}",
@@ -191,6 +196,7 @@ def segment_novel(raw_text: str, cards: list[CharacterCard]) -> list[Scene]:
                     visual_priority=priority(chunk),
                     source_start=source_start,
                     source_end=source_end,
+                    source_ref=source_ref,
                 )
             )
             scene_index += 1
@@ -198,7 +204,7 @@ def segment_novel(raw_text: str, cards: list[CharacterCard]) -> list[Scene]:
 
 
 def locate_source_span(raw_text: str, chunk: str, start_at: int = 0) -> tuple[int | None, int | None]:
-    """Locate a cleaned scene chunk in the original novel without losing blank lines."""
+    """在原小说中定位清理后的场景片段，同时保留空行位置。"""
     exact = raw_text.find(chunk, start_at)
     if exact >= 0:
         return exact, exact + len(chunk)
