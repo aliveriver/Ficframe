@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from .models import CharacterCard, Scene
+from .source_reference import build_novel_source_ref
 from .text_utils import clean_lines, compact, split_sentences, unique_keep_order
 
 
@@ -169,9 +170,17 @@ def make_summary(text: str) -> str:
 def segment_novel(raw_text: str, cards: list[CharacterCard]) -> list[Scene]:
     scenes: list[Scene] = []
     scene_index = 1
+    search_cursor = 0
     for chapter_index, (chapter, chunks) in enumerate(split_novel_chapters(raw_text), start=1):
         for chunk_index, chunk in enumerate(chunks, start=1):
             chars = detect_characters(chunk, cards)
+            source_start, source_end = locate_source_span(raw_text, chunk, search_cursor)
+            if source_end is not None:
+                search_cursor = source_end
+            source_ref = (
+                build_novel_source_ref(raw_text, source_start, source_end)
+                if source_start is not None and source_end is not None else {}
+            )
             scenes.append(
                 Scene(
                     id=f"ch{chapter_index:02d}_scene_{chunk_index:02d}",
@@ -185,7 +194,30 @@ def segment_novel(raw_text: str, cards: list[CharacterCard]) -> list[Scene]:
                     mood=detect_mood(chunk),
                     visual_type=visual_type(chunk, chars),
                     visual_priority=priority(chunk),
+                    source_start=source_start,
+                    source_end=source_end,
+                    source_ref=source_ref,
                 )
             )
             scene_index += 1
     return scenes
+
+
+def locate_source_span(raw_text: str, chunk: str, start_at: int = 0) -> tuple[int | None, int | None]:
+    """在原小说中定位清理后的场景片段，同时保留空行位置。"""
+    exact = raw_text.find(chunk, start_at)
+    if exact >= 0:
+        return exact, exact + len(chunk)
+
+    lines = [line.strip() for line in chunk.splitlines() if line.strip()]
+    if not lines:
+        return None, None
+    first = raw_text.find(lines[0], start_at)
+    if first < 0:
+        first = raw_text.find(lines[0])
+    if first < 0:
+        return None, None
+    last = raw_text.find(lines[-1], first)
+    if last < 0:
+        return first, first + len(lines[0])
+    return first, last + len(lines[-1])

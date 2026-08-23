@@ -140,6 +140,7 @@ def insert_images_into_original_text(
     if not body:
         return ""
     insertions: list[tuple[int, str]] = []
+    trailing_blocks: list[str] = []
     scenes_by_id = {str(scene.get("id", "")): scene for scene in scenes}
     for shot in shots:
         image_ref = image_markdown_ref(shot, run_id)
@@ -148,19 +149,22 @@ def insert_images_into_original_text(
         scene = scenes_by_id.get(shot.scene_id, {})
         needle = first_scene_anchor(str(scene.get("text", ""))) or first_scene_anchor(shot.source_excerpt)
         if not needle:
+            trailing_blocks.append(f"\n\n![{shot.id}]({image_ref})\n\n{shot.source_excerpt}\n")
             continue
         position = body.find(needle)
         if position < 0:
+            trailing_blocks.append(f"\n\n![{shot.id}]({image_ref})\n\n{shot.source_excerpt}\n")
             continue
         block = f"\n\n![{shot.id}]({image_ref})\n\n"
         insertions.append((position, block))
 
     if not insertions:
-        return body.strip() + "\n"
+        return (body + "".join(trailing_blocks)).strip() + "\n"
 
     result = body
     for position, block in sorted(insertions, reverse=True):
         result = result[:position] + block + result[position:]
+    result += "".join(trailing_blocks)
     return result.strip() + "\n"
 
 

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>FicFrame</title>
-    <link rel="stylesheet" href="/assets/styles.css" />
+    <link rel="stylesheet" href="/assets/styles.css?v=20260819-0013" />
   </head>
   <body>
     <main class="shell">
@@ -20,6 +20,19 @@
           <button id="logExportBtn" type="button">导出日志</button>
           <button id="runBtn" class="primary" type="button">生成分镜</button>
         </div>
+      </section>
+      <section id="taskPanel" class="task-panel" hidden aria-live="polite">
+        <div class="task-copy">
+          <strong id="taskKind">后台任务</strong>
+          <span id="taskStage">排队中</span>
+          <small id="taskMessage">等待任务状态</small>
+          <small id="taskError" class="task-error" hidden></small>
+        </div>
+        <div class="task-progress">
+          <progress id="taskProgress" max="100" value="0"></progress>
+          <span id="taskProgressText">0%</span>
+        </div>
+        <pre id="taskLogs" hidden></pre>
       </section>
 
       <section id="configPanel" class="panel config-panel" hidden>
@@ -148,11 +161,16 @@
               <h2>参考图绑定</h2>
               <div class="head-actions">
                 <button id="previewCharactersBtn" type="button">识别角色</button>
-                <button id="llmExtractCharactersBtn" type="button">LLM拆分人设</button>
-                <button id="llmEnhanceCharactersBtn" type="button">LLM增强人设</button>
-                <button id="llmPromptBankBtn" type="button">生成Prompt Bank</button>
-                <button id="localPromptBankBtn" type="button">本地Prompt Bank</button>
-                <button id="llmDiffBtn" type="button">LLM差异分析</button>
+                <details class="action-menu">
+                  <summary>角色工具</summary>
+                  <div class="action-menu-items">
+                    <button id="llmExtractCharactersBtn" type="button">LLM 拆分人设</button>
+                    <button id="llmEnhanceCharactersBtn" type="button">LLM 增强人设</button>
+                    <button id="llmPromptBankBtn" type="button">生成 Prompt Bank</button>
+                    <button id="localPromptBankBtn" type="button">本地 Prompt Bank</button>
+                    <button id="llmDiffBtn" type="button">LLM 差异分析</button>
+                  </div>
+                </details>
                 <button id="manualCharacterToggleBtn" type="button">手动添加角色</button>
               </div>
             </div>
@@ -284,23 +302,114 @@
         <section class="panel shots">
           <div class="section-head">
             <h2>分镜</h2>
-            <span id="runId">未运行</span>
+            <div class="head-actions">
+              <span id="runId">未运行</span>
+              <button id="openNovelBtn" type="button">预览小说</button>
+              <button id="addShotBtn" type="button">添加分镜</button>
+            </div>
+          </div>
+          <div class="storyboard-actions">
+            <button id="regenerateSelectedBtn" type="button">重生成选中</button>
+            <button id="regenerateAllBtn" type="button">重生成全部</button>
           </div>
           <div id="shotList" class="shot-list"></div>
+          <section class="feedback-panel">
+            <div class="section-head tight">
+              <h3>分镜 Agent</h3>
+              <span>自动判断是否重生成 · 历史随 run 保存</span>
+            </div>
+            <div id="feedbackHistory" class="feedback-history"></div>
+            <label>
+              <span>告诉 LLM 哪些地方好、哪些需要调整</span>
+              <textarea id="feedbackInput" rows="3" placeholder="例如：第 2 镜情绪很好，请保留；第 3、4 镜景别太重复，下一版拉开节奏。"></textarea>
+            </label>
+            <button id="sendFeedbackBtn" type="button">发送反馈</button>
+          </section>
         </section>
 
         <section class="panel detail">
           <div class="section-head">
-            <h2>Prompt</h2>
+            <h2>分镜详情</h2>
             <div class="head-actions">
-              <button id="restorePromptBtn" type="button">恢复</button>
-              <button id="rebuildPromptBtn" type="button">重建当前</button>
-              <button id="copyBtn" type="button">复制</button>
+              <button id="locateSourceBtn" type="button">查看原文</button>
+              <button id="saveShotBtn" type="button">保存修改</button>
+              <button id="deleteShotBtn" class="danger" type="button">删除分镜</button>
+              <details class="action-menu">
+                <summary>Prompt 工具</summary>
+                <div class="action-menu-items">
+                  <button id="restorePromptBtn" type="button">恢复本地版本</button>
+                  <button id="rebuildPromptBtn" type="button">本地重建</button>
+                  <button id="llmPromptBtn" type="button">LLM 重建</button>
+                  <button id="copyBtn" type="button">复制 Prompt</button>
+                </div>
+              </details>
             </div>
           </div>
-          <textarea id="promptBox" spellcheck="false"></textarea>
-          <fieldset class="prompt-bank">
-            <legend>角色 Prompt Bank</legend>
+          <div class="shot-editor">
+            <label class="span-2">
+              <span>标题</span>
+              <input id="shotTitle" />
+            </label>
+            <label>
+              <span>地点</span>
+              <input id="shotLocation" />
+            </label>
+            <label>
+              <span>时间</span>
+              <input id="shotTime" />
+            </label>
+            <label>
+              <span>角色（用中文逗号分隔）</span>
+              <input id="shotCharacters" />
+            </label>
+            <label>
+              <span>情绪（用中文逗号分隔）</span>
+              <input id="shotMood" />
+            </label>
+            <label>
+              <span>镜头</span>
+              <input id="shotCamera" />
+            </label>
+            <label>
+              <span>构图</span>
+              <input id="shotComposition" />
+            </label>
+            <label class="span-2">
+              <span>画面目标</span>
+              <textarea id="shotVisualGoal" rows="2"></textarea>
+            </label>
+            <div class="source-basis span-2">
+              <span>生成依据</span>
+              <p id="shotSourceExcerpt">选择分镜后显示对应小说段落</p>
+            </div>
+            <section class="storyboard-version-panel span-2">
+              <div class="section-head tight">
+                <h3>分镜版本</h3>
+                <span id="storyboardVersionCount">暂无历史版本</span>
+              </div>
+              <div id="storyboardVersions" class="storyboard-versions"></div>
+            </section>
+          </div>
+          <label class="prompt-label">
+            <span>正向 Prompt</span>
+            <textarea id="promptBox" spellcheck="false"></textarea>
+          </label>
+          <label class="prompt-label">
+            <span>负向 Prompt</span>
+            <textarea id="negativePromptBox" rows="4" spellcheck="false"></textarea>
+          </label>
+          <details class="panel-disclosure prompt-feedback-panel">
+            <summary>Prompt 重建意见（独立历史）</summary>
+            <div id="promptFeedbackHistory" class="feedback-history compact-history"></div>
+            <label>
+              <span>只用于 LLM 重建生图 Prompt</span>
+              <textarea id="promptFeedbackInput" rows="2" placeholder="例如：保留当前构图，把光线改为雨夜霓虹；负向 Prompt 加强手部约束。"></textarea>
+            </label>
+            <button id="savePromptFeedbackBtn" type="button">保存 Prompt 意见</button>
+          </details>
+          <details class="panel-disclosure">
+            <summary>角色 Prompt Bank</summary>
+            <fieldset class="prompt-bank">
             <label>
               <span>角色</span>
               <select id="characterEditorSelect"></select>
@@ -321,31 +430,66 @@
               <button id="restoreCharacterBtn" type="button">恢复角色原文</button>
               <button id="rebuildAllPromptsBtn" type="button">重建全部 Prompt</button>
             </div>
-          </fieldset>
+            </fieldset>
+          </details>
           <div class="actions">
             <button id="imageBtn" type="button">生成图片</button>
-            <button id="selectedImagesBtn" type="button">生成选中</button>
-            <button id="allImagesBtn" type="button">生成全部</button>
-            <button id="retryFailedBtn" type="button">重试失败</button>
+            <details class="action-menu">
+              <summary>批量图片</summary>
+              <div class="action-menu-items">
+                <button id="selectedImagesBtn" type="button">生成选中</button>
+                <button id="allImagesBtn" type="button">生成全部</button>
+                <button id="retryFailedBtn" type="button">重试失败</button>
+              </div>
+            </details>
             <button id="exportBtn" type="button">导出小说 MD</button>
           </div>
-          <div class="batch-options">
-            <label class="toggle">
-              <input id="skipExistingImages" type="checkbox" checked />
-              <span>跳过已有图片</span>
-            </label>
-            <label>
-              <span>失败重试次数</span>
-              <input id="imageRetryCount" type="number" min="0" max="5" value="1" />
-            </label>
-          </div>
+          <details class="panel-disclosure">
+            <summary>批量图片设置</summary>
+            <div class="batch-options">
+              <label class="toggle">
+                <input id="skipExistingImages" type="checkbox" checked />
+                <span>跳过已有图片</span>
+              </label>
+              <label>
+                <span>失败重试次数</span>
+                <input id="imageRetryCount" type="number" min="0" max="5" value="1" />
+              </label>
+            </div>
+          </details>
           <figure id="preview" class="preview"></figure>
           <div id="imageVersions" class="image-versions"></div>
           <pre id="qaBox"></pre>
         </section>
       </section>
     </main>
-    <script src="/assets/prompt_state.js?v=20260814-0010"></script>
-    <script src="/assets/app.js?v=20260814-0010"></script>
+
+    <dialog id="novelDialog" class="novel-dialog">
+      <div class="dialog-head">
+        <div>
+          <h2 id="novelDialogTitle">小说原文</h2>
+          <p id="novelSelectionStatus">拖动选择文字，选区会作为新分镜的生成依据。</p>
+        </div>
+        <button id="closeNovelBtn" type="button">关闭</button>
+      </div>
+      <textarea id="novelText" class="novel-text" readonly spellcheck="false"></textarea>
+      <div id="novelHighlightPreview" class="novel-highlight-preview"></div>
+      <label>
+        <span>也可以直接描述新画面（未选择原文时使用）</span>
+        <textarea id="newShotDescription" rows="3" placeholder="例如：补一个雨夜车站的远景转场，主角背对镜头。"></textarea>
+      </label>
+      <div class="dialog-actions">
+        <button id="clearNovelSelectionBtn" type="button">清除选区</button>
+        <button id="generateShotBtn" class="primary" type="button">让 LLM 添加分镜</button>
+      </div>
+    </dialog>
+
+    <script src="/assets/prompt_state.js?v=20260818-0011"></script>
+    <script src="/assets/workspace_state.js?v=20260823-0015"></script>
+    <script src="/assets/storyboard_workspace.js?v=20260819-0014"></script>
+    <script src="/assets/novel_source.js?v=20260823-0015"></script>
+    <script src="/assets/task_monitor.js?v=20260823-0016"></script>
+    <script src="/assets/image_workflow.js?v=20260823-0017"></script>
+    <script src="/assets/app.js?v=20260823-0020"></script>
   </body>
 </html>

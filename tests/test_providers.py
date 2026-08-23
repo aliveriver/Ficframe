@@ -4,11 +4,13 @@ import unittest
 from unittest.mock import patch
 
 from ficframe.providers import (
+    DEEPSEEK_JSON_MAX_OUTPUT_TOKENS,
     EndpointConfig,
     OpenAICompatibleProvider,
     ProviderError,
     ProviderConfig,
     extract_response_text,
+    ensure_response_completed,
     llm_runtime_path,
 )
 
@@ -46,6 +48,8 @@ class DeepSeekResponsesTests(unittest.TestCase):
         self.assertEqual(label, "llm")
         self.assertEqual(path, "responses")
         self.assertEqual(payload["reasoning"], {"effort": "high"})
+        self.assertEqual(payload["text"], {"format": {"type": "json_object"}})
+        self.assertEqual(payload["max_output_tokens"], DEEPSEEK_JSON_MAX_OUTPUT_TOKENS)
         self.assertEqual(text, '{"ok": true}')
         self.assertEqual(llm_runtime_path(provider.config.llm), "responses")
 
@@ -98,6 +102,16 @@ class DeepSeekResponsesTests(unittest.TestCase):
         }
 
         self.assertEqual(extract_response_text(data), "final answer")
+
+    def test_incomplete_response_is_rejected_before_json_parsing(self) -> None:
+        data = {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output_text": '{"characters": [',
+        }
+
+        with self.assertRaisesRegex(ProviderError, "max_output_tokens"):
+            ensure_response_completed(data)
 
 
 if __name__ == "__main__":

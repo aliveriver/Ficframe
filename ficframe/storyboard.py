@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .continuity import notes_for_scene, update_state_from_shot
-from .models import CharacterCard, ContinuityState, Scene, Shot
+from .models import CharacterCard, ContinuityState, Scene, Shot, to_dict
 from .prompts import CAMERA_BY_TYPE, COMPOSITION_BY_TYPE, build_negative_prompt_for_scene, build_positive_prompt
 from .text_utils import compact
 
@@ -30,6 +30,10 @@ def scene_to_shot(
         continuity_notes=notes,
         positive_prompt=build_positive_prompt(scene, cards, notes, state.style, difference_analysis),
         negative_prompt=build_negative_prompt_for_scene(scene, cards, state.style, difference_analysis),
+        source_text=scene.text,
+        source_start=scene.source_start,
+        source_end=scene.source_end,
+        source_ref=to_dict(scene.source_ref),
     )
 
 

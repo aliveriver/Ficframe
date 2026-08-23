@@ -1,26 +1,19 @@
-const state = {
-  runId: null,
-  shots: [],
-  scenes: [],
-  autoCharacters: [],
-  manualCharacters: [],
-  characters: [],
-  originalShots: [],
-  originalCharacters: [],
-  differenceAnalysis: null,
-  selected: null,
-  selectedShotIds: new Set(),
-  selectedCharacterIndex: 0,
-  providerConfig: { active: {}, sources: [] },
-  selectedProviderId: null,
-  referenceBindings: [],
-};
+const workspaceState = window.FicFrameWorkspaceState;
+const state = workspaceState.createInitialState();
 
 const WORKSPACE_KEY = "ficframe.workspace.v1";
 let draftTimer = null;
 
 const el = {
   health: document.querySelector("#health"),
+  taskPanel: document.querySelector("#taskPanel"),
+  taskKind: document.querySelector("#taskKind"),
+  taskStage: document.querySelector("#taskStage"),
+  taskMessage: document.querySelector("#taskMessage"),
+  taskError: document.querySelector("#taskError"),
+  taskProgress: document.querySelector("#taskProgress"),
+  taskProgressText: document.querySelector("#taskProgressText"),
+  taskLogs: document.querySelector("#taskLogs"),
   runBtn: document.querySelector("#runBtn"),
   configToggle: document.querySelector("#configToggle"),
   cleanStartBtn: document.querySelector("#cleanStartBtn"),
@@ -57,10 +50,36 @@ const el = {
   characterDiffBox: document.querySelector("#characterDiffBox"),
   shotList: document.querySelector("#shotList"),
   runId: document.querySelector("#runId"),
+  openNovelBtn: document.querySelector("#openNovelBtn"),
+  addShotBtn: document.querySelector("#addShotBtn"),
+  regenerateSelectedBtn: document.querySelector("#regenerateSelectedBtn"),
+  regenerateAllBtn: document.querySelector("#regenerateAllBtn"),
+  feedbackHistory: document.querySelector("#feedbackHistory"),
+  feedbackInput: document.querySelector("#feedbackInput"),
+  sendFeedbackBtn: document.querySelector("#sendFeedbackBtn"),
+  promptFeedbackHistory: document.querySelector("#promptFeedbackHistory"),
+  promptFeedbackInput: document.querySelector("#promptFeedbackInput"),
+  savePromptFeedbackBtn: document.querySelector("#savePromptFeedbackBtn"),
+  locateSourceBtn: document.querySelector("#locateSourceBtn"),
+  saveShotBtn: document.querySelector("#saveShotBtn"),
+  deleteShotBtn: document.querySelector("#deleteShotBtn"),
+  shotTitle: document.querySelector("#shotTitle"),
+  shotLocation: document.querySelector("#shotLocation"),
+  shotTime: document.querySelector("#shotTime"),
+  shotCharacters: document.querySelector("#shotCharacters"),
+  shotMood: document.querySelector("#shotMood"),
+  shotCamera: document.querySelector("#shotCamera"),
+  shotComposition: document.querySelector("#shotComposition"),
+  shotVisualGoal: document.querySelector("#shotVisualGoal"),
+  shotSourceExcerpt: document.querySelector("#shotSourceExcerpt"),
+  storyboardVersionCount: document.querySelector("#storyboardVersionCount"),
+  storyboardVersions: document.querySelector("#storyboardVersions"),
   promptBox: document.querySelector("#promptBox"),
+  negativePromptBox: document.querySelector("#negativePromptBox"),
   copyBtn: document.querySelector("#copyBtn"),
   restorePromptBtn: document.querySelector("#restorePromptBtn"),
   rebuildPromptBtn: document.querySelector("#rebuildPromptBtn"),
+  llmPromptBtn: document.querySelector("#llmPromptBtn"),
   characterEditorSelect: document.querySelector("#characterEditorSelect"),
   identityPromptBox: document.querySelector("#identityPromptBox"),
   appearanceStatesBox: document.querySelector("#appearanceStatesBox"),
@@ -106,6 +125,15 @@ const el = {
   comfyNegativePrompt: document.querySelector("#comfyNegativePrompt"),
   comfyOutputNode: document.querySelector("#comfyOutputNode"),
   comfyPollInterval: document.querySelector("#comfyPollInterval"),
+  novelDialog: document.querySelector("#novelDialog"),
+  novelDialogTitle: document.querySelector("#novelDialogTitle"),
+  novelSelectionStatus: document.querySelector("#novelSelectionStatus"),
+  novelText: document.querySelector("#novelText"),
+  novelHighlightPreview: document.querySelector("#novelHighlightPreview"),
+  newShotDescription: document.querySelector("#newShotDescription"),
+  closeNovelBtn: document.querySelector("#closeNovelBtn"),
+  clearNovelSelectionBtn: document.querySelector("#clearNovelSelectionBtn"),
+  generateShotBtn: document.querySelector("#generateShotBtn"),
 };
 
 async function api(path, options = {}) {
@@ -117,28 +145,62 @@ async function api(path, options = {}) {
   return response.json();
 }
 
+const storyboardWorkspace = window.FicFrameStoryboardWorkspace;
+const storyboardClient = storyboardWorkspace.createClient(api);
+const taskMonitor = window.FicFrameTaskMonitor.createMonitor({
+  request: api,
+  elements: {
+    panel: el.taskPanel,
+    kind: el.taskKind,
+    stage: el.taskStage,
+    message: el.taskMessage,
+    error: el.taskError,
+    progress: el.taskProgress,
+    progressText: el.taskProgressText,
+    logs: el.taskLogs,
+  },
+  onUpdate(task) {
+    if (task.status === "running" || task.status === "queued") {
+      el.health.textContent = `${task.stage || "执行中"} · ${task.message || "后台任务处理中"}`;
+    }
+  },
+});
+const novelSource = window.FicFrameNovelSource.createController({
+  state,
+  elements: {
+    dialog: el.novelDialog,
+    title: el.novelDialogTitle,
+    status: el.novelSelectionStatus,
+    text: el.novelText,
+    preview: el.novelHighlightPreview,
+    description: el.newShotDescription,
+    clear: el.clearNovelSelectionBtn,
+    generate: el.generateShotBtn,
+  },
+  workspace: storyboardWorkspace,
+  escapeHtml,
+  loadNovel: loadNovelForRun,
+});
+const imageWorkflow = window.FicFrameImageWorkflow.createController({
+  state,
+  elements: el,
+  api,
+  taskMonitor,
+  escapeHtml,
+  clone,
+  setBusy,
+  saveSelectedPrompt,
+  saveCharacterEditor,
+  saveWorkspaceDraft,
+  renderShots,
+  selectedImageSize,
+});
+
 function saveWorkspaceDraft() {
   saveSelectedPrompt();
+  saveShotEditor();
   saveCharacterEditor();
-  if (!state.runId && !state.shots.length && !state.characters.length && !state.manualCharacters.length) {
-    localStorage.removeItem(WORKSPACE_KEY);
-    return;
-  }
-  localStorage.setItem(WORKSPACE_KEY, JSON.stringify({
-    runId: state.runId,
-    shots: state.shots,
-    scenes: state.scenes,
-    autoCharacters: state.autoCharacters,
-    manualCharacters: state.manualCharacters,
-    characters: state.characters,
-    originalShots: state.originalShots,
-    originalCharacters: state.originalCharacters,
-    differenceAnalysis: state.differenceAnalysis,
-    selectedShotId: state.selected?.id || null,
-    selectedShotIds: Array.from(state.selectedShotIds),
-    selectedCharacterIndex: state.selectedCharacterIndex,
-    savedAt: Date.now(),
-  }));
+  workspaceState.saveDraft(localStorage, WORKSPACE_KEY, state);
 }
 
 function scheduleWorkspaceDraftSave() {
@@ -147,20 +209,15 @@ function scheduleWorkspaceDraftSave() {
 }
 
 function restoreWorkspaceDraft() {
-  const raw = localStorage.getItem(WORKSPACE_KEY);
-  if (!raw) return false;
-  try {
-    const draft = JSON.parse(raw);
-    if (!Array.isArray(draft.shots) && !Array.isArray(draft.characters)) return false;
-    hydrateWorkspace(draft, draft.selectedShotId);
-    el.health.textContent = state.runId ? `已恢复浏览器草稿 run ${state.runId}` : "已恢复浏览器草稿";
-    return true;
-  } catch (error) {
-    return false;
-  }
+  const draft = workspaceState.loadDraft(localStorage, WORKSPACE_KEY);
+  if (!draft) return false;
+  hydrateWorkspace(draft, draft.selectedShotId);
+  el.health.textContent = state.runId ? `已恢复浏览器草稿 run ${state.runId}` : "已恢复浏览器草稿";
+  return true;
 }
 
 function hydrateWorkspace(payload, preferredShotId = null) {
+  const previousRunId = state.runId;
   state.runId = payload.runId || payload.run_id;
   state.shots = payload.shots || [];
   state.scenes = payload.scenes || [];
@@ -172,48 +229,58 @@ function hydrateWorkspace(payload, preferredShotId = null) {
   state.originalShots = payload.originalShots || clone(state.shots);
   state.originalCharacters = payload.originalCharacters || clone(state.characters);
   state.differenceAnalysis = payload.differenceAnalysis || payload.difference_analysis || null;
+  state.novelText = storyboardWorkspace.normalizeNovelText(
+    payload.novelText || payload.novel_text || (previousRunId === state.runId ? state.novelText : "") || "",
+  );
+  state.storyboardMessages = payload.storyboardMessages || payload.storyboard_messages || [];
+  state.promptFeedbackMessages = payload.promptFeedbackMessages || payload.prompt_feedback_messages || [];
+  state.storyboardVersions = payload.storyboardVersions || payload.storyboard_versions || {};
   state.selectedShotIds = new Set(payload.selectedShotIds || []);
   state.selectedCharacterIndex = Math.min(payload.selectedCharacterIndex || 0, Math.max(0, state.characters.length - 1));
   el.runId.textContent = state.runId ? `run ${state.runId}` : "未运行";
   renderCharacters();
+  renderFeedbackHistory();
+  renderPromptFeedbackHistory();
   renderShots(preferredShotId || state.shots[0]?.id);
+  if (state.runId && !state.novelText) {
+    loadNovelForRun().catch(() => {});
+  }
+  if (state.runId) taskMonitor.loadRunTasks(state.runId).catch(() => {});
+}
+
+async function refreshRunAfterTask(runId, preferredShotId = null) {
+  const payload = await api(`/api/runs/${encodeURIComponent(runId)}`);
+  hydrateWorkspace(payload, preferredShotId);
+  saveWorkspaceDraft();
+  return payload;
 }
 
 function clearRunArtifacts(message = "新输入已选择，请重新生成分镜") {
-  state.runId = null;
-  state.shots = [];
-  state.scenes = [];
-  state.originalShots = [];
-  state.selected = null;
-  state.selectedShotIds.clear();
+  workspaceState.resetRun(state);
   el.runId.textContent = "新输入未运行";
   el.shotList.innerHTML = "";
   el.promptBox.value = "";
+  el.negativePromptBox.value = "";
+  loadShotEditor();
+  renderStoryboardVersions();
   el.preview.innerHTML = "";
   el.imageVersions.innerHTML = "";
   el.qaBox.textContent = "";
+  renderFeedbackHistory();
+  renderPromptFeedbackHistory();
   el.health.textContent = message;
   saveWorkspaceDraft();
 }
 
 function clearWorkspaceForRecording(message = "") {
   localStorage.removeItem(WORKSPACE_KEY);
-  state.runId = null;
-  state.shots = [];
-  state.scenes = [];
-  state.autoCharacters = [];
-  state.manualCharacters = [];
-  state.characters = [];
-  state.originalShots = [];
-  state.originalCharacters = [];
-  state.differenceAnalysis = null;
-  state.selected = null;
-  state.selectedShotIds.clear();
-  state.selectedCharacterIndex = 0;
-  state.referenceBindings = [];
+  workspaceState.resetAll(state);
   el.runId.textContent = "未运行";
   el.shotList.innerHTML = "";
   el.promptBox.value = "";
+  el.negativePromptBox.value = "";
+  loadShotEditor();
+  renderStoryboardVersions();
   el.charactersBox.textContent = "";
   el.characterDiffBox.textContent = "";
   el.characterEditorSelect.innerHTML = "";
@@ -224,6 +291,8 @@ function clearWorkspaceForRecording(message = "") {
   el.preview.innerHTML = "";
   el.imageVersions.innerHTML = "";
   el.qaBox.textContent = "";
+  renderFeedbackHistory();
+  renderPromptFeedbackHistory();
   if (message) {
     el.health.textContent = message;
   }
@@ -635,53 +704,97 @@ function renderCharacterDiff() {
 
 function selectShot(index) {
   saveSelectedPrompt();
+  saveShotEditor();
   saveCharacterEditor();
   state.selected = state.shots[index];
   el.promptBox.value = state.selected?.positive_prompt || "";
+  el.negativePromptBox.value = state.selected?.negative_prompt || "";
+  loadShotEditor();
+  renderStoryboardVersions();
   el.qaBox.textContent = (state.selected?.qa_notes || []).join("\n");
   el.preview.innerHTML = state.selected?.image_url ? `<img alt="${state.selected.id}" src="${state.selected.image_url}" />` : "";
-  renderImageVersions();
+  imageWorkflow.renderVersions();
   document.querySelectorAll(".shot").forEach((node, nodeIndex) => {
     node.classList.toggle("active", nodeIndex === index);
   });
 }
 
-function renderImageVersions() {
-  if (!state.selected || !el.imageVersions) return;
-  const versions = Array.isArray(state.selected.image_versions) ? state.selected.image_versions : [];
-  if (!versions.length) {
-    el.imageVersions.innerHTML = "";
-    return;
+function loadShotEditor() {
+  const shot = state.selected;
+  const values = shot ? {
+    shotTitle: shot.title,
+    shotLocation: shot.location,
+    shotTime: shot.time,
+    shotCharacters: (shot.characters || []).join("、"),
+    shotMood: (shot.mood || []).join("、"),
+    shotCamera: shot.camera,
+    shotComposition: shot.composition,
+    shotVisualGoal: shot.visual_goal,
+  } : {};
+  for (const [key, value] of Object.entries(values)) {
+    el[key].value = value || "";
   }
-  el.imageVersions.innerHTML = `
-    <div class="image-version-head">
-      <strong>图片版本</strong>
-      <span>${versions.length} 个本地版本</span>
-    </div>
-    <div class="image-version-grid">
-      ${versions.map((version, index) => {
-        const url = version.image_url || "";
-        const active = stripVersionQuery(url) === stripVersionQuery(state.selected.image_url || "");
-        return `
-          <div class="image-version ${active ? "active" : ""}">
-            <img src="${escapeHtml(versionedUrl(url, version.created_at || index))}" alt="${escapeHtml(state.selected.id)} version ${index + 1}" />
-            <div class="image-version-actions">
-              <span>${active ? "当前" : `版本 ${index + 1}`}</span>
-              <button type="button" data-image-url="${escapeHtml(url)}" ${active ? "disabled" : ""}>设为当前</button>
-            </div>
-          </div>
-        `;
-      }).join("")}
-    </div>
-  `;
-  el.imageVersions.querySelectorAll("button[data-image-url]").forEach((button) => {
-    button.addEventListener("click", () => activateImageVersion(button.dataset.imageUrl));
+  if (!shot) {
+    for (const key of ["shotTitle", "shotLocation", "shotTime", "shotCharacters", "shotMood", "shotCamera", "shotComposition", "shotVisualGoal"]) {
+      el[key].value = "";
+    }
+  }
+  el.shotSourceExcerpt.textContent = shot
+    ? sourceReferenceSummary(shot)
+    : "选择分镜后显示对应小说段落";
+}
+
+function sourceReferenceSummary(shot) {
+  const reference = shot.source_ref || {};
+  const labels = { exact: "精确定位", relocated: "已重新定位", unresolved: "无法定位", description: "文本描述生成" };
+  const status = labels[reference.status] || (shot.generation_mode === "description" ? "文本描述生成" : "旧版引用");
+  const quote = reference.quote || shot.source_text || shot.source_excerpt || shot.generation_description || "这条分镜没有绑定小说原文";
+  return `${status} · ${quote}`;
+}
+
+function saveShotEditor() {
+  if (!state.selected) return;
+  state.selected.title = el.shotTitle.value.trim();
+  state.selected.location = el.shotLocation.value.trim();
+  state.selected.time = el.shotTime.value.trim();
+  state.selected.characters = storyboardWorkspace.splitEditorList(el.shotCharacters.value);
+  state.selected.mood = storyboardWorkspace.splitEditorList(el.shotMood.value);
+  state.selected.camera = el.shotCamera.value.trim();
+  state.selected.composition = el.shotComposition.value.trim();
+  state.selected.visual_goal = el.shotVisualGoal.value.trim();
+}
+
+function renderStoryboardVersions() {
+  if (!el.storyboardVersions || !el.storyboardVersionCount) return;
+  const versions = state.selected ? (state.storyboardVersions[state.selected.id] || []) : [];
+  el.storyboardVersionCount.textContent = versions.length ? `${versions.length} 个历史版本` : "暂无历史版本";
+  el.storyboardVersions.innerHTML = storyboardWorkspace.versionHistoryMarkup(
+    versions,
+    state.selected?.id || "",
+    escapeHtml,
+  );
+  el.storyboardVersions.querySelectorAll("button[data-storyboard-version]").forEach((button) => {
+    button.addEventListener("click", () => restoreStoryboardVersion(button.dataset.storyboardVersion).catch((error) => {
+      el.health.textContent = `恢复失败：${error.message}`;
+    }));
   });
+}
+
+async function restoreStoryboardVersion(versionId) {
+  if (!state.runId || !state.selected || !versionId) return;
+  const shotId = state.selected.id;
+  const data = await storyboardClient.restoreVersion(state.runId, shotId, versionId);
+  state.shots = data.shots || state.shots;
+  state.storyboardVersions = data.storyboard_versions || state.storyboardVersions;
+  renderShots(shotId);
+  saveWorkspaceDraft();
+  el.health.textContent = `${shotId} 已恢复历史版本；恢复前的版本和现有图片均已保留`;
 }
 
 function saveSelectedPrompt() {
   if (!state.selected) return;
   window.FicFramePromptState.updateShotPositivePrompt(state.selected, el.promptBox.value);
+  state.selected.negative_prompt = el.negativePromptBox.value;
 }
 
 function restoreSelectedPrompt() {
@@ -689,9 +802,11 @@ function restoreSelectedPrompt() {
   const original = state.originalShots.find((shot) => shot.id === state.selected.id);
   if (!original) return;
   state.selected.positive_prompt = original.positive_prompt || "";
+  state.selected.negative_prompt = original.negative_prompt || "";
   state.selected.character_layout = clone(original.character_layout || []);
   state.selected.regional_guidance = original.regional_guidance ?? null;
   el.promptBox.value = state.selected.positive_prompt;
+  el.negativePromptBox.value = state.selected.negative_prompt;
   el.health.textContent = `${state.selected.id} prompt 已恢复到初始文本`;
   saveWorkspaceDraft();
 }
@@ -702,8 +817,29 @@ function rebuildSelectedPrompt() {
   window.FicFramePromptState.updateShotPositivePrompt(state.selected, buildPromptFromShot(state.selected));
   state.selected.negative_prompt = buildNegativePromptFromShot(state.selected);
   el.promptBox.value = state.selected.positive_prompt;
+  el.negativePromptBox.value = state.selected.negative_prompt;
   el.health.textContent = `${state.selected.id} prompt 已根据角色库重建`;
   saveWorkspaceDraft();
+}
+
+async function regenerateSelectedPromptWithLlm() {
+  if (!state.selected || !state.runId) return;
+  const shotId = state.selected.id;
+  setBusy(el.llmPromptBtn, true);
+  try {
+    await persistStoryboard({ quiet: true });
+    const created = await storyboardClient.regeneratePromptTask(state.runId, shotId);
+    const data = await taskMonitor.wait(created.task_id);
+    state.shots = data.shots || state.shots;
+    state.promptFeedbackMessages = data.prompt_feedback_messages || state.promptFeedbackMessages;
+    state.storyboardVersions = data.storyboard_versions || state.storyboardVersions;
+    renderShots(shotId);
+    renderPromptFeedbackHistory();
+    saveWorkspaceDraft();
+    el.health.textContent = `${shotId} 的生图 Prompt 已由 LLM 重建，旧版本已保存`;
+  } finally {
+    setBusy(el.llmPromptBtn, false);
+  }
 }
 
 function rebuildAllPrompts(message = "全部 prompt 已根据角色库重建") {
@@ -715,6 +851,7 @@ function rebuildAllPrompts(message = "全部 prompt 已根据角色库重建") {
   }
   if (state.selected) {
     el.promptBox.value = state.selected.positive_prompt;
+    el.negativePromptBox.value = state.selected.negative_prompt;
   }
   el.health.textContent = message;
   saveWorkspaceDraft();
@@ -803,9 +940,10 @@ function renderShots(preferredId = null) {
     button.type = "button";
     button.innerHTML = `
       <strong>${escapeHtml(shot.id)} · ${escapeHtml(shot.title)}</strong>
-      <small>${escapeHtml(shot.characters.join("、") || "无明确角色")} · ${escapeHtml(shot.location)} · ${escapeHtml(shot.time)}</small>
+      <small>${escapeHtml((shot.characters || []).join("、") || "无明确角色")} · ${escapeHtml(shot.location)} · ${escapeHtml(shot.time)}</small>
       <small>${shot.image_url ? "已生成图片" : "未生成图片"}</small>
       <small>${escapeHtml(shot.visual_goal)}</small>
+      <small>原文：${escapeHtml(shot.source_excerpt || shot.generation_description || "未绑定")}</small>
     `;
     button.addEventListener("click", () => selectShot(index));
     row.append(checkbox, button);
@@ -1053,6 +1191,187 @@ function selectedImageSize() {
   return el.customImageSize.value.trim() || el.imageSize.value;
 }
 
+async function loadNovelForRun() {
+  if (!state.runId) return "";
+  state.novelText = await storyboardClient.loadNovel(state.runId);
+  saveWorkspaceDraft();
+  return state.novelText;
+}
+
+function renderFeedbackHistory() {
+  if (!el.feedbackHistory) return;
+  const messages = Array.isArray(state.storyboardMessages) ? state.storyboardMessages : [];
+  el.feedbackHistory.innerHTML = storyboardWorkspace.feedbackHistoryMarkup(messages, escapeHtml);
+  el.feedbackHistory.scrollTop = el.feedbackHistory.scrollHeight;
+}
+
+function renderPromptFeedbackHistory() {
+  if (!el.promptFeedbackHistory) return;
+  const messages = Array.isArray(state.promptFeedbackMessages) ? state.promptFeedbackMessages : [];
+  el.promptFeedbackHistory.innerHTML = storyboardWorkspace.feedbackHistoryMarkup(
+    messages,
+    escapeHtml,
+    "Prompt LLM",
+  );
+  el.promptFeedbackHistory.scrollTop = el.promptFeedbackHistory.scrollHeight;
+}
+
+async function persistStoryboard({ quiet = false } = {}) {
+  if (!state.runId) return;
+  saveSelectedPrompt();
+  saveShotEditor();
+  const preferredId = state.selected?.id || null;
+  const data = await storyboardClient.save(state.runId, state.shots);
+  state.shots = data.shots || state.shots;
+  state.storyboardMessages = data.storyboard_messages || state.storyboardMessages;
+  state.promptFeedbackMessages = data.prompt_feedback_messages || state.promptFeedbackMessages;
+  state.storyboardVersions = data.storyboard_versions || state.storyboardVersions;
+  renderShots(preferredId);
+  renderFeedbackHistory();
+  renderPromptFeedbackHistory();
+  saveWorkspaceDraft();
+  if (!quiet) el.health.textContent = "分镜修改已保存到当前 run";
+}
+
+async function deleteSelectedShot() {
+  if (!state.selected || !state.runId) return;
+  const targetId = state.selected.id;
+  if (!window.confirm(`确定删除 ${targetId}？已生成的图片文件仍会保留在 run 目录中。`)) return;
+  saveSelectedPrompt();
+  saveShotEditor();
+  const index = state.shots.findIndex((shot) => shot.id === targetId);
+  state.shots = state.shots.filter((shot) => shot.id !== targetId);
+  state.selectedShotIds.delete(targetId);
+  state.selected = state.shots[Math.min(index, state.shots.length - 1)] || null;
+  await persistStoryboard({ quiet: true });
+  renderShots(state.selected?.id);
+  el.health.textContent = `${targetId} 已删除；图片文件未删除`;
+}
+
+async function openNovelDialog(mode = "browse") {
+  if (!state.runId) {
+    el.health.textContent = "请先生成或恢复一个分镜 run";
+    return;
+  }
+  await novelSource.open(mode);
+}
+
+function updateNovelSelection() {
+  novelSource.update();
+}
+
+function renderNovelSelection() {
+  novelSource.render();
+}
+
+async function generateNewShot() {
+  if (!state.runId) return;
+  updateNovelSelection();
+  const description = el.newShotDescription.value.trim();
+  if (!state.novelSelection.text.trim() && !description) {
+    el.novelSelectionStatus.textContent = "请先选择一段小说原文，或填写画面描述。";
+    return;
+  }
+  setBusy(el.generateShotBtn, true);
+  try {
+    await persistStoryboard({ quiet: true });
+    const sourceRef = state.novelSelection.text ? {
+      version: 1,
+      kind: "novel",
+      document: "novel.md",
+      start: state.novelSelection.start,
+      end: state.novelSelection.end,
+      quote: state.novelSelection.text,
+      status: "exact",
+    } : {
+      version: 1,
+      kind: "description",
+      document: "",
+      quote: description,
+      status: "description",
+    };
+    const created = await storyboardClient.generateTask(state.runId, {
+      source_ref: sourceRef,
+      source_text: state.novelSelection.text,
+      source_start: state.novelSelection.text ? state.novelSelection.start : null,
+      source_end: state.novelSelection.text ? state.novelSelection.end : null,
+      description,
+      insert_after: state.selected?.id || null,
+    });
+    const data = await taskMonitor.wait(created.task_id);
+    state.shots = data.shots || [...state.shots, data.shot];
+    state.originalShots.push(clone(data.shot));
+    el.novelDialog.close();
+    renderShots(data.shot.id);
+    saveWorkspaceDraft();
+    el.health.textContent = `${data.shot.id} 已由 LLM 添加`;
+  } finally {
+    setBusy(el.generateShotBtn, false);
+  }
+}
+
+async function sendStoryboardFeedback() {
+  const content = el.feedbackInput.value.trim();
+  if (!state.runId || !content) return;
+  setBusy(el.sendFeedbackBtn, true);
+  try {
+    await persistStoryboard({ quiet: true });
+    const created = await storyboardClient.feedbackTask(state.runId, content);
+    const data = await taskMonitor.wait(created.task_id);
+    const preferredId = state.selected?.id;
+    state.shots = data.shots || state.shots;
+    state.storyboardMessages = data.storyboard_messages || [];
+    state.storyboardVersions = data.storyboard_versions || state.storyboardVersions;
+    el.feedbackInput.value = "";
+    renderShots(preferredId);
+    renderFeedbackHistory();
+    saveWorkspaceDraft();
+    const regenerated = data.regenerated_shot_ids || [];
+    el.health.textContent = storyboardWorkspace.feedbackOutcomeText(regenerated);
+  } finally {
+    setBusy(el.sendFeedbackBtn, false);
+  }
+}
+
+async function savePromptFeedback() {
+  const content = el.promptFeedbackInput.value.trim();
+  if (!state.runId || !content) return;
+  setBusy(el.savePromptFeedbackBtn, true);
+  try {
+    const data = await storyboardClient.promptFeedback(state.runId, content);
+    state.promptFeedbackMessages = data.prompt_feedback_messages || [];
+    el.promptFeedbackInput.value = "";
+    renderPromptFeedbackHistory();
+    saveWorkspaceDraft();
+    el.health.textContent = "Prompt 重建意见已保存，只会用于生图 Prompt 的 LLM 重建";
+  } finally {
+    setBusy(el.savePromptFeedbackBtn, false);
+  }
+}
+
+async function regenerateStoryboard(shotIds, button) {
+  if (!state.runId || !shotIds.length) {
+    el.health.textContent = "请先勾选要重新生成的分镜";
+    return;
+  }
+  setBusy(button, true);
+  const preferredId = state.selected?.id;
+  try {
+    await persistStoryboard({ quiet: true });
+    const created = await storyboardClient.regenerateTask(state.runId, shotIds);
+    const data = await taskMonitor.wait(created.task_id);
+    state.shots = data.shots || state.shots;
+    state.storyboardMessages = data.storyboard_messages || state.storyboardMessages;
+    state.storyboardVersions = data.storyboard_versions || state.storyboardVersions;
+    renderShots(preferredId);
+    renderFeedbackHistory();
+    saveWorkspaceDraft();
+    el.health.textContent = `已重新生成 ${shotIds.length} 条分镜，原有图片全部保留`;
+  } finally {
+    setBusy(button, false);
+  }
+}
+
 async function runPipeline() {
   const inputError = validateInputFiles();
   if (inputError) {
@@ -1074,10 +1393,15 @@ async function runPipeline() {
     form.append("use_llm", el.useLlm.checked ? "true" : "false");
     form.append("llm_profile", el.llmProfile?.value || "fast");
     form.append("llm_concurrency", el.llmConcurrency?.value || "3");
-    const data = await api("/api/pipeline", { method: "POST", body: form });
+    const { created } = await taskMonitor.submit("/api/pipeline/task", { method: "POST", body: form });
+    const data = await api(`/api/runs/${encodeURIComponent(created.run_id)}`);
     state.runId = data.run_id;
-    state.shots = data.shots;
+    state.shots = data.shots || [];
     state.scenes = data.scenes || [];
+    state.novelText = storyboardWorkspace.normalizeNovelText(await el.novelFile.files[0].text());
+    state.storyboardMessages = data.storyboard_messages || [];
+    state.promptFeedbackMessages = data.prompt_feedback_messages || [];
+    state.storyboardVersions = data.storyboard_versions || {};
     const partitioned = partitionCharacters(data.characters || []);
     state.autoCharacters = partitioned.auto;
     state.manualCharacters = partitioned.manual;
@@ -1087,6 +1411,8 @@ async function runPipeline() {
     state.differenceAnalysis = data.difference_analysis || null;
     el.runId.textContent = `run ${state.runId}`;
     renderCharacters();
+    renderFeedbackHistory();
+    renderPromptFeedbackHistory();
     renderShots(state.selected?.id);
     saveWorkspaceDraft();
     el.health.textContent = `已生成 ${state.shots.length} 张分镜`;
@@ -1095,276 +1421,6 @@ async function runPipeline() {
   } finally {
     setBusy(el.runBtn, false);
   }
-}
-
-async function generateImage() {
-  if (!state.selected || !state.runId) return;
-  saveSelectedPrompt();
-  saveCharacterEditor();
-  const targetShot = clone(state.selected);
-  const targetId = targetShot.id;
-  setBusy(el.imageBtn, true);
-  try {
-    const data = await api("/api/images", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        run_id: state.runId,
-        size: selectedImageSize(),
-        overwrite: true,
-        shot: targetShot,
-      }),
-    });
-    applyImageResult({
-      shot_id: targetId,
-      ok: true,
-      image_path: data.image_path,
-      image_url: data.image_url,
-    });
-    saveWorkspaceDraft();
-    el.health.textContent = data.activated ? `${targetId} 图片已生成` : `${targetId} 新图已保存为候选版本`;
-  } catch (error) {
-    el.health.textContent = error.message;
-  } finally {
-    setBusy(el.imageBtn, false);
-  }
-}
-
-async function generateSelectedImages() {
-  if (!state.shots.length || !state.runId) return;
-  saveSelectedPrompt();
-  saveCharacterEditor();
-  const selectedShots = state.shots.filter((shot) => state.selectedShotIds.has(shot.id));
-  if (!selectedShots.length) {
-    el.health.textContent = "请先在分镜列表左侧勾选要生成的分镜";
-    return;
-  }
-  setBusy(el.selectedImagesBtn, true);
-  try {
-    const results = await generateImagesSequential(selectedShots, {
-      skipExisting: false,
-      retryCount: Number(el.imageRetryCount.value || 0),
-      label: "选中生成",
-    });
-    const okCount = results.filter((item) => item.ok).length;
-    const failures = results.filter((item) => !item.ok);
-    el.health.textContent = `选中生成完成：${okCount}/${selectedShots.length}`;
-    el.qaBox.textContent = failures.length ? failures.map((item) => `${item.shot_id}: ${item.error}`).join("\n\n") : "选中分镜已生成完成";
-  } catch (error) {
-    el.health.textContent = error.message;
-  } finally {
-    setBusy(el.selectedImagesBtn, false);
-  }
-}
-
-async function generateAllImages() {
-  if (!state.shots.length || !state.runId) return;
-  saveSelectedPrompt();
-  saveCharacterEditor();
-  setBusy(el.allImagesBtn, true);
-  try {
-    const results = await generateImagesSequential(state.shots, {
-      skipExisting: el.skipExistingImages.checked,
-      retryCount: Number(el.imageRetryCount.value || 0),
-      label: "批量生成",
-    });
-    const okCount = results.filter((item) => item.ok).length;
-    const skippedCount = results.filter((item) => item.skipped).length;
-    const failures = results.filter((item) => !item.ok);
-    el.health.textContent = `批量生成完成：${okCount}/${state.shots.length}${skippedCount ? `，跳过 ${skippedCount}` : ""}`;
-    if (failures.length) {
-      el.qaBox.textContent = failures.map((item) => `${item.shot_id}: ${item.error}`).join("\n\n");
-    } else {
-      el.qaBox.textContent = "全部图片已生成完成";
-    }
-  } catch (error) {
-    el.health.textContent = error.message;
-  } finally {
-    setBusy(el.allImagesBtn, false);
-  }
-}
-
-async function retryFailedImages() {
-  if (!state.shots.length || !state.runId) return;
-  saveSelectedPrompt();
-  saveCharacterEditor();
-  const failedShots = state.shots.filter((shot) => !shot.image_url && !shot.image_path);
-  if (!failedShots.length) {
-    el.health.textContent = "没有需要重试的失败分镜";
-    return;
-  }
-  setBusy(el.retryFailedBtn, true);
-  try {
-    const results = await generateImagesSequential(failedShots, {
-      skipExisting: false,
-      retryCount: Number(el.imageRetryCount.value || 1),
-      label: "失败重试",
-    });
-    const okCount = results.filter((item) => item.ok).length;
-    const failures = results.filter((item) => !item.ok);
-    el.health.textContent = `失败重试完成：${okCount}/${failedShots.length}`;
-    el.qaBox.textContent = failures.length ? failures.map((item) => `${item.shot_id}: ${item.error}`).join("\n\n") : "失败项已全部重试成功";
-  } catch (error) {
-    el.health.textContent = error.message;
-  } finally {
-    setBusy(el.retryFailedBtn, false);
-  }
-}
-
-async function generateImagesSequential(shots, { skipExisting, retryCount, label }) {
-  const results = [];
-  const failures = [];
-  for (let index = 0; index < shots.length; index += 1) {
-    const shot = shots[index];
-    const current = `${index + 1}/${shots.length}`;
-    if (skipExisting && shot.image_url) {
-      const result = {
-        shot_id: shot.id,
-        ok: true,
-        skipped: true,
-        image_url: shot.image_url,
-        image_path: shot.image_path,
-      };
-      results.push(result);
-      el.health.textContent = `${label}：${current}，跳过 ${shot.id}`;
-      renderShots(state.selected?.id);
-      await waitForPaint();
-      continue;
-    }
-    el.health.textContent = `${label}：${current}，正在生成 ${shot.id}`;
-    await waitForPaint();
-    const result = await generateOneImageWithRetry(shot, retryCount, !skipExisting);
-    results.push(result);
-    if (result.ok) {
-      applyImageResult(result);
-      const status = result.skipped ? "跳过" : "完成";
-      el.health.textContent = `${label}：${current}，${status} ${shot.id}`;
-      el.qaBox.textContent = `${label}进度：${index + 1}/${shots.length}\n${result.shot_id} 已返回图片`;
-    } else {
-      failures.push(result);
-      el.health.textContent = `${label}：${current}，失败 ${shot.id}`;
-      el.qaBox.textContent = failures.map((item) => `${item.shot_id}: ${item.error}`).join("\n\n");
-    }
-    await waitForPaint();
-    await new Promise((resolve) => setTimeout(resolve, 80));
-  }
-  return results;
-}
-
-function waitForPaint() {
-  return new Promise((resolve) => {
-    requestAnimationFrame(() => requestAnimationFrame(resolve));
-  });
-}
-
-async function generateOneImageWithRetry(shot, retryCount, overwrite) {
-  let lastError = "";
-  for (let attempt = 0; attempt <= retryCount; attempt += 1) {
-    try {
-      const data = await api("/api/images", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          run_id: state.runId,
-          size: selectedImageSize(),
-          overwrite,
-          shot: { ...shot, positive_prompt: shot === state.selected ? el.promptBox.value : shot.positive_prompt },
-        }),
-      });
-      return {
-        shot_id: shot.id,
-        ok: true,
-        attempts: attempt + 1,
-        skipped: Boolean(data.skipped),
-        image_path: data.image_path,
-        image_url: data.image_url,
-        raw_image_url: data.raw_image_url,
-        activated: Boolean(data.activated),
-        image_versions: data.image_versions || [],
-      };
-    } catch (error) {
-      lastError = error.message;
-      if (attempt < retryCount) {
-        el.health.textContent = `${shot.id} 失败，正在重试 ${attempt + 1}/${retryCount}`;
-        await new Promise((resolve) => setTimeout(resolve, Math.min(2000 * (attempt + 1), 6000)));
-      }
-    }
-  }
-  return { shot_id: shot.id, ok: false, attempts: retryCount + 1, error: lastError };
-}
-
-function applyImageResult(result) {
-  const shot = state.shots.find((item) => item.id === result.shot_id);
-  if (shot) {
-    if (Array.isArray(result.image_versions)) {
-      shot.image_versions = result.image_versions;
-    } else if (result.raw_image_url || result.image_url) {
-      const rawUrl = result.raw_image_url || stripVersionQuery(result.image_url);
-      shot.image_versions = appendImageVersion(shot.image_versions, {
-        image_path: result.image_path,
-        image_url: rawUrl,
-        created_at: Math.floor(Date.now() / 1000),
-      });
-    }
-    if (result.activated || !shot.image_url) {
-      shot.image_url = result.raw_image_url || stripVersionQuery(result.image_url);
-      shot.image_path = result.image_path;
-    }
-  }
-  if (state.selected?.id === result.shot_id) {
-    if (shot?.image_url) {
-      el.preview.innerHTML = `<img alt="${result.shot_id}" src="${versionedUrl(shot.image_url, Date.now())}" />`;
-    }
-    renderImageVersions();
-  }
-  renderShots(state.selected?.id);
-  saveWorkspaceDraft();
-}
-
-function appendImageVersion(versions = [], next) {
-  const items = Array.isArray(versions) ? versions.slice() : [];
-  if (!items.some((item) => stripVersionQuery(item.image_url || "") === stripVersionQuery(next.image_url || ""))) {
-    items.push(next);
-  }
-  return items;
-}
-
-async function activateImageVersion(imageUrl) {
-  if (!state.selected || !state.runId || !imageUrl) return;
-  saveSelectedPrompt();
-  try {
-    const data = await api("/api/images/version", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        run_id: state.runId,
-        shot_id: state.selected.id,
-        image_url: imageUrl,
-      }),
-    });
-    applyImageResult({
-      shot_id: data.shot_id,
-      ok: true,
-      activated: true,
-      image_path: data.image_path,
-      image_url: data.image_url,
-      raw_image_url: data.raw_image_url,
-      image_versions: data.image_versions,
-    });
-    el.health.textContent = `${state.selected.id} 已切换图片版本`;
-  } catch (error) {
-    el.health.textContent = `切换版本失败：${error.message}`;
-  }
-}
-
-function stripVersionQuery(url = "") {
-  return String(url).split("?", 1)[0];
-}
-
-function versionedUrl(url, seed) {
-  const clean = stripVersionQuery(url);
-  if (!clean) return "";
-  return `${clean}?v=${encodeURIComponent(seed || Date.now())}`;
 }
 
 async function exportMarkdown() {
@@ -1590,6 +1646,17 @@ el.promptBox.addEventListener("input", () => {
   saveSelectedPrompt();
   scheduleWorkspaceDraftSave();
 });
+el.negativePromptBox.addEventListener("input", () => {
+  saveSelectedPrompt();
+  scheduleWorkspaceDraftSave();
+});
+for (const node of [el.shotTitle, el.shotLocation, el.shotTime, el.shotCharacters, el.shotMood, el.shotCamera, el.shotComposition, el.shotVisualGoal]) {
+  node.addEventListener("input", () => {
+    saveShotEditor();
+    scheduleWorkspaceDraftSave();
+  });
+}
+
 el.characterEditorSelect.addEventListener("change", () => {
   saveCharacterEditor();
   state.selectedCharacterIndex = Number(el.characterEditorSelect.value || 0);
@@ -1603,17 +1670,76 @@ for (const node of [el.identityPromptBox, el.appearanceStatesBox, el.negativeIde
 }
 el.restorePromptBtn.addEventListener("click", restoreSelectedPrompt);
 el.rebuildPromptBtn.addEventListener("click", rebuildSelectedPrompt);
+el.llmPromptBtn.addEventListener("click", () => regenerateSelectedPromptWithLlm().catch((error) => {
+  el.health.textContent = `LLM Prompt 重建失败：${error.message}`;
+}));
+el.savePromptFeedbackBtn.addEventListener("click", () => savePromptFeedback().catch((error) => {
+  el.health.textContent = `保存 Prompt 意见失败：${error.message}`;
+}));
+el.promptFeedbackInput.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+    event.preventDefault();
+    el.savePromptFeedbackBtn.click();
+  }
+});
 el.restoreCharacterBtn.addEventListener("click", restoreSelectedCharacter);
 el.rebuildAllPromptsBtn.addEventListener("click", rebuildAllPrompts);
-el.imageBtn.addEventListener("click", generateImage);
-el.selectedImagesBtn.addEventListener("click", generateSelectedImages);
-el.allImagesBtn.addEventListener("click", generateAllImages);
-el.retryFailedBtn.addEventListener("click", retryFailedImages);
+el.imageBtn.addEventListener("click", imageWorkflow.generateCurrent);
+el.selectedImagesBtn.addEventListener("click", imageWorkflow.generateSelected);
+el.allImagesBtn.addEventListener("click", imageWorkflow.generateAll);
+el.retryFailedBtn.addEventListener("click", imageWorkflow.retryFailed);
 el.exportBtn.addEventListener("click", exportMarkdown);
 el.copyBtn.addEventListener("click", async () => {
   saveSelectedPrompt();
   await navigator.clipboard.writeText(el.promptBox.value);
   el.health.textContent = "Prompt 已复制";
+});
+el.openNovelBtn.addEventListener("click", () => openNovelDialog("locate").catch((error) => {
+  el.health.textContent = error.message;
+}));
+el.addShotBtn.addEventListener("click", () => openNovelDialog("add").catch((error) => {
+  el.health.textContent = error.message;
+}));
+el.locateSourceBtn.addEventListener("click", () => openNovelDialog("locate").catch((error) => {
+  el.health.textContent = error.message;
+}));
+el.closeNovelBtn.addEventListener("click", () => el.novelDialog.close());
+el.novelDialog.addEventListener("close", novelSource.close);
+el.novelText.addEventListener("select", updateNovelSelection);
+el.novelText.addEventListener("mouseup", updateNovelSelection);
+el.novelText.addEventListener("keyup", updateNovelSelection);
+el.clearNovelSelectionBtn.addEventListener("click", () => {
+  novelSource.clear();
+});
+el.generateShotBtn.addEventListener("click", () => generateNewShot().catch((error) => {
+  el.health.textContent = error.message;
+}));
+el.saveShotBtn.addEventListener("click", () => persistStoryboard().catch((error) => {
+  el.health.textContent = `保存失败：${error.message}`;
+}));
+el.deleteShotBtn.addEventListener("click", () => deleteSelectedShot().catch((error) => {
+  el.health.textContent = `删除失败：${error.message}`;
+}));
+el.sendFeedbackBtn.addEventListener("click", () => sendStoryboardFeedback().catch((error) => {
+  el.health.textContent = error.message;
+}));
+el.regenerateSelectedBtn.addEventListener("click", () => regenerateStoryboard(
+  state.shots.filter((shot) => state.selectedShotIds.has(shot.id)).map((shot) => shot.id),
+  el.regenerateSelectedBtn,
+).catch((error) => {
+  el.health.textContent = error.message;
+}));
+el.regenerateAllBtn.addEventListener("click", () => regenerateStoryboard(
+  state.shots.map((shot) => shot.id),
+  el.regenerateAllBtn,
+).catch((error) => {
+  el.health.textContent = error.message;
+}));
+el.feedbackInput.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+    event.preventDefault();
+    el.sendFeedbackBtn.click();
+  }
 });
 
 window.addEventListener("beforeunload", saveWorkspaceDraft);

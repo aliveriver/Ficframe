@@ -144,7 +144,7 @@ def write_env_file(path: str | Path, values: dict[str, str]) -> None:
                 continue
             current[key] = str(values[key])
             os.environ[key] = str(values[key])
-    lines = ["# FicFrame API configuration"]
+    lines = ["# FicFrame API 配置"]
     for key in CONFIG_KEYS:
         if key in current:
             lines.append(f"{key}={current[key]}")

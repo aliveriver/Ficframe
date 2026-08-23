@@ -1,40 +1,61 @@
 from __future__ import annotations
 
+import asyncio
+import io
 import json
-import re
-import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Annotated, Any
 
-import httpx
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .characters import build_character_cards
 from .character_diff import analyze_character_differences
-from .comfyui import ComfyUIError, is_comfyui_install_path, normalize_comfyui_base_url
+from .comfyui import ComfyUIError, normalize_comfyui_base_url
 from .config_store import public_config, public_provider_config, read_provider_config, write_env_file, write_provider_config
 from .continuity import initial_state
 from .io import read_text, write_json, write_text
 from .llm_pipeline import (
     enhance_character_cards_with_llm,
     extract_character_cards_with_llm_detailed,
+    generate_or_revise_shot_with_llm,
     polish_shot_prompt,
     refine_scenes_with_llm,
+    respond_to_storyboard_feedback,
 )
 from .logging_utils import build_log_bundle, get_logger, redact, setup_logging
 from .models import CharacterCard, Scene, Shot, to_dict
-from .providers import EndpointConfig, OpenAICompatibleProvider, ProviderError, build_url, effective_image_provider, llm_runtime_path, safe_url, vlm_runtime_path
+from .providers import OpenAICompatibleProvider, ProviderError, effective_image_provider
+from . import provider_probe
+
+# 保留旧模块常量，兼容外部调用方和历史测试。
+COMFYUI_CLI_PORT = provider_probe.COMFYUI_CLI_PORT
+COMFYUI_DESKTOP_DEFAULT_PORT = provider_probe.COMFYUI_DESKTOP_DEFAULT_PORT
+COMFYUI_DESKTOP_PORT_SPAN = provider_probe.COMFYUI_DESKTOP_PORT_SPAN
 from .prompt_bank import analyze_reference_visuals, build_character_prompt_bank
 from .qa import annotate_shots
-from .render import render_illustrated_novel, render_prompts, render_storyboard
+from .render import render_illustrated_novel
 from .runtime_paths import env_file, outputs_root, providers_file, resource_root, user_data_root, web_root
 from .segmenter import segment_novel
 from .storyboard import build_storyboard
+from .storyboard_workflow import backfill_storyboard_sources, normalize_novel_text, storyboard_snapshot
+from .run_repository import RunNotFoundError, RunRepository
+from .storyboard_routes import (
+    StoryboardController,
+    StoryboardDependencies,
+    StoryboardFeedbackRequest,
+    StoryboardGenerateRequest,
+    StoryboardPromptFeedbackRequest,
+    StoryboardPromptRequest,
+    StoryboardRegenerateRequest,
+    StoryboardSaveRequest,
+    StoryboardVersionRequest,
+)
+from .task_manager import TaskManager, TaskReporter
 
 
 RESOURCE_ROOT = resource_root()
@@ -47,23 +68,41 @@ RUNS.mkdir(parents=True, exist_ok=True)
 LOGS = setup_logging(ROOT)
 logger = get_logger("api")
 
-RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
-COMFYUI_CLI_PORT = 8188
-COMFYUI_DESKTOP_DEFAULT_PORT = 8000
-COMFYUI_DESKTOP_PORT_SPAN = 1000
-
 app = FastAPI(title="FicFrame API")
 app.mount("/assets", StaticFiles(directory=WEB), name="assets")
 app.mount("/runs", StaticFiles(directory=RUNS), name="runs")
 
 
 def run_directory(run_id: str) -> Path:
-    if not RUN_ID_PATTERN.fullmatch(run_id):
-        raise HTTPException(status_code=400, detail="非法 run_id")
-    path = (RUNS / run_id).resolve()
-    if RUNS.resolve() not in path.parents and path != RUNS.resolve():
-        raise HTTPException(status_code=400, detail="非法 run_id")
-    return path
+    try:
+        return get_run_repository().run_dir(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+_RUN_REPOSITORIES: dict[str, RunRepository] = {}
+_TASK_MANAGERS: dict[str, TaskManager] = {}
+
+
+def get_run_repository() -> RunRepository:
+    """每个解析后的根目录共用一个 repository，并兼容测试替换的根目录。"""
+    key = str(Path(RUNS).resolve())
+    repository = _RUN_REPOSITORIES.get(key)
+    if repository is None:
+        repository = RunRepository(RUNS)
+        _RUN_REPOSITORIES[key] = repository
+    return repository
+
+
+def get_task_manager() -> TaskManager:
+    """让任务管理器和当前 run repository 共用持久化边界。"""
+    repository = get_run_repository()
+    key = str(repository.root)
+    manager = _TASK_MANAGERS.get(key)
+    if manager is None:
+        manager = TaskManager(repository)
+        _TASK_MANAGERS[key] = manager
+    return manager
 
 
 @app.middleware("http")
@@ -180,36 +219,55 @@ def get_logs() -> dict[str, Any]:
 
 @app.get("/api/runs")
 def list_runs() -> dict[str, Any]:
-    runs = []
-    for path in sorted(RUNS.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True):
-        if not path.is_dir():
-            continue
-        pipeline_path = path / "pipeline.json"
-        if not pipeline_path.exists():
-            continue
-        try:
-            payload = json.loads(read_text(pipeline_path))
-        except (json.JSONDecodeError, OSError):
-            continue
-        runs.append(
-            {
-                "run_id": path.name,
-                "modified_at": int(pipeline_path.stat().st_mtime),
-                "shot_count": len(payload.get("shots", [])),
-                "character_count": len(payload.get("characters", [])),
-            }
-        )
-    return {"runs": runs[:20]}
+    return {"runs": get_run_repository().list_runs(limit=20)}
 
 
 @app.get("/api/runs/{run_id}")
 def get_run(run_id: str) -> dict[str, Any]:
-    pipeline_path = run_directory(run_id) / "pipeline.json"
-    if not pipeline_path.exists():
-        raise HTTPException(status_code=404, detail="未找到该 run")
-    payload = json.loads(read_text(pipeline_path))
-    payload.setdefault("run_id", run_id)
+    repository = get_run_repository()
+    try:
+        payload = repository.load(run_id)
+    except RunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="未找到该 run") from exc
+    novel_path = repository.novel_path(run_id)
+    if novel_path.exists() and backfill_storyboard_sources(payload, normalize_novel_text(read_text(novel_path))):
+        repository.save(run_id, payload)
     return payload
+
+
+@app.get("/api/runs/{run_id}/novel", response_class=PlainTextResponse)
+def get_run_novel(run_id: str) -> str:
+    novel_path = run_directory(run_id) / "novel.md"
+    if not novel_path.exists():
+        raise HTTPException(status_code=404, detail="未找到小说原文")
+    return normalize_novel_text(read_text(novel_path))
+
+
+@app.get("/api/tasks/{task_id}")
+def get_task(task_id: str) -> dict[str, Any]:
+    try:
+        return get_task_manager().get(task_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="未找到该任务") from exc
+
+
+@app.get("/api/runs/{run_id}/tasks")
+def list_run_tasks(run_id: str) -> dict[str, Any]:
+    try:
+        get_run_repository().run_dir(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"tasks": get_task_manager().list_for_run(run_id)}
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+def cancel_task(task_id: str) -> dict[str, Any]:
+    try:
+        return get_task_manager().cancel(task_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="未找到该任务") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/logs/export")
@@ -258,264 +316,39 @@ def save_providers(request: ProvidersRequest) -> dict[str, Any]:
 @app.post("/api/providers/test")
 def test_provider(request: ProviderTestRequest) -> dict[str, Any]:
     source = hydrate_provider_secret(request.source)
-    base_url = str(source.get("base_url") or "").strip().rstrip("/")
-    api_key = str(source.get("api_key") or "").strip()
-    if not base_url:
-        logger.warning("provider test failed reason=missing_base source=%s", redact(source))
-        raise HTTPException(status_code=400, detail="请先填写请求地址")
-    provider_name = str(source.get("provider") or "openai").lower()
-    if provider_name == "comfyui":
-        return test_comfyui_provider(base_url, api_key)
-    if not api_key:
-        logger.warning("provider test failed reason=missing_key source=%s", redact(source))
-        raise HTTPException(status_code=400, detail="请先填写 API key")
-
-    headers = {"Authorization": f"Bearer {api_key}"}
-    started = time.perf_counter()
-    model_url = build_url(base_url, "models")
-    kind = str(source.get("kind") or "").lower()
-    model_name = str(source.get("active_model") or "").strip()
     try:
-        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
-            response = client.get(model_url, headers=headers)
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            if response.status_code < 400:
-                data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
-                count = len(data.get("data", [])) if isinstance(data, dict) and isinstance(data.get("data"), list) else None
-                probe = probe_runtime_endpoint(client, base_url, api_key, kind, provider_name, model_name)
-                runtime_ok = bool(probe.get("ok", True))
-                runtime_suffix = ""
-                if probe.get("tested"):
-                    runtime_suffix = f"；正式端点 {probe.get('path')} {'可达' if runtime_ok else '不可达'}"
-                    if not runtime_ok and probe.get("message"):
-                        runtime_suffix += f"：{probe.get('message')}"
-                result = {
-                    "ok": runtime_ok,
-                    "status_code": probe.get("status_code") if probe.get("tested") else response.status_code,
-                    "latency_ms": int((time.perf_counter() - started) * 1000),
-                    "message": f"/models 可达{f'，模型数 {count}' if count is not None else ''}",
-                }
-                result["message"] = f"{result['message']}{runtime_suffix}"
-                logger.info(
-                    "provider test completed source_id=%s kind=%s provider=%s models_status=%s runtime_path=%s runtime_status=%s ok=%s latency_ms=%s url=%s",
-                    source.get("id"),
-                    kind,
-                    provider_name,
-                    response.status_code,
-                    probe.get("path", ""),
-                    probe.get("status_code", ""),
-                    runtime_ok,
-                    result["latency_ms"],
-                    safe_url(model_url),
-                )
-                return result
-            if response.status_code not in {404, 405}:
-                result = {
-                    "ok": False,
-                    "status_code": response.status_code,
-                    "latency_ms": latency_ms,
-                    "message": response.text[:500] or response.reason_phrase,
-                }
-                logger.warning("provider test http_error source_id=%s status=%s latency_ms=%s message=%s", source.get("id"), response.status_code, latency_ms, result["message"])
-                return result
-
-            fallback = client.get(base_url, headers=headers)
-            fallback_latency_ms = int((time.perf_counter() - started) * 1000)
-            result = {
-                "ok": fallback.status_code < 500,
-                "status_code": fallback.status_code,
-                "latency_ms": fallback_latency_ms,
-                "message": "服务可达，但该供应商可能不支持 /models" if fallback.status_code < 500 else fallback.text[:500],
-            }
-            logger.info("provider test fallback source_id=%s status=%s latency_ms=%s ok=%s", source.get("id"), fallback.status_code, fallback_latency_ms, result["ok"])
-            return result
-    except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("provider test exception source_id=%s error=%s", source.get("id"), exc)
-        return {
-            "ok": False,
-            "status_code": None,
-            "latency_ms": int((time.perf_counter() - started) * 1000),
-            "message": str(exc),
-        }
+        return provider_probe.test_provider_connection(
+            source,
+            logger=logger,
+            comfyui_test=test_comfyui_provider,
+        )
+    except ValueError as exc:
+        logger.warning("provider test rejected source=%s error=%s", redact(source), exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def test_comfyui_provider(base_url: str, api_key: str = "") -> dict[str, Any]:
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    started = time.perf_counter()
-    from_install_path = is_comfyui_install_path(base_url)
-    try:
-        candidates = discover_local_comfyui_endpoints(base_url) if from_install_path else (normalize_comfyui_base_url(base_url),)
-    except ComfyUIError as exc:
-        return {
-            "ok": False,
-            "status_code": None,
-            "latency_ms": int((time.perf_counter() - started) * 1000),
-            "message": str(exc),
-        }
-    errors: list[str] = []
-    detected: list[tuple[str, int]] = []
-    last_status: int | None = None
-    timeout = 2.0 if from_install_path else 15.0
-    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-        for candidate in candidates:
-            url = build_url(candidate, "system_stats")
-            try:
-                response = client.get(url, headers=headers)
-            except httpx.HTTPError as exc:
-                errors.append(f"{candidate}: {exc}")
-                continue
-            last_status = response.status_code
-            if response.status_code >= 400:
-                errors.append(f"{candidate}: HTTP {response.status_code}")
-                continue
-            if from_install_path:
-                detected.append((candidate, response.status_code))
-                continue
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            return {
-                "ok": True,
-                "status_code": response.status_code,
-                "latency_ms": latency_ms,
-                "message": "ComfyUI 服务可达",
-                "resolved_base_url": candidate,
-            }
-    latency_ms = int((time.perf_counter() - started) * 1000)
-    if from_install_path:
-        if len(detected) == 1:
-            candidate, status_code = detected[0]
-            return {
-                "ok": True,
-                "status_code": status_code,
-                "latency_ms": latency_ms,
-                "message": f"安装目录不是 API 地址；已自动检测到 ComfyUI 服务 {candidate}，请保存该地址",
-                "resolved_base_url": candidate,
-            }
-        if len(detected) > 1:
-            endpoints = [candidate for candidate, _ in detected]
-            return {
-                "ok": True,
-                "status_code": detected[0][1],
-                "latency_ms": latency_ms,
-                "message": "检测到多个 ComfyUI 服务，请选择与当前 Desktop 窗口一致的地址后保存。",
-                "detected_base_urls": endpoints,
-            }
-        return {
-            "ok": False,
-            "status_code": None,
-            "latency_ms": latency_ms,
-            "message": (
-                "填写的是 ComfyUI 安装目录，不是 API 地址，且未检测到正在运行的本机 ComfyUI 服务。"
-                "请先启动 ComfyUI，再填写启动日志或 Desktop 设置中显示的 http://127.0.0.1:端口。"
-            ),
-        }
-    return {
-        "ok": False,
-        "status_code": last_status,
-        "latency_ms": latency_ms,
-        "message": errors[-1] if errors else "ComfyUI 服务不可达",
-    }
+    return provider_probe.test_comfyui_connection(
+        base_url,
+        api_key,
+        discover_endpoints=discover_local_comfyui_endpoints,
+    )
 
 
 def discover_local_comfyui_endpoints(base_path: str) -> tuple[str, ...]:
-    host, start_port = desktop_comfyui_server_target(base_path)
-    # Desktop searches from its configured start port through start_port + 1000.
-    end_port = min(65535, start_port + COMFYUI_DESKTOP_PORT_SPAN)
-    ports = set(range(start_port, end_port + 1))
-    ports.add(COMFYUI_CLI_PORT)
-    open_ports: list[int] = []
-    with ThreadPoolExecutor(max_workers=64) as executor:
-        checks = executor.map(lambda port: (port, local_tcp_port_open(host, port)), sorted(ports))
-        open_ports = [port for port, is_open in checks if is_open]
-    return tuple(f"http://{host}:{port}" for port in open_ports)
+    return provider_probe.discover_local_comfyui_endpoints(base_path)
 
 
 def desktop_comfyui_server_target(base_path: str) -> tuple[str, int]:
-    host = "127.0.0.1"
-    port = COMFYUI_DESKTOP_DEFAULT_PORT
-    settings_path = Path(base_path) / "user" / "default" / "comfy.settings.json"
-    try:
-        settings = json.loads(settings_path.read_text(encoding="utf-8"))
-        launch_args = settings.get("Comfy.Server.LaunchArgs") if isinstance(settings, dict) else None
-        if isinstance(launch_args, dict):
-            configured_host = str(launch_args.get("listen") or host).strip()
-            if configured_host in {"0.0.0.0", "::", "localhost", "127.0.0.1"}:
-                host = "127.0.0.1"
-            configured_port = int(launch_args.get("port") or port)
-            if 1 <= configured_port <= 65535:
-                port = configured_port
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        pass
-    return host, port
+    return provider_probe.desktop_comfyui_server_target(base_path)
 
 
 def local_tcp_port_open(host: str, port: int) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=0.05):
-            return True
-    except OSError:
-        return False
+    return provider_probe.local_tcp_port_open(host, port)
 
 
-def probe_runtime_endpoint(
-    client: httpx.Client,
-    base_url: str,
-    api_key: str,
-    kind: str,
-    provider_name: str,
-    model_name: str,
-) -> dict[str, Any]:
-    if kind not in {"llm", "vlm"} or not model_name:
-        return {"tested": False, "ok": True}
-    endpoint = EndpointConfig(api_key=api_key, base_url=base_url, model=model_name, provider=provider_name)
-    path = vlm_runtime_path(endpoint) if kind == "vlm" else llm_runtime_path(endpoint)
-    url = build_url(base_url, path)
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = build_runtime_probe_payload(kind, path, model_name)
-    started = time.perf_counter()
-    try:
-        response = client.post(url, headers=headers, json=payload)
-    except httpx.HTTPError as exc:
-        logger.warning("provider runtime probe exception kind=%s provider=%s url=%s error=%s", kind, provider_name, safe_url(url), exc)
-        return {"tested": True, "ok": False, "path": path, "status_code": None, "message": str(exc)}
-    latency_ms = int((time.perf_counter() - started) * 1000)
-    ok = response.status_code < 400
-    logger.info(
-        "provider runtime probe kind=%s provider=%s path=%s status=%s latency_ms=%s ok=%s url=%s",
-        kind,
-        provider_name,
-        path,
-        response.status_code,
-        latency_ms,
-        ok,
-        safe_url(url),
-    )
-    return {
-        "tested": True,
-        "ok": ok,
-        "path": path,
-        "status_code": response.status_code,
-        "latency_ms": latency_ms,
-        "message": response.text[:300] if not ok else "",
-    }
-
-
-def build_runtime_probe_payload(kind: str, path: str, model_name: str) -> dict[str, Any]:
-    if path == "chat/completions":
-        return {
-            "model": model_name,
-            "messages": [
-                {"role": "system", "content": "Return one short word."},
-                {"role": "user", "content": "ping"},
-            ],
-            "max_tokens": 4,
-        }
-    return {
-        "model": model_name,
-        "input": [
-            {"role": "system", "content": [{"type": "input_text", "text": "Return one short word."}]},
-            {"role": "user", "content": [{"type": "input_text", "text": "ping"}]},
-        ],
-    }
+probe_runtime_endpoint = provider_probe.probe_runtime_endpoint
+build_runtime_probe_payload = provider_probe.build_runtime_probe_payload
 
 
 @app.post("/api/characters/preview")
@@ -713,11 +546,13 @@ async def pipeline(
     use_llm: Annotated[bool, Form()] = False,
     llm_profile: Annotated[str, Form()] = "fast",
     llm_concurrency: Annotated[int, Form()] = 3,
+    run_id: Annotated[str | None, Form()] = None,
 ) -> dict[str, Any]:
-    run_id = str(int(time.time()))
-    run_dir = RUNS / run_id
+    run_id = run_id or str(int(time.time()))
+    repository = get_run_repository()
+    run_dir = repository.run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
-    novel_text = (await novel.read()).decode("utf-8-sig")
+    novel_text = normalize_novel_text((await novel.read()).decode("utf-8-sig"))
     character_text = (await characters.read()).decode("utf-8-sig")
     if not novel_text.strip():
         logger.warning("pipeline rejected empty novel filename=%s", novel.filename)
@@ -794,6 +629,9 @@ async def pipeline(
     difference_analysis = analyze_character_differences(cards, provider if full_llm else None, purpose=f"pipeline:{run_id}:character_diff")
     state = initial_state(cards)
     shots, state = build_storyboard(scenes, cards, state, max_shots=max_shots, difference_analysis=difference_analysis)
+    for shot in shots:
+        if shot.source_start is not None and shot.source_end is not None:
+            shot.source_text = novel_text[shot.source_start:shot.source_end]
     annotate_shots(shots, cards)
     if full_llm:
         shots = polish_shots_with_llm(shots, cards, provider, llm_concurrency, run_id=run_id)
@@ -808,13 +646,147 @@ async def pipeline(
         "scenes": to_dict(scenes),
         "shots": to_dict(shots),
         "continuity": to_dict(state),
+        "storyboard_messages": [],
+        "prompt_feedback_messages": [],
+        "storyboard_versions": {},
+        "next_shot_number": len(shots) + 1,
     }
-    write_json(run_dir / "pipeline.json", payload)
-    write_json(run_dir / "continuity.json", payload["continuity"])
-    write_text(run_dir / "storyboard.md", render_storyboard(shots))
-    write_text(run_dir / "prompts.md", render_prompts(shots))
+    repository.save(run_id, payload)
     logger.info("pipeline completed run_id=%s character_count=%s scene_count=%s shot_count=%s", run_id, len(cards), len(scenes), len(shots))
     return payload
+
+
+@app.post("/api/pipeline/task", status_code=status.HTTP_202_ACCEPTED)
+async def create_pipeline_task(
+    novel: Annotated[UploadFile, File()],
+    characters: Annotated[UploadFile, File()],
+    reference_images: Annotated[list[UploadFile] | None, File()] = None,
+    reference_bindings: Annotated[str | None, Form()] = None,
+    manual_characters: Annotated[str | None, Form()] = None,
+    prepared_characters: Annotated[str | None, Form()] = None,
+    max_shots: Annotated[int, Form()] = 8,
+    use_llm: Annotated[bool, Form()] = False,
+    llm_profile: Annotated[str, Form()] = "fast",
+    llm_concurrency: Annotated[int, Form()] = 3,
+) -> dict[str, Any]:
+    """读取上传内容后立即返回，后台任务不再依赖请求生命周期。"""
+    run_id = f"{int(time.time())}_{time.time_ns() % 1_000_000}"
+    novel_data = await novel.read()
+    character_data = await characters.read()
+    reference_data = [
+        (Path(upload.filename or "reference.png").name, await upload.read())
+        for upload in (reference_images or [])
+    ]
+
+    def work(reporter: TaskReporter) -> dict[str, Any]:
+        reporter.update("准备输入", 5, "正在校验小说、人设和参考图")
+        novel_upload = UploadFile(filename=novel.filename or "novel.md", file=io.BytesIO(novel_data))
+        character_upload = UploadFile(filename=characters.filename or "characters.md", file=io.BytesIO(character_data))
+        refs = [UploadFile(filename=name, file=io.BytesIO(content)) for name, content in reference_data]
+        reporter.update("生成分镜", 15, "正在解析小说并调用配置的 LLM/VLM")
+        result = asyncio.run(pipeline(
+            novel_upload, character_upload, refs, reference_bindings, manual_characters,
+            prepared_characters, max_shots, use_llm, llm_profile, llm_concurrency, run_id,
+        ))
+        reporter.update("保存 run", 95, "分镜已生成，正在刷新持久化投影")
+        return {"run_id": result["run_id"], "shot_count": len(result.get("shots", []))}
+
+    task = get_task_manager().submit(run_id, "pipeline", work, message="完整工作流已进入队列")
+    return {"task_id": task["task_id"], "run_id": run_id, "task": task}
+
+
+def save_storyboard(request: StoryboardSaveRequest) -> dict[str, Any]:
+    return get_storyboard_controller().save_storyboard(request)
+
+
+def generate_storyboard_shot(request: StoryboardGenerateRequest) -> dict[str, Any]:
+    return get_storyboard_controller().generate_storyboard_shot(request)
+
+
+def storyboard_feedback(request: StoryboardFeedbackRequest) -> dict[str, Any]:
+    return get_storyboard_controller().storyboard_feedback(request)
+
+
+def storyboard_prompt_feedback(request: StoryboardPromptFeedbackRequest) -> dict[str, Any]:
+    return get_storyboard_controller().storyboard_prompt_feedback(request)
+
+
+def regenerate_storyboard(request: StoryboardRegenerateRequest) -> dict[str, Any]:
+    return get_storyboard_controller().regenerate_storyboard(request)
+
+
+def restore_storyboard_version(request: StoryboardVersionRequest) -> dict[str, Any]:
+    return get_storyboard_controller().restore_storyboard_version(request)
+
+
+def regenerate_storyboard_prompt(request: StoryboardPromptRequest) -> dict[str, Any]:
+    return get_storyboard_controller().regenerate_storyboard_prompt(request)
+
+
+def _submit_storyboard_task(run_id: str, kind: str, action: Any, message: str) -> dict[str, Any]:
+    def work(reporter: TaskReporter) -> dict[str, Any]:
+        reporter.update("调用 LLM", 20, message)
+        result = action()
+        reporter.update("保存分镜", 90, "正在保存分镜、历史版本和对话记录")
+        return result
+
+    task = get_task_manager().submit(run_id, kind, work, message=message)
+    return {"task_id": task["task_id"], "run_id": run_id, "task": task}
+
+
+@app.post("/api/storyboard/generate-task", status_code=status.HTTP_202_ACCEPTED)
+def create_storyboard_generate_task(request: StoryboardGenerateRequest) -> dict[str, Any]:
+    return _submit_storyboard_task(
+        request.run_id, "storyboard_generate",
+        lambda: generate_storyboard_shot(request), "正在根据原文引用或文本描述生成分镜",
+    )
+
+
+@app.post("/api/storyboard/feedback-task", status_code=status.HTTP_202_ACCEPTED)
+def create_storyboard_feedback_task(request: StoryboardFeedbackRequest) -> dict[str, Any]:
+    return _submit_storyboard_task(
+        request.run_id, "storyboard_feedback",
+        lambda: storyboard_feedback(request), "分镜 Agent 正在分析反馈并判断是否需要重新生成",
+    )
+
+
+@app.post("/api/storyboard/regenerate-task", status_code=status.HTTP_202_ACCEPTED)
+def create_storyboard_regenerate_task(request: StoryboardRegenerateRequest) -> dict[str, Any]:
+    return _submit_storyboard_task(
+        request.run_id, "storyboard_regenerate",
+        lambda: regenerate_storyboard(request), "正在结合分镜 Agent 反馈重新生成分镜",
+    )
+
+
+@app.post("/api/storyboard/prompt-task", status_code=status.HTTP_202_ACCEPTED)
+def create_storyboard_prompt_task(request: StoryboardPromptRequest) -> dict[str, Any]:
+    return _submit_storyboard_task(
+        request.run_id, "prompt_regenerate",
+        lambda: regenerate_storyboard_prompt(request), "正在结合独立 Prompt 反馈重建生图 Prompt",
+    )
+
+
+def get_storyboard_controller() -> StoryboardController:
+    # 在请求时解析回调，使测试和本地集成可以替换 provider，
+    # 而无需重新构建 FastAPI 应用。
+    return StoryboardController(
+        StoryboardDependencies(
+            repository=get_run_repository,
+            require_llm_provider=require_llm_provider,
+            parse_character_payload=parse_character_payload,
+            generate_or_revise_shot=lambda *args, **kwargs: generate_or_revise_shot_with_llm(*args, **kwargs),
+            respond_to_feedback=lambda *args, **kwargs: respond_to_storyboard_feedback(*args, **kwargs),
+            polish_prompt=lambda *args, **kwargs: polish_shot_prompt(*args, **kwargs),
+            logger=logger,
+        )
+    )
+
+
+def require_llm_provider() -> OpenAICompatibleProvider:
+    provider = OpenAICompatibleProvider()
+    if not provider.config.llm.api_key:
+        raise HTTPException(status_code=400, detail="未配置 LLM API key")
+    return provider
 
 
 def parse_manual_characters(raw: str | None) -> list[CharacterCard]:
@@ -874,7 +846,7 @@ def polish_shots_with_llm(
     def polish_one(shot: Shot) -> Shot:
         try:
             return polish_shot_prompt(shot, cards, provider, purpose=f"pipeline:{run_id}:polish_shot:{shot.id}")
-        except Exception as exc:  # Defensive: one bad item should not discard the storyboard.
+        except Exception as exc:  # 单条数据异常时保留其余分镜，避免整组结果被丢弃。
             logger.warning("pipeline llm shot polish item failed shot_id=%s error=%s", shot.id, exc)
             shot.qa_notes.append(f"LLM 分镜精修失败，已保留本地 prompt：{exc}")
             return shot
@@ -970,6 +942,8 @@ def parse_scene_payload(items: list[dict[str, Any]]) -> list[Scene]:
                 mood=safe_string_list(item.get("mood")),
                 visual_type=str(item.get("visual_type") or ""),
                 visual_priority=safe_int(item.get("visual_priority"), 1),
+                source_start=safe_optional_int(item.get("source_start")),
+                source_end=safe_optional_int(item.get("source_end")),
             )
         )
     return scenes
@@ -980,6 +954,13 @@ def safe_int(value: object, fallback: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def safe_optional_int(value: object) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def safe_string_list(value: object) -> list[str]:
@@ -1056,8 +1037,24 @@ def select_image_version(request: ImageVersionRequest) -> dict[str, Any]:
     return payload
 
 
+@app.post("/api/images/task", status_code=status.HTTP_202_ACCEPTED)
+def create_image_task(request: ImageRequest) -> dict[str, Any]:
+    def work(reporter: TaskReporter) -> dict[str, Any]:
+        reporter.update("调用图片 API", 15, f"正在生成 {request.shot.get('id', '')} 的图片")
+        result = generate_image(request)
+        reporter.update("保存图片版本", 90, "正在更新图片及版本记录")
+        return result
+
+    task = get_task_manager().submit(request.run_id, "image", work, message="图片生成已进入队列")
+    return {"task_id": task["task_id"], "run_id": request.run_id, "task": task}
+
+
 @app.post("/api/images/batch")
 def generate_all_images(request: dict[str, Any]) -> dict[str, Any]:
+    return _generate_all_images(request)
+
+
+def _generate_all_images(request: dict[str, Any], reporter: TaskReporter | None = None) -> dict[str, Any]:
     run_id = str(request.get("run_id", "manual"))
     run_dir = run_directory(run_id)
     size = str(request.get("size", "1024x1024"))
@@ -1067,7 +1064,11 @@ def generate_all_images(request: dict[str, Any]) -> dict[str, Any]:
     results = []
     provider = OpenAICompatibleProvider()
     logger.info("batch image generation started run_id=%s shot_count=%s size=%s retry_count=%s skip_existing=%s", run_id, len(shots), size, retry_count, skip_existing)
-    for shot in shots:
+    total = max(1, len(shots))
+    for index, shot in enumerate(shots, start=1):
+        if reporter is not None:
+            progress = 10 + int((index - 1) * 80 / total)
+            reporter.update("调用图片 API", progress, f"正在处理 {shot.id}（{index}/{len(shots)}）")
         current = current_shot_image(run_id, shot.id)
         if skip_existing and current:
             results.append(
@@ -1088,6 +1089,21 @@ def generate_all_images(request: dict[str, Any]) -> dict[str, Any]:
     logger.info("batch image generation completed run_id=%s ok_count=%s total=%s", run_id, len([item for item in results if item["ok"]]), len(results))
     write_json(run_dir / "image_results.json", {"run_id": run_id, "size": size, "retry_count": retry_count, "skip_existing": skip_existing, "results": results})
     return {"results": results}
+
+
+@app.post("/api/images/batch-task", status_code=status.HTTP_202_ACCEPTED)
+def create_batch_image_task(request: dict[str, Any]) -> dict[str, Any]:
+    run_id = str(request.get("run_id", "manual"))
+    shots = list(request.get("shots", []))
+
+    def work(reporter: TaskReporter) -> dict[str, Any]:
+        reporter.update("调用图片 API", 10, f"准备生成 {len(shots)} 张图片")
+        result = _generate_all_images(request, reporter)
+        reporter.update("保存图片版本", 95, "批量图片结果已保存")
+        return result
+
+    task = get_task_manager().submit(run_id, "image_batch", work, message="批量图片生成已进入队列")
+    return {"task_id": task["task_id"], "run_id": run_id, "task": task}
 
 
 def generate_batch_image_item(
@@ -1155,16 +1171,17 @@ def export_markdown_info(run_id: str) -> dict[str, Any]:
 
 
 def build_exported_novel(run_id: str) -> dict[str, str]:
+    repository = get_run_repository()
     run_dir = run_directory(run_id)
-    pipeline_path = run_dir / "pipeline.json"
     novel_path = run_dir / "novel.md"
-    if not pipeline_path.exists():
+    try:
+        payload = repository.load(run_id)
+    except RunNotFoundError as exc:
         logger.warning("export failed run_id=%s reason=missing_pipeline", run_id)
-        raise HTTPException(status_code=404, detail="run 不存在")
+        raise HTTPException(status_code=404, detail="run 不存在") from exc
     if not novel_path.exists():
         logger.warning("export failed run_id=%s reason=missing_novel", run_id)
         raise HTTPException(status_code=404, detail="小说原文不存在")
-    payload = json.loads(read_text(pipeline_path))
     shots = [Shot(**shot) for shot in payload.get("shots", [])]
     markdown = render_illustrated_novel(
         read_text(novel_path),
@@ -1183,10 +1200,7 @@ def build_exported_novel(run_id: str) -> dict[str, str]:
 
 
 def current_shot_image(run_id: str, shot_id: str) -> dict[str, Any] | None:
-    pipeline_path = run_directory(run_id) / "pipeline.json"
-    if not pipeline_path.exists():
-        return None
-    payload = json.loads(read_text(pipeline_path))
+    payload = get_run_repository().load(run_id, required=False)
     for shot in payload.get("shots", []):
         if shot.get("id") == shot_id:
             if shot.get("image_url") or shot.get("image_path"):
@@ -1211,67 +1225,47 @@ def versioned_url_for_path(image_url: str, path: Path) -> str:
 
 
 def update_shot_image(run_id: str, shot_id: str, image_path: str, image_url: str, activate: bool = True) -> dict[str, Any]:
-    pipeline_path = run_directory(run_id) / "pipeline.json"
-    if not pipeline_path.exists():
-        return {}
-    payload = json.loads(read_text(pipeline_path))
     result: dict[str, Any] = {}
-    for shot in payload.get("shots", []):
-        if shot.get("id") == shot_id:
-            versions = shot.setdefault("image_versions", [])
-            existing_url = shot.get("image_url")
-            existing_path = shot.get("image_path")
-            if existing_url and existing_path and not any(item.get("image_url") == existing_url for item in versions if isinstance(item, dict)):
-                versions.append(
-                    {
+    try:
+        with get_run_repository().transaction(run_id) as payload:
+            for shot in payload.get("shots", []):
+                if shot.get("id") != shot_id:
+                    continue
+                versions = shot.setdefault("image_versions", [])
+                existing_url = shot.get("image_url")
+                existing_path = shot.get("image_path")
+                if existing_url and existing_path and not any(item.get("image_url") == existing_url for item in versions if isinstance(item, dict)):
+                    versions.append({
                         "image_path": existing_path,
                         "image_url": existing_url,
                         "created_at": int(Path(str(existing_path)).stat().st_mtime) if Path(str(existing_path)).exists() else int(time.time()),
-                    }
-                )
-            if not any(item.get("image_url") == image_url for item in versions if isinstance(item, dict)):
-                versions.append(
-                    {
-                        "image_path": image_path,
-                        "image_url": image_url,
-                        "created_at": int(time.time()),
-                    }
-                )
-            if activate:
-                shot["image_path"] = image_path
-                shot["image_url"] = image_url
-            result = {
-                "shot_id": shot_id,
-                "image_path": shot.get("image_path"),
-                "image_url": shot.get("image_url"),
-                "image_versions": versions,
-            }
-    write_json(pipeline_path, payload)
+                    })
+                if not any(item.get("image_url") == image_url for item in versions if isinstance(item, dict)):
+                    versions.append({"image_path": image_path, "image_url": image_url, "created_at": int(time.time())})
+                if activate:
+                    shot["image_path"] = image_path
+                    shot["image_url"] = image_url
+                result = {"shot_id": shot_id, "image_path": shot.get("image_path"), "image_url": shot.get("image_url"), "image_versions": versions}
+    except RunNotFoundError:
+        return {}
     return result
 
 
 def activate_shot_image(run_id: str, shot_id: str, image_url: str) -> dict[str, Any]:
-    pipeline_path = run_directory(run_id) / "pipeline.json"
-    if not pipeline_path.exists():
-        raise HTTPException(status_code=404, detail="run 不存在")
-    payload = json.loads(read_text(pipeline_path))
-    for shot in payload.get("shots", []):
-        if shot.get("id") != shot_id:
-            continue
-        versions = shot.get("image_versions", [])
-        for version in versions:
-            if isinstance(version, dict) and strip_version_query(str(version.get("image_url") or "")) == strip_version_query(image_url):
-                shot["image_url"] = version.get("image_url")
-                shot["image_path"] = version.get("image_path")
-                write_json(pipeline_path, payload)
-                return {
-                    "shot_id": shot_id,
-                    "image_path": shot.get("image_path"),
-                    "image_url": versioned_url_for_path(str(shot.get("image_url")), Path(str(shot.get("image_path")))),
-                    "raw_image_url": shot.get("image_url"),
-                    "image_versions": versions,
-                }
-        raise HTTPException(status_code=404, detail="未找到该图片版本")
+    try:
+        with get_run_repository().transaction(run_id) as payload:
+            for shot in payload.get("shots", []):
+                if shot.get("id") != shot_id:
+                    continue
+                versions = shot.get("image_versions", [])
+                for version in versions:
+                    if isinstance(version, dict) and strip_version_query(str(version.get("image_url") or "")) == strip_version_query(image_url):
+                        shot["image_url"] = version.get("image_url")
+                        shot["image_path"] = version.get("image_path")
+                        return {"shot_id": shot_id, "image_path": shot.get("image_path"), "image_url": versioned_url_for_path(str(shot.get("image_url")), Path(str(shot.get("image_path")))), "raw_image_url": shot.get("image_url"), "image_versions": versions}
+                raise HTTPException(status_code=404, detail="未找到该图片版本")
+    except RunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="run 不存在") from exc
     raise HTTPException(status_code=404, detail="未找到该分镜")
 
 
@@ -1290,10 +1284,7 @@ def versioned_image_url(run_id: str, shot_id: str, target: Path) -> str:
 
 def reference_image_entries_for_shot(run_id: str, shot: Shot) -> list[tuple[str, list[Path]]]:
     run_dir = run_directory(run_id)
-    pipeline_path = run_dir / "pipeline.json"
-    if not pipeline_path.exists():
-        return []
-    payload = json.loads(read_text(pipeline_path))
+    payload = get_run_repository().load(run_id, required=False)
     characters = {
         str(character.get("name")): character
         for character in payload.get("characters", [])
@@ -1413,3 +1404,9 @@ def hydrate_provider_secret(source: dict[str, Any]) -> dict[str, Any]:
             item["api_key"] = stored.get("api_key") or ""
             break
     return item
+
+
+# 在兼容依赖定义完成后注册功能 router。controller 负责 HTTP endpoint；
+# 上方保留的函数为现有调用方和测试提供稳定的 Python API。
+_storyboard_http_controller = get_storyboard_controller()
+app.include_router(_storyboard_http_controller.router)

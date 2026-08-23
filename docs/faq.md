@@ -109,6 +109,12 @@ Stop-Process -Id <PID> -Force
 
 DeepSeek 会优先请求 `/responses`。只有服务端返回明确的接口错误时才回退 `/chat/completions`；超时、连接失败、鉴权失败或限流不会回退，避免同一任务被重复提交。
 
+结构化任务会使用 DeepSeek Responses API 的 `text.format=json_object` 模式。由于 `max_output_tokens` 同时计算推理与最终回答，FicFrame 会为长 JSON 设置独立上限；服务端返回 `incomplete` 时会保留本地结果并显示明确原因。
+
+### 为什么恢复分镜或 Prompt 后没有新增历史版本？
+
+分镜历史按不含图片字段的完整文本快照去重。恢复前的当前内容尚未出现在历史中时，系统会先归档，便于之后撤销；如果相同内容已经存在，则复用已有历史，不再制造一模一样的版本。图片和图片版本不参与文本快照比较，也不会因恢复操作被覆盖。
+
 ## 发布
 
 ### PR 合并后为什么没有自动创建 Release？
