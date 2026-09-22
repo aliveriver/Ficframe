@@ -71,6 +71,10 @@ const el = {
   shotCamera: document.querySelector("#shotCamera"),
   shotComposition: document.querySelector("#shotComposition"),
   shotVisualGoal: document.querySelector("#shotVisualGoal"),
+  htmlImagePosition: document.querySelector("#htmlImagePosition"),
+  htmlImageWidth: document.querySelector("#htmlImageWidth"),
+  htmlImageCustomWidth: document.querySelector("#htmlImageCustomWidth"),
+  htmlImageCaption: document.querySelector("#htmlImageCaption"),
   shotSourceExcerpt: document.querySelector("#shotSourceExcerpt"),
   storyboardVersionCount: document.querySelector("#storyboardVersionCount"),
   storyboardVersions: document.querySelector("#storyboardVersions"),
@@ -91,11 +95,20 @@ const el = {
   allImagesBtn: document.querySelector("#allImagesBtn"),
   retryFailedBtn: document.querySelector("#retryFailedBtn"),
   exportBtn: document.querySelector("#exportBtn"),
+  exportHtmlBtn: document.querySelector("#exportHtmlBtn"),
+  exportZipBtn: document.querySelector("#exportZipBtn"),
   skipExistingImages: document.querySelector("#skipExistingImages"),
   imageRetryCount: document.querySelector("#imageRetryCount"),
   preview: document.querySelector("#preview"),
   imageVersions: document.querySelector("#imageVersions"),
   qaBox: document.querySelector("#qaBox"),
+  htmlFontFamily: document.querySelector("#htmlFontFamily"),
+  htmlHeadingFontFamily: document.querySelector("#htmlHeadingFontFamily"),
+  htmlFontSize: document.querySelector("#htmlFontSize"),
+  htmlLineHeight: document.querySelector("#htmlLineHeight"),
+  htmlContentWidth: document.querySelector("#htmlContentWidth"),
+  htmlTextAlign: document.querySelector("#htmlTextAlign"),
+  htmlParagraphSpacing: document.querySelector("#htmlParagraphSpacing"),
   providerList: document.querySelector("#providerList"),
   addProviderBtn: document.querySelector("#addProviderBtn"),
   deleteProviderBtn: document.querySelector("#deleteProviderBtn"),
@@ -200,6 +213,7 @@ function saveWorkspaceDraft() {
   saveSelectedPrompt();
   saveShotEditor();
   saveCharacterEditor();
+  saveHtmlSettings();
   workspaceState.saveDraft(localStorage, WORKSPACE_KEY, state);
 }
 
@@ -235,9 +249,11 @@ function hydrateWorkspace(payload, preferredShotId = null) {
   state.storyboardMessages = payload.storyboardMessages || payload.storyboard_messages || [];
   state.promptFeedbackMessages = payload.promptFeedbackMessages || payload.prompt_feedback_messages || [];
   state.storyboardVersions = payload.storyboardVersions || payload.storyboard_versions || {};
+  state.htmlSettings = workspaceState.createHtmlSettings(payload.htmlSettings || payload.html_settings || state.htmlSettings);
   state.selectedShotIds = new Set(payload.selectedShotIds || []);
   state.selectedCharacterIndex = Math.min(payload.selectedCharacterIndex || 0, Math.max(0, state.characters.length - 1));
   el.runId.textContent = state.runId ? `run ${state.runId}` : "未运行";
+  renderHtmlSettings();
   renderCharacters();
   renderFeedbackHistory();
   renderPromptFeedbackHistory();
@@ -262,6 +278,7 @@ function clearRunArtifacts(message = "新输入已选择，请重新生成分镜
   el.promptBox.value = "";
   el.negativePromptBox.value = "";
   loadShotEditor();
+  renderHtmlSettings();
   renderStoryboardVersions();
   el.preview.innerHTML = "";
   el.imageVersions.innerHTML = "";
@@ -280,6 +297,7 @@ function clearWorkspaceForRecording(message = "") {
   el.promptBox.value = "";
   el.negativePromptBox.value = "";
   loadShotEditor();
+  renderHtmlSettings();
   renderStoryboardVersions();
   el.charactersBox.textContent = "";
   el.characterDiffBox.textContent = "";
@@ -742,6 +760,7 @@ function loadShotEditor() {
   el.shotSourceExcerpt.textContent = shot
     ? sourceReferenceSummary(shot)
     : "选择分镜后显示对应小说段落";
+  loadHtmlLayoutEditor();
 }
 
 function sourceReferenceSummary(shot) {
@@ -762,6 +781,52 @@ function saveShotEditor() {
   state.selected.camera = el.shotCamera.value.trim();
   state.selected.composition = el.shotComposition.value.trim();
   state.selected.visual_goal = el.shotVisualGoal.value.trim();
+  saveHtmlLayoutEditor();
+}
+
+function loadHtmlLayoutEditor() {
+  const layout = state.selected?.html_layout || {};
+  el.htmlImagePosition.value = layout.position || "before";
+  const presetWidths = new Set(["auto", "35%", "50%", "65%", "80%", "100%"]);
+  el.htmlImageWidth.value = presetWidths.has(layout.width) ? layout.width : "custom";
+  el.htmlImageCustomWidth.value = presetWidths.has(layout.width) ? "" : (layout.width || "");
+  el.htmlImageCaption.value = layout.caption || "";
+}
+
+function saveHtmlLayoutEditor() {
+  if (!state.selected) return;
+  state.selected.html_layout = {
+    ...(state.selected.html_layout || {}),
+    position: el.htmlImagePosition.value || "before",
+    width: el.htmlImageWidth.value === "custom"
+      ? el.htmlImageCustomWidth.value.trim()
+      : (el.htmlImageWidth.value || "100%"),
+    caption: el.htmlImageCaption.value.trim(),
+  };
+}
+
+function renderHtmlSettings() {
+  const settings = workspaceState.createHtmlSettings(state.htmlSettings);
+  state.htmlSettings = settings;
+  el.htmlFontFamily.value = settings.font_family;
+  el.htmlHeadingFontFamily.value = settings.heading_font_family;
+  el.htmlFontSize.value = settings.font_size;
+  el.htmlLineHeight.value = settings.line_height;
+  el.htmlContentWidth.value = settings.content_width;
+  el.htmlTextAlign.value = settings.text_align;
+  el.htmlParagraphSpacing.value = settings.paragraph_spacing;
+}
+
+function saveHtmlSettings() {
+  state.htmlSettings = workspaceState.createHtmlSettings({
+    font_family: el.htmlFontFamily.value,
+    heading_font_family: el.htmlHeadingFontFamily.value,
+    font_size: Number(el.htmlFontSize.value),
+    line_height: Number(el.htmlLineHeight.value),
+    content_width: Number(el.htmlContentWidth.value),
+    text_align: el.htmlTextAlign.value,
+    paragraph_spacing: Number(el.htmlParagraphSpacing.value),
+  });
 }
 
 function renderStoryboardVersions() {
@@ -1220,12 +1285,15 @@ async function persistStoryboard({ quiet = false } = {}) {
   if (!state.runId) return;
   saveSelectedPrompt();
   saveShotEditor();
+  saveHtmlSettings();
   const preferredId = state.selected?.id || null;
-  const data = await storyboardClient.save(state.runId, state.shots);
+  const data = await storyboardClient.save(state.runId, state.shots, state.htmlSettings);
   state.shots = data.shots || state.shots;
   state.storyboardMessages = data.storyboard_messages || state.storyboardMessages;
   state.promptFeedbackMessages = data.prompt_feedback_messages || state.promptFeedbackMessages;
   state.storyboardVersions = data.storyboard_versions || state.storyboardVersions;
+  state.htmlSettings = workspaceState.createHtmlSettings(data.html_settings || state.htmlSettings);
+  renderHtmlSettings();
   renderShots(preferredId);
   renderFeedbackHistory();
   renderPromptFeedbackHistory();
@@ -1402,6 +1470,7 @@ async function runPipeline() {
     state.storyboardMessages = data.storyboard_messages || [];
     state.promptFeedbackMessages = data.prompt_feedback_messages || [];
     state.storyboardVersions = data.storyboard_versions || {};
+    state.htmlSettings = workspaceState.createHtmlSettings(data.html_settings);
     const partitioned = partitionCharacters(data.characters || []);
     state.autoCharacters = partitioned.auto;
     state.manualCharacters = partitioned.manual;
@@ -1413,6 +1482,7 @@ async function runPipeline() {
     renderCharacters();
     renderFeedbackHistory();
     renderPromptFeedbackHistory();
+    renderHtmlSettings();
     renderShots(state.selected?.id);
     saveWorkspaceDraft();
     el.health.textContent = `已生成 ${state.shots.length} 张分镜`;
@@ -1428,8 +1498,9 @@ async function exportMarkdown() {
   saveSelectedPrompt();
   saveCharacterEditor();
   try {
+    await persistStoryboard({ quiet: true });
     const data = await api(`/api/export/${state.runId}`);
-    const response = await fetch(data.markdown_url);
+    const response = await fetch(data.export_markdown_url || data.markdown_url);
     const markdown = await response.text();
     const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -1439,9 +1510,68 @@ async function exportMarkdown() {
     link.click();
     URL.revokeObjectURL(url);
     el.health.textContent = "配图小说 MD 已导出";
-    el.qaBox.textContent = `已保存到：${data.markdown_path}\n图片路径相对于该 Markdown 所在目录。`;
+    el.qaBox.textContent = `已生成目录：${data.export_dir}\n图片目录：${data.images_dir}\n图片路径相对于该 Markdown 所在目录。`;
   } catch (error) {
     el.health.textContent = `导出失败：${error.message}`;
+  }
+}
+
+async function exportZip() {
+  if (!state.runId) return;
+  saveSelectedPrompt();
+  saveCharacterEditor();
+  setBusy(el.exportZipBtn, true);
+  try {
+    await persistStoryboard({ quiet: true });
+    const response = await fetch(`/api/export/${encodeURIComponent(state.runId)}.zip`);
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || response.statusText);
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("content-disposition") || "";
+    const match = disposition.match(/filename="?([^";]+)"?/);
+    const filename = match?.[1] || `illustrated_novel-${state.runId}.zip`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(url);
+    el.health.textContent = "ZIP 成品包已导出";
+    el.qaBox.textContent = "ZIP 包包含 illustrated_novel.md、images/、manifest.json 和字体/主题说明。";
+  } catch (error) {
+    el.health.textContent = `ZIP 导出失败：${error.message}`;
+  } finally {
+    setBusy(el.exportZipBtn, false);
+  }
+}
+
+async function exportHtml() {
+  if (!state.runId) return;
+  saveSelectedPrompt();
+  saveShotEditor();
+  saveHtmlSettings();
+  setBusy(el.exportHtmlBtn, true);
+  try {
+    await persistStoryboard({ quiet: true });
+    const data = await api(`/api/export/${state.runId}`);
+    const response = await fetch(data.export_html_url || data.html_url);
+    if (!response.ok) throw new Error(response.statusText);
+    const htmlDocument = await response.text();
+    const blob = new Blob([htmlDocument], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `illustrated_novel-${state.runId}.html`;
+    link.click();
+    URL.revokeObjectURL(url);
+    el.health.textContent = "配图小说 HTML 已导出";
+    el.qaBox.textContent = `HTML 已生成：${data.export_dir}\nHTML 使用相对 images/ 路径；建议移动整个 export/ 目录。`;
+  } catch (error) {
+    el.health.textContent = `HTML 导出失败：${error.message}`;
+  } finally {
+    setBusy(el.exportHtmlBtn, false);
   }
 }
 
@@ -1656,6 +1786,26 @@ for (const node of [el.shotTitle, el.shotLocation, el.shotTime, el.shotCharacter
     scheduleWorkspaceDraftSave();
   });
 }
+for (const node of [el.htmlImagePosition, el.htmlImageWidth, el.htmlImageCustomWidth, el.htmlImageCaption]) {
+  node.addEventListener("input", () => {
+    saveHtmlLayoutEditor();
+    scheduleWorkspaceDraftSave();
+  });
+  node.addEventListener("change", () => {
+    saveHtmlLayoutEditor();
+    scheduleWorkspaceDraftSave();
+  });
+}
+for (const node of [el.htmlFontFamily, el.htmlHeadingFontFamily, el.htmlFontSize, el.htmlLineHeight, el.htmlContentWidth, el.htmlTextAlign, el.htmlParagraphSpacing]) {
+  node.addEventListener("input", () => {
+    saveHtmlSettings();
+    scheduleWorkspaceDraftSave();
+  });
+  node.addEventListener("change", () => {
+    saveHtmlSettings();
+    scheduleWorkspaceDraftSave();
+  });
+}
 
 el.characterEditorSelect.addEventListener("change", () => {
   saveCharacterEditor();
@@ -1689,6 +1839,8 @@ el.selectedImagesBtn.addEventListener("click", imageWorkflow.generateSelected);
 el.allImagesBtn.addEventListener("click", imageWorkflow.generateAll);
 el.retryFailedBtn.addEventListener("click", imageWorkflow.retryFailed);
 el.exportBtn.addEventListener("click", exportMarkdown);
+el.exportHtmlBtn.addEventListener("click", exportHtml);
+el.exportZipBtn.addEventListener("click", exportZip);
 el.copyBtn.addEventListener("click", async () => {
   saveSelectedPrompt();
   await navigator.clipboard.writeText(el.promptBox.value);
@@ -1744,6 +1896,7 @@ el.feedbackInput.addEventListener("keydown", (event) => {
 
 window.addEventListener("beforeunload", saveWorkspaceDraft);
 
+renderHtmlSettings();
 loadConfig().catch((error) => {
   el.health.textContent = error.message;
 });

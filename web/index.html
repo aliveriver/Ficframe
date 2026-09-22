@@ -382,6 +382,41 @@
               <span>生成依据</span>
               <p id="shotSourceExcerpt">选择分镜后显示对应小说段落</p>
             </div>
+            <fieldset class="html-layout-panel span-2">
+              <legend>HTML 图片布局</legend>
+              <div class="inline-fields">
+                <label>
+                  <span>与正文关系</span>
+                  <select id="htmlImagePosition">
+                    <option value="before">正文前</option>
+                    <option value="after">正文后</option>
+                    <option value="left">左侧环绕</option>
+                    <option value="right">右侧环绕</option>
+                    <option value="inline">行内显示</option>
+                  </select>
+                </label>
+                <label>
+                  <span>图片宽度</span>
+                  <select id="htmlImageWidth">
+                    <option value="100%">100%</option>
+                    <option value="80%">80%</option>
+                    <option value="65%">65%</option>
+                    <option value="50%">50%</option>
+                    <option value="35%">35%</option>
+                    <option value="auto">原始比例</option>
+                    <option value="custom">自定义</option>
+                  </select>
+                </label>
+                <label>
+                  <span>图片说明</span>
+                  <input id="htmlImageCaption" placeholder="可选图注" />
+                </label>
+                <label>
+                  <span>自定义宽度</span>
+                  <input id="htmlImageCustomWidth" placeholder="例如 420px 或 72%" />
+                </label>
+              </div>
+            </fieldset>
             <section class="storyboard-version-panel span-2">
               <div class="section-head tight">
                 <h3>分镜版本</h3>
@@ -443,7 +478,54 @@
               </div>
             </details>
             <button id="exportBtn" type="button">导出小说 MD</button>
+            <button id="exportHtmlBtn" type="button">导出 HTML</button>
+            <button id="exportZipBtn" type="button">导出 ZIP 成品包</button>
           </div>
+          <details class="panel-disclosure">
+            <summary>HTML 文本设置</summary>
+            <div class="batch-options html-text-options">
+              <label>
+                <span>正文</span>
+                <select id="htmlFontFamily">
+                  <option value="sans">无衬线</option>
+                  <option value="serif">衬线</option>
+                  <option value="system">系统字体</option>
+                </select>
+              </label>
+              <label>
+                <span>标题</span>
+                <select id="htmlHeadingFontFamily">
+                  <option value="serif">衬线</option>
+                  <option value="sans">无衬线</option>
+                  <option value="system">系统字体</option>
+                </select>
+              </label>
+              <label>
+                <span>字号（px）</span>
+                <input id="htmlFontSize" type="number" min="14" max="30" step="1" />
+              </label>
+              <label>
+                <span>行高</span>
+                <input id="htmlLineHeight" type="number" min="1.3" max="2.6" step="0.1" />
+              </label>
+              <label>
+                <span>正文宽度（px）</span>
+                <input id="htmlContentWidth" type="number" min="560" max="1400" step="10" />
+              </label>
+              <label>
+                <span>段落对齐</span>
+                <select id="htmlTextAlign">
+                  <option value="left">左对齐</option>
+                  <option value="justify">两端对齐</option>
+                  <option value="center">居中</option>
+                </select>
+              </label>
+              <label>
+                <span>段落间距（em）</span>
+                <input id="htmlParagraphSpacing" type="number" min="0.4" max="2.4" step="0.1" />
+              </label>
+            </div>
+          </details>
           <details class="panel-disclosure">
             <summary>批量图片设置</summary>
             <div class="batch-options">

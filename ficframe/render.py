@@ -1,8 +1,25 @@
 from __future__ import annotations
 
+import html
+import re
 from typing import Any
 
 from .models import Shot
+
+
+DEFAULT_HTML_SETTINGS: dict[str, Any] = {
+    "font_family": "sans",
+    "heading_font_family": "serif",
+    "font_size": 18,
+    "line_height": 1.9,
+    "content_width": 920,
+    "text_align": "left",
+    "paragraph_spacing": 1.0,
+}
+
+HTML_IMAGE_POSITIONS = {"before", "after", "left", "right", "inline"}
+HTML_IMAGE_WIDTHS = {"auto", "35%", "50%", "65%", "80%", "100%"}
+HTML_IMAGE_CUSTOM_WIDTH = re.compile(r"^(?:\d{1,4}(?:\.\d+)?)(?:%|px|rem|em|vw)$")
 
 
 def render_storyboard(shots: list[Shot]) -> str:
@@ -128,6 +145,218 @@ def render_illustrated_novel(
             lines.extend([f"![{shot.id}]({image_ref})", "", shot.source_excerpt, ""])
 
     return "\n".join(lines).strip() + "\n"
+
+
+def render_illustrated_html(
+    novel_text: str,
+    scenes: list[dict[str, Any]],
+    shots: list[Shot],
+    run_id: str,
+    title: str | None = None,
+    html_settings: dict[str, Any] | None = None,
+) -> str:
+    """Render the same illustrated document as a portable, dependency-free HTML file."""
+    markdown = render_illustrated_novel(novel_text, scenes, shots, run_id, title=title)
+    document_title = title or extract_title(novel_text)
+    layouts = {shot.id: normalize_html_layout(shot.html_layout) for shot in shots}
+    return render_html_document(markdown, document_title, html_settings, layouts)
+
+
+def render_html_document(
+    markdown: str,
+    title: str,
+    html_settings: dict[str, Any] | None = None,
+    image_layouts: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    settings = normalize_html_settings(html_settings)
+    body = markdown_to_html(markdown, image_layouts=image_layouts)
+    font_family = {
+        "sans": '"Noto Sans CJK SC", "Microsoft YaHei", "Segoe UI", sans-serif',
+        "serif": '"Noto Serif CJK SC", SimSun, STSong, serif',
+        "system": 'system-ui, sans-serif',
+    }[settings["font_family"]]
+    heading_font_family = {
+        "sans": '"Noto Sans CJK SC", "Microsoft YaHei", "Segoe UI", sans-serif',
+        "serif": '"Noto Serif CJK SC", SimSun, STSong, serif',
+        "system": 'system-ui, sans-serif',
+    }[settings["heading_font_family"]]
+    return f'''<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(title)}</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --paper: #f7f8f6;
+      --ink: #202629;
+      --muted: #687276;
+      --rule: #d9dfdd;
+      --accent: #267b7c;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      background: var(--paper);
+      color: var(--ink);
+      font-family: {font_family};
+      font-size: {settings["font_size"]}px;
+      line-height: {settings["line_height"]};
+      margin: 0;
+      text-align: {settings["text_align"]};
+    }}
+    main {{ margin: 0 auto; max-width: {settings["content_width"]}px; padding: 48px 24px 72px; }}
+    h1, h2, h3, h4, h5, h6 {{
+      color: var(--ink);
+      font-family: {heading_font_family};
+      line-height: 1.35;
+      margin: 1.8em 0 .7em;
+    }}
+    h1 {{ border-bottom: 1px solid var(--rule); font-size: 2.2rem; margin-top: 0; padding-bottom: .45em; }}
+    h2 {{ font-size: 1.7rem; }}
+    h3 {{ font-size: 1.35rem; }}
+    p {{ margin: {settings["paragraph_spacing"]}em 0; white-space: pre-wrap; }}
+    ul {{ padding-left: 1.5em; }}
+    blockquote {{ border-left: 4px solid var(--accent); color: var(--muted); margin: 1.2em 0; padding: .2em 1em; }}
+    figure {{ margin: 2em 0; text-align: center; }}
+    figure.image-left, figure.image-right {{ max-width: 50%; }}
+    figure.image-left {{ float: left; margin: .6em 1.5em 1em 0; }}
+    figure.image-right {{ float: right; margin: .6em 0 1em 1.5em; }}
+    figure.image-inline {{ display: inline-block; margin: 1em .5em; vertical-align: middle; }}
+    figure.image-after {{ clear: both; }}
+    figure img {{ border-radius: 6px; display: block; height: auto; margin: 0 auto; max-width: 100%; }}
+    figcaption {{ color: var(--muted); font-size: .9rem; margin-top: .55em; }}
+    @media (max-width: 640px) {{ main {{ padding: 28px 16px 48px; }} h1 {{ font-size: 1.8rem; }} }}
+  </style>
+</head>
+<body>
+  <main>
+{body}
+  </main>
+</body>
+</html>
+'''
+
+
+def normalize_html_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    source = settings if isinstance(settings, dict) else {}
+    result = dict(DEFAULT_HTML_SETTINGS)
+    if source.get("font_family") in {"sans", "serif", "system"}:
+        result["font_family"] = source["font_family"]
+    if source.get("heading_font_family") in {"sans", "serif", "system"}:
+        result["heading_font_family"] = source["heading_font_family"]
+    if source.get("text_align") in {"left", "justify", "center"}:
+        result["text_align"] = source["text_align"]
+    result["font_size"] = _bounded_number(source.get("font_size"), 14, 30, 18, integer=True)
+    result["line_height"] = _bounded_number(source.get("line_height"), 1.3, 2.6, 1.9)
+    result["content_width"] = _bounded_number(source.get("content_width"), 560, 1400, 920, integer=True)
+    result["paragraph_spacing"] = _bounded_number(source.get("paragraph_spacing"), 0.4, 2.4, 1.0)
+    return result
+
+
+def normalize_html_layout(layout: dict[str, Any] | None = None) -> dict[str, Any]:
+    source = layout if isinstance(layout, dict) else {}
+    position = source.get("position") if source.get("position") in HTML_IMAGE_POSITIONS else "before"
+    width = str(source.get("width") or "100%")
+    if width not in HTML_IMAGE_WIDTHS and not HTML_IMAGE_CUSTOM_WIDTH.fullmatch(width):
+        width = "100%"
+    caption = str(source.get("caption") or "").strip()[:200]
+    return {"position": position, "width": width, "caption": caption}
+
+
+def _bounded_number(value: Any, minimum: float, maximum: float, fallback: float, integer: bool = False) -> int | float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = fallback
+    number = max(minimum, min(maximum, number))
+    return int(number) if integer else round(number, 2)
+
+
+def markdown_to_html(markdown: str, image_layouts: dict[str, dict[str, Any]] | None = None) -> str:
+    """Convert the small Markdown subset produced by the exporter to safe HTML."""
+    lines = markdown.replace("\r\n", "\n").split("\n")
+    output: list[str] = []
+    paragraph: list[str] = []
+    list_items: list[str] = []
+    pending_after: list[str] = []
+    layouts = image_layouts or {}
+    image_pattern = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)$")
+    heading_pattern = re.compile(r"^(#{1,6})\s+(.+)$")
+    list_pattern = re.compile(r"^[-*+]\s+(.+)$")
+
+    def flush_paragraph() -> None:
+        if paragraph:
+            content = "\n".join(paragraph)
+            output.append(f"<p>{html.escape(content)}</p>")
+            paragraph.clear()
+            flush_pending_after()
+
+    def flush_list() -> None:
+        if list_items:
+            output.append("<ul>" + "".join(f"<li>{item}</li>" for item in list_items) + "</ul>")
+            list_items.clear()
+            flush_pending_after()
+
+    def flush_pending_after() -> None:
+        if pending_after:
+            output.extend(pending_after)
+            pending_after.clear()
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            flush_paragraph()
+            flush_list()
+            continue
+        image_match = image_pattern.fullmatch(line)
+        if image_match:
+            flush_paragraph()
+            flush_list()
+            alt, source = image_match.groups()
+            layout = normalize_html_layout(layouts.get(alt))
+            caption = layout["caption"] or alt
+            figure = (
+                '<figure class="image-{position}" style="width: {width}"><img src="{source}" alt="{alt}" '
+                'loading="lazy"><figcaption>{caption}</figcaption></figure>'
+            ).format(
+                position=layout["position"],
+                width=html.escape(layout["width"], quote=True),
+                source=html.escape(source, quote=True),
+                alt=html.escape(alt, quote=True),
+                caption=html.escape(caption),
+            )
+            if layout["position"] == "after":
+                pending_after.append(figure)
+            else:
+                output.append(figure)
+            continue
+        heading_match = heading_pattern.fullmatch(line)
+        if heading_match:
+            flush_paragraph()
+            flush_list()
+            level = len(heading_match.group(1))
+            output.append(f"<h{level}>{html.escape(heading_match.group(2))}</h{level}>")
+            flush_pending_after()
+            continue
+        list_match = list_pattern.fullmatch(line)
+        if list_match:
+            flush_paragraph()
+            list_items.append(html.escape(list_match.group(1)))
+            continue
+        if line.startswith("> "):
+            flush_paragraph()
+            flush_list()
+            output.append(f"<blockquote>{html.escape(line[2:])}</blockquote>")
+            flush_pending_after()
+            continue
+        flush_list()
+        paragraph.append(raw_line.strip())
+
+    flush_paragraph()
+    flush_list()
+    flush_pending_after()
+    return "\n".join(output)
 
 
 def insert_images_into_original_text(

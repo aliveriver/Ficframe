@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from .continuity import initial_state
 from .models import CharacterCard, Scene, Shot, to_dict
+from .render import normalize_html_settings
 from .providers import ProviderError
 from .run_repository import RunNotFoundError, RunRepository
 from .segmenter import detect_characters, detect_location, detect_mood, detect_time, make_summary, priority, visual_type
@@ -29,6 +30,7 @@ from .storyboard_workflow import (
 class StoryboardSaveRequest(BaseModel):
     run_id: str
     shots: list[dict[str, Any]] = Field(default_factory=list)
+    html_settings: dict[str, Any] | None = None
 
 
 class StoryboardGenerateRequest(BaseModel):
@@ -113,6 +115,8 @@ class StoryboardController:
             if changed_items:
                 archive_storyboard_versions(payload, changed_items, reason="保存修改或删除前的版本", source="manual_edit")
             payload["shots"] = saved
+            if request.html_settings is not None:
+                payload["html_settings"] = normalize_html_settings(request.html_settings)
             result = self._storyboard_result(payload, shots=saved)
         self.dependencies.logger.info("storyboard saved run_id=%s shot_count=%s", request.run_id, len(saved))
         return result
@@ -375,6 +379,7 @@ class StoryboardController:
             "storyboard_messages": payload.get("storyboard_messages", []),
             "prompt_feedback_messages": payload.get("prompt_feedback_messages", []),
             "storyboard_versions": payload.get("storyboard_versions", {}),
+            "html_settings": normalize_html_settings(payload.get("html_settings")),
         }
 
     @staticmethod

@@ -277,7 +277,15 @@ FicFrame 不限制角色和参考图数量，但机器的实际资源仍然构�
 
 ### 导出的 Markdown 图片打不开
 
-请保持 `illustrated_novel.md` 和同目录下 `images/` 文件夹的相对位置不变。
+请保持 `illustrated_novel.md` 和同目录下 `images/` 文件夹的相对位置不变。Web 中点击 `导出 ZIP 成品包` 可以一次性得到正确目录结构；解压后不要单独移动 Markdown 文件。
+
+### Markdown 导出和 ZIP 成品包有什么区别
+
+`导出小说 MD` 下载 Markdown 文本，同时在 run 的 `export/` 目录生成 Markdown 与 `images/` 图片目录。`导出 ZIP 成品包` 会把这份目录打包，并额外包含 `manifest.json`、`THEME.md` 和 `theme.json`，其中 manifest 记录图片、SHA-256、缺失图片和导出版本信息。
+
+### HTML 导出可以调整什么
+
+在分镜详情的 `HTML 图片布局` 中，可以为每张图片设置正文前、正文后、左侧环绕、右侧环绕或行内显示，并选择图片宽度和图注。在 `HTML 文本设置` 中，可以设置正文/标题字体、字号、行高、正文最大宽度、段落间距和对齐方式。设置会保存到当前 run，并同时应用于单独 HTML 和 ZIP 成品包中的 HTML。
 
 ### 如何反馈问题？
 
