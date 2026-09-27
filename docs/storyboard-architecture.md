@@ -17,6 +17,7 @@
 | `ficframe/storyboard.py` | 不依赖 LLM 的基础分镜构建与场景选择 |
 | `ficframe/render.py` | `storyboard.md`、`prompts.md` 和图文小说正文投影 |
 | `ficframe/export.py` | 生成可携带的 Markdown + `images/` 目录、`manifest.json`、主题说明和 ZIP 成品包 |
+| `web/html_visual_editor.js` | HTML 成品预览中的图片选择、拖动定位、缩放和文本样式实时映射 |
 
 `pipeline.json` 是当前 run 的唯一规范状态。`storyboard.md` 和 `prompts.md` 是可重新生成的阅读投影，不应反向作为数据源。
 

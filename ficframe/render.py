@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 from typing import Any
 
@@ -10,6 +11,8 @@ from .models import Shot
 DEFAULT_HTML_SETTINGS: dict[str, Any] = {
     "font_family": "sans",
     "heading_font_family": "serif",
+    "body_font_name": "",
+    "heading_font_name": "",
     "font_size": 18,
     "line_height": 1.9,
     "content_width": 920,
@@ -18,6 +21,8 @@ DEFAULT_HTML_SETTINGS: dict[str, Any] = {
 }
 
 HTML_IMAGE_POSITIONS = {"before", "after", "left", "right", "inline"}
+HTML_IMAGE_ALIGNMENTS = {"left", "center", "right"}
+HTML_IMAGE_WRAPS = {"none", "left", "right"}
 HTML_IMAGE_WIDTHS = {"auto", "35%", "50%", "65%", "80%", "100%"}
 HTML_IMAGE_CUSTOM_WIDTH = re.compile(r"^(?:\d{1,4}(?:\.\d+)?)(?:%|px|rem|em|vw)$")
 
@@ -170,16 +175,8 @@ def render_html_document(
 ) -> str:
     settings = normalize_html_settings(html_settings)
     body = markdown_to_html(markdown, image_layouts=image_layouts)
-    font_family = {
-        "sans": '"Noto Sans CJK SC", "Microsoft YaHei", "Segoe UI", sans-serif',
-        "serif": '"Noto Serif CJK SC", SimSun, STSong, serif',
-        "system": 'system-ui, sans-serif',
-    }[settings["font_family"]]
-    heading_font_family = {
-        "sans": '"Noto Sans CJK SC", "Microsoft YaHei", "Segoe UI", sans-serif',
-        "serif": '"Noto Serif CJK SC", SimSun, STSong, serif',
-        "system": 'system-ui, sans-serif',
-    }[settings["heading_font_family"]]
+    font_family = _font_family_css(settings["font_family"], settings["body_font_name"])
+    heading_font_family = _font_family_css(settings["heading_font_family"], settings["heading_font_name"])
     return f'''<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -203,7 +200,6 @@ def render_html_document(
       font-size: {settings["font_size"]}px;
       line-height: {settings["line_height"]};
       margin: 0;
-      text-align: {settings["text_align"]};
     }}
     main {{ margin: 0 auto; max-width: {settings["content_width"]}px; padding: 48px 24px 72px; }}
     h1, h2, h3, h4, h5, h6 {{
@@ -216,17 +212,24 @@ def render_html_document(
     h2 {{ font-size: 1.7rem; }}
     h3 {{ font-size: 1.35rem; }}
     p {{ margin: {settings["paragraph_spacing"]}em 0; white-space: pre-wrap; }}
+    p, ul, blockquote {{ text-align: {settings["text_align"]}; }}
     ul {{ padding-left: 1.5em; }}
     blockquote {{ border-left: 4px solid var(--accent); color: var(--muted); margin: 1.2em 0; padding: .2em 1em; }}
     figure {{ margin: 2em 0; text-align: center; }}
-    figure.image-left, figure.image-right {{ max-width: 50%; }}
-    figure.image-left {{ float: left; margin: .6em 1.5em 1em 0; }}
-    figure.image-right {{ float: right; margin: .6em 0 1em 1.5em; }}
-    figure.image-inline {{ display: inline-block; margin: 1em .5em; vertical-align: middle; }}
+    figure.image-align-left {{ margin-left: 0; margin-right: auto; text-align: left; }}
+    figure.image-align-center {{ margin-left: auto; margin-right: auto; text-align: center; }}
+    figure.image-align-right {{ margin-left: auto; margin-right: 0; text-align: right; }}
+    figure.image-wrap-left {{ float: left; margin: .6em 1.5em 1em 0; }}
+    figure.image-wrap-right {{ float: right; margin: .6em 0 1em 1.5em; }}
+    figure.image-inline {{ display: block; }}
     figure.image-after {{ clear: both; }}
     figure img {{ border-radius: 6px; display: block; height: auto; margin: 0 auto; max-width: 100%; }}
     figcaption {{ color: var(--muted); font-size: .9rem; margin-top: .55em; }}
-    @media (max-width: 640px) {{ main {{ padding: 28px 16px 48px; }} h1 {{ font-size: 1.8rem; }} }}
+    @media (max-width: 640px) {{
+      main {{ padding: 28px 16px 48px; }}
+      h1 {{ font-size: 1.8rem; }}
+      figure.image-wrap-left, figure.image-wrap-right {{ float: none; margin: 1.4em auto; max-width: 100%; width: 100% !important; }}
+    }}
   </style>
 </head>
 <body>
@@ -245,6 +248,8 @@ def normalize_html_settings(settings: dict[str, Any] | None = None) -> dict[str,
         result["font_family"] = source["font_family"]
     if source.get("heading_font_family") in {"sans", "serif", "system"}:
         result["heading_font_family"] = source["heading_font_family"]
+    result["body_font_name"] = _safe_font_name(source.get("body_font_name"))
+    result["heading_font_name"] = _safe_font_name(source.get("heading_font_name"))
     if source.get("text_align") in {"left", "justify", "center"}:
         result["text_align"] = source["text_align"]
     result["font_size"] = _bounded_number(source.get("font_size"), 14, 30, 18, integer=True)
@@ -254,14 +259,33 @@ def normalize_html_settings(settings: dict[str, Any] | None = None) -> dict[str,
     return result
 
 
+def _safe_font_name(value: Any) -> str:
+    name = str(value or "").strip()[:80]
+    return name if re.fullmatch(r"[\w .+\-]{1,80}", name) else ""
+
+
+def _font_family_css(preset: str, custom_name: str = "") -> str:
+    stacks = {
+        "sans": '"Noto Sans CJK SC", "Microsoft YaHei", "Segoe UI", sans-serif',
+        "serif": '"Noto Serif CJK SC", SimSun, STSong, serif',
+        "system": 'system-ui, sans-serif',
+    }
+    fallback = stacks.get(preset, stacks["sans"])
+    return f"{json.dumps(custom_name, ensure_ascii=False)}, {fallback}" if custom_name else fallback
+
+
 def normalize_html_layout(layout: dict[str, Any] | None = None) -> dict[str, Any]:
     source = layout if isinstance(layout, dict) else {}
-    position = source.get("position") if source.get("position") in HTML_IMAGE_POSITIONS else "before"
+    raw_position = source.get("position") if source.get("position") in HTML_IMAGE_POSITIONS else "before"
+    position = "before" if raw_position in {"left", "right"} else raw_position
+    alignment = source.get("alignment") if source.get("alignment") in HTML_IMAGE_ALIGNMENTS else "center"
+    legacy_wrap = raw_position if raw_position in {"left", "right"} else "none"
+    wrap = source.get("wrap") if source.get("wrap") in HTML_IMAGE_WRAPS else legacy_wrap
     width = str(source.get("width") or "100%")
     if width not in HTML_IMAGE_WIDTHS and not HTML_IMAGE_CUSTOM_WIDTH.fullmatch(width):
         width = "100%"
     caption = str(source.get("caption") or "").strip()[:200]
-    return {"position": position, "width": width, "caption": caption}
+    return {"position": position, "alignment": alignment, "wrap": wrap, "width": width, "caption": caption}
 
 
 def _bounded_number(value: Any, minimum: float, maximum: float, fallback: float, integer: bool = False) -> int | float:
@@ -315,16 +339,26 @@ def markdown_to_html(markdown: str, image_layouts: dict[str, dict[str, Any]] | N
             flush_list()
             alt, source = image_match.groups()
             layout = normalize_html_layout(layouts.get(alt))
-            caption = layout["caption"] or alt
+            caption = layout["caption"]
+            caption_html = f"<figcaption>{html.escape(caption)}</figcaption>" if caption else ""
+            alignment_class = f"image-align-{layout['alignment']}"
+            wrap_class = f"image-wrap-{layout['wrap']}" if layout["wrap"] != "none" else ""
             figure = (
-                '<figure class="image-{position}" style="width: {width}"><img src="{source}" alt="{alt}" '
-                'loading="lazy"><figcaption>{caption}</figcaption></figure>'
+                '<figure class="image-{position} {alignment_class} {wrap_class}" data-shot-id="{shot_id}" '
+                'data-position="{position}" data-alignment="{alignment}" data-wrap="{wrap}" '
+                'style="width: {width}"><img src="{source}" alt="{alt}" '
+                'loading="lazy">{caption_html}</figure>'
             ).format(
                 position=layout["position"],
+                alignment=layout["alignment"],
+                wrap=layout["wrap"],
+                alignment_class=alignment_class,
+                wrap_class=wrap_class,
                 width=html.escape(layout["width"], quote=True),
                 source=html.escape(source, quote=True),
                 alt=html.escape(alt, quote=True),
-                caption=html.escape(caption),
+                shot_id=html.escape(alt, quote=True),
+                caption_html=caption_html,
             )
             if layout["position"] == "after":
                 pending_after.append(figure)

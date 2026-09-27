@@ -195,7 +195,7 @@ default = true
 <数据目录>/outputs/web-runs/<run_id>/images/
 ```
 
-每次导出还会生成一个可独立携带的 `export/` 目录。`export/illustrated_novel.md` 和 `export/illustrated_novel.html` 使用相对于自身的 `images/` 路径；移动整个 `export/` 目录即可继续阅读。HTML 支持每张图片的前后、左右环绕、行内位置和宽度，以及字体、字号、行高、正文宽度和对齐方式。ZIP 成品包包含 Markdown、HTML、当前图片、`manifest.json` 和字体/主题说明，适合备份或发布。
+每次导出还会生成一个可独立携带的 `export/` 目录。`export/illustrated_novel.md` 和 `export/illustrated_novel.html` 使用相对于自身的 `images/` 路径；移动整个 `export/` 目录即可继续阅读。点击 `可视化排版` 可以直接在成品预览中选择、拖动和缩放图片，并为每张图独立设置正文前后位置、左中右对齐、文字环绕、精确宽度和图注；全文字体与段落样式也会实时预览。字体既可选择预设，也可填写阅读设备已安装的字体名称，未安装时自动使用预设回退字体。ZIP 成品包包含 Markdown、HTML、当前图片、`manifest.json` 和字体/主题说明，适合备份或发布。
 
 ## API 供应商配置
 

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -1162,7 +1162,7 @@ def export_markdown(run_id: str) -> str:
     return result["markdown"]
 
 
-@app.get("/api/export/{run_id}.html", response_class=PlainTextResponse)
+@app.get("/api/export/{run_id}.html", response_class=HTMLResponse)
 def export_html(run_id: str) -> str:
     result = build_exported_novel(run_id)
     return result["html"]
@@ -1233,7 +1233,7 @@ def build_exported_novel(run_id: str) -> dict[str, Any]:
         bundle.zip_path,
         bundle.manifest.get("image_count", 0),
     )
-    return {"markdown": bundle.markdown, **bundle.info()}
+    return {"markdown": bundle.markdown, "html": bundle.html, **bundle.info()}
 
 
 def current_shot_image(run_id: str, shot_id: str) -> dict[str, Any] | None:

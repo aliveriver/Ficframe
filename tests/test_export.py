@@ -11,7 +11,7 @@ from ficframe import api
 from ficframe.export import build_export_bundle
 from ficframe.models import Shot
 from ficframe.models import to_dict
-from ficframe.render import normalize_html_layout, render_html_document
+from ficframe.render import normalize_html_layout, normalize_html_settings, render_html_document
 from ficframe.run_repository import RunRepository
 
 
@@ -40,24 +40,56 @@ class ExportTests(unittest.TestCase):
     def test_html_layout_accepts_custom_width_and_rejects_unsafe_width(self) -> None:
         self.assertEqual(
             normalize_html_layout({"position": "left", "width": "420px"}),
-            {"position": "left", "width": "420px", "caption": ""},
+            {"position": "before", "alignment": "center", "wrap": "left", "width": "420px", "caption": ""},
         )
         self.assertEqual(normalize_html_layout({"width": "expression(alert(1))"})["width"], "100%")
+        layout = normalize_html_layout({"alignment": "right", "wrap": "left"})
+        self.assertEqual(layout["alignment"], "right")
+        self.assertEqual(layout["wrap"], "left")
+
+    def test_html_settings_accept_safe_custom_fonts_and_reject_css_injection(self) -> None:
+        settings = normalize_html_settings({
+            "body_font_name": "霞鹜文楷",
+            "heading_font_name": "Noto Serif CJK SC",
+        })
+        self.assertEqual(settings["body_font_name"], "霞鹜文楷")
+        self.assertEqual(settings["heading_font_name"], "Noto Serif CJK SC")
+        self.assertEqual(normalize_html_settings({"body_font_name": "x; color:red"})["body_font_name"], "")
+
+        document = render_html_document("正文。", "测试", settings)
+        self.assertIn('font-family: "霞鹜文楷",', document)
+        self.assertIn('font-family: "Noto Serif CJK SC",', document)
 
     def test_html_preserves_image_order_and_escapes_text(self) -> None:
         document = render_html_document(
             "# 标题\n\n![shot_01](images/shot.png)\n\n正文 <script>alert(1)</script>。",
             "测试 <标题>",
             {"font_size": 22, "text_align": "justify"},
-            {"shot_01": {"position": "after", "width": "420px", "caption": "图 <注>"}},
+            {"shot_01": {"position": "after", "alignment": "right", "wrap": "none", "width": "420px", "caption": "图 <注>"}},
         )
         self.assertIn("font-size: 22px", document)
         self.assertIn("text-align: justify", document)
         self.assertIn('style="width: 420px"', document)
+        self.assertIn('data-shot-id="shot_01"', document)
+        self.assertIn('data-position="after"', document)
+        self.assertIn('data-alignment="right"', document)
+        self.assertIn('data-wrap="none"', document)
         self.assertIn("正文 &lt;script&gt;alert(1)&lt;/script&gt;。", document)
         self.assertIn("图 &lt;注&gt;", document)
-        self.assertLess(document.index("正文 &lt;script&gt;"), document.index('class="image-after"'))
+        self.assertLess(document.index("正文 &lt;script&gt;"), document.index('data-position="after"'))
         self.assertNotIn("<script>alert(1)</script>", document)
+
+    def test_html_omits_empty_caption_and_renders_independent_alignment_and_wrap(self) -> None:
+        document = render_html_document(
+            "![shot_01](images/shot.png)\n\n正文。",
+            "测试",
+            image_layouts={
+                "shot_01": {"position": "before", "alignment": "right", "wrap": "left", "width": "45%"}
+            },
+        )
+        self.assertIn("image-align-right", document)
+        self.assertIn("image-wrap-left", document)
+        self.assertNotIn("<figcaption>", document)
 
     def test_builds_portable_markdown_directory_and_zip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -81,7 +113,8 @@ class ExportTests(unittest.TestCase):
             )
 
             self.assertIn("images/shot_01.png", bundle.markdown)
-            self.assertIn('class="image-right"', bundle.html)
+            self.assertIn('data-position="before"', bundle.html)
+            self.assertIn('data-wrap="right"', bundle.html)
             self.assertIn('style="width: 50%"', bundle.html)
             self.assertIn("门口", bundle.html)
             self.assertIn("font-size: 20px", bundle.html)
@@ -154,10 +187,12 @@ class ExportTests(unittest.TestCase):
             api._RUN_REPOSITORIES.clear()
             with patch.object(api, "RUNS", runs):
                 result = api.export_markdown_info("run-1")
+                html = api.export_html("run-1")
             self.assertTrue(Path(result["manifest_path"]).exists())
             self.assertTrue(Path(result["html_path"]).exists())
             self.assertTrue(Path(result["zip_path"]).exists())
             self.assertEqual(result["zip_url"], "/api/export/run-1.zip")
+            self.assertIn("<!doctype html>", html)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,10 @@
 const workspaceState = window.FicFrameWorkspaceState;
+const htmlVisualEditor = window.FicFrameHtmlVisualEditor;
 const state = workspaceState.createInitialState();
 
 const WORKSPACE_KEY = "ficframe.workspace.v1";
 let draftTimer = null;
+let designerSelectedShotId = null;
 
 const el = {
   health: document.querySelector("#health"),
@@ -75,6 +77,8 @@ const el = {
   htmlImageWidth: document.querySelector("#htmlImageWidth"),
   htmlImageCustomWidth: document.querySelector("#htmlImageCustomWidth"),
   htmlImageCaption: document.querySelector("#htmlImageCaption"),
+  htmlImageAlignment: document.querySelector("#htmlImageAlignment"),
+  htmlImageWrap: document.querySelector("#htmlImageWrap"),
   shotSourceExcerpt: document.querySelector("#shotSourceExcerpt"),
   storyboardVersionCount: document.querySelector("#storyboardVersionCount"),
   storyboardVersions: document.querySelector("#storyboardVersions"),
@@ -95,6 +99,7 @@ const el = {
   allImagesBtn: document.querySelector("#allImagesBtn"),
   retryFailedBtn: document.querySelector("#retryFailedBtn"),
   exportBtn: document.querySelector("#exportBtn"),
+  openHtmlDesignerBtn: document.querySelector("#openHtmlDesignerBtn"),
   exportHtmlBtn: document.querySelector("#exportHtmlBtn"),
   exportZipBtn: document.querySelector("#exportZipBtn"),
   skipExistingImages: document.querySelector("#skipExistingImages"),
@@ -104,6 +109,8 @@ const el = {
   qaBox: document.querySelector("#qaBox"),
   htmlFontFamily: document.querySelector("#htmlFontFamily"),
   htmlHeadingFontFamily: document.querySelector("#htmlHeadingFontFamily"),
+  htmlBodyFontName: document.querySelector("#htmlBodyFontName"),
+  htmlHeadingFontName: document.querySelector("#htmlHeadingFontName"),
   htmlFontSize: document.querySelector("#htmlFontSize"),
   htmlLineHeight: document.querySelector("#htmlLineHeight"),
   htmlContentWidth: document.querySelector("#htmlContentWidth"),
@@ -147,6 +154,34 @@ const el = {
   closeNovelBtn: document.querySelector("#closeNovelBtn"),
   clearNovelSelectionBtn: document.querySelector("#clearNovelSelectionBtn"),
   generateShotBtn: document.querySelector("#generateShotBtn"),
+  htmlDesignerDialog: document.querySelector("#htmlDesignerDialog"),
+  htmlDesignerStatus: document.querySelector("#htmlDesignerStatus"),
+  htmlDesignerRefreshBtn: document.querySelector("#htmlDesignerRefreshBtn"),
+  htmlDesignerSaveBtn: document.querySelector("#htmlDesignerSaveBtn"),
+  htmlDesignerExportBtn: document.querySelector("#htmlDesignerExportBtn"),
+  htmlDesignerCloseBtn: document.querySelector("#htmlDesignerCloseBtn"),
+  htmlDesignerFrame: document.querySelector("#htmlDesignerFrame"),
+  htmlDesignerEmpty: document.querySelector("#htmlDesignerEmpty"),
+  htmlDesignerShotName: document.querySelector("#htmlDesignerShotName"),
+  htmlDesignerAlignment: document.querySelector("#htmlDesignerAlignment"),
+  htmlDesignerWrap: document.querySelector("#htmlDesignerWrap"),
+  htmlDesignerWidthRange: document.querySelector("#htmlDesignerWidthRange"),
+  htmlDesignerWidthValue: document.querySelector("#htmlDesignerWidthValue"),
+  htmlDesignerWidthInput: document.querySelector("#htmlDesignerWidthInput"),
+  htmlDesignerCaption: document.querySelector("#htmlDesignerCaption"),
+  htmlDesignerFontFamily: document.querySelector("#htmlDesignerFontFamily"),
+  htmlDesignerHeadingFontFamily: document.querySelector("#htmlDesignerHeadingFontFamily"),
+  htmlDesignerBodyFontName: document.querySelector("#htmlDesignerBodyFontName"),
+  htmlDesignerHeadingFontName: document.querySelector("#htmlDesignerHeadingFontName"),
+  htmlDesignerFontSize: document.querySelector("#htmlDesignerFontSize"),
+  htmlDesignerFontSizeValue: document.querySelector("#htmlDesignerFontSizeValue"),
+  htmlDesignerLineHeight: document.querySelector("#htmlDesignerLineHeight"),
+  htmlDesignerLineHeightValue: document.querySelector("#htmlDesignerLineHeightValue"),
+  htmlDesignerContentWidth: document.querySelector("#htmlDesignerContentWidth"),
+  htmlDesignerContentWidthValue: document.querySelector("#htmlDesignerContentWidthValue"),
+  htmlDesignerParagraphSpacing: document.querySelector("#htmlDesignerParagraphSpacing"),
+  htmlDesignerParagraphSpacingValue: document.querySelector("#htmlDesignerParagraphSpacingValue"),
+  htmlDesignerTextAlign: document.querySelector("#htmlDesignerTextAlign"),
 };
 
 async function api(path, options = {}) {
@@ -786,11 +821,13 @@ function saveShotEditor() {
 
 function loadHtmlLayoutEditor() {
   const layout = state.selected?.html_layout || {};
-  el.htmlImagePosition.value = layout.position || "before";
+  el.htmlImagePosition.value = ["before", "after", "inline"].includes(layout.position) ? layout.position : "before";
   const presetWidths = new Set(["auto", "35%", "50%", "65%", "80%", "100%"]);
   el.htmlImageWidth.value = presetWidths.has(layout.width) ? layout.width : "custom";
   el.htmlImageCustomWidth.value = presetWidths.has(layout.width) ? "" : (layout.width || "");
   el.htmlImageCaption.value = layout.caption || "";
+  el.htmlImageAlignment.value = layout.alignment || "center";
+  el.htmlImageWrap.value = layout.wrap || (["left", "right"].includes(layout.position) ? layout.position : "none");
 }
 
 function saveHtmlLayoutEditor() {
@@ -802,6 +839,8 @@ function saveHtmlLayoutEditor() {
       ? el.htmlImageCustomWidth.value.trim()
       : (el.htmlImageWidth.value || "100%"),
     caption: el.htmlImageCaption.value.trim(),
+    alignment: el.htmlImageAlignment.value || "center",
+    wrap: el.htmlImageWrap.value || "none",
   };
 }
 
@@ -810,6 +849,8 @@ function renderHtmlSettings() {
   state.htmlSettings = settings;
   el.htmlFontFamily.value = settings.font_family;
   el.htmlHeadingFontFamily.value = settings.heading_font_family;
+  el.htmlBodyFontName.value = settings.body_font_name || "";
+  el.htmlHeadingFontName.value = settings.heading_font_name || "";
   el.htmlFontSize.value = settings.font_size;
   el.htmlLineHeight.value = settings.line_height;
   el.htmlContentWidth.value = settings.content_width;
@@ -821,12 +862,272 @@ function saveHtmlSettings() {
   state.htmlSettings = workspaceState.createHtmlSettings({
     font_family: el.htmlFontFamily.value,
     heading_font_family: el.htmlHeadingFontFamily.value,
+    body_font_name: el.htmlBodyFontName.value.trim(),
+    heading_font_name: el.htmlHeadingFontName.value.trim(),
     font_size: Number(el.htmlFontSize.value),
     line_height: Number(el.htmlLineHeight.value),
     content_width: Number(el.htmlContentWidth.value),
     text_align: el.htmlTextAlign.value,
     paragraph_spacing: Number(el.htmlParagraphSpacing.value),
   });
+}
+
+function designerShot() {
+  return state.shots.find((shot) => shot.id === designerSelectedShotId) || null;
+}
+
+function renderDesignerSettings() {
+  const settings = workspaceState.createHtmlSettings(state.htmlSettings);
+  el.htmlDesignerFontFamily.value = settings.font_family;
+  el.htmlDesignerHeadingFontFamily.value = settings.heading_font_family;
+  el.htmlDesignerBodyFontName.value = settings.body_font_name || "";
+  el.htmlDesignerHeadingFontName.value = settings.heading_font_name || "";
+  el.htmlDesignerFontSize.value = settings.font_size;
+  el.htmlDesignerFontSizeValue.value = `${settings.font_size}px`;
+  el.htmlDesignerLineHeight.value = settings.line_height;
+  el.htmlDesignerLineHeightValue.value = settings.line_height;
+  el.htmlDesignerContentWidth.value = settings.content_width;
+  el.htmlDesignerContentWidthValue.value = `${settings.content_width}px`;
+  el.htmlDesignerParagraphSpacing.value = settings.paragraph_spacing;
+  el.htmlDesignerParagraphSpacingValue.value = `${settings.paragraph_spacing}em`;
+  el.htmlDesignerTextAlign.value = settings.text_align;
+}
+
+function readDesignerSettings() {
+  state.htmlSettings = workspaceState.createHtmlSettings({
+    font_family: el.htmlDesignerFontFamily.value,
+    heading_font_family: el.htmlDesignerHeadingFontFamily.value,
+    body_font_name: el.htmlDesignerBodyFontName.value.trim(),
+    heading_font_name: el.htmlDesignerHeadingFontName.value.trim(),
+    font_size: Number(el.htmlDesignerFontSize.value),
+    line_height: Number(el.htmlDesignerLineHeight.value),
+    content_width: Number(el.htmlDesignerContentWidth.value),
+    paragraph_spacing: Number(el.htmlDesignerParagraphSpacing.value),
+    text_align: el.htmlDesignerTextAlign.value,
+  });
+  renderDesignerSettings();
+  renderHtmlSettings();
+  const documentRef = el.htmlDesignerFrame.contentDocument;
+  if (documentRef) htmlVisualEditor.applyDocumentSettings(documentRef, state.htmlSettings);
+  scheduleWorkspaceDraftSave();
+}
+
+function selectDesignerShot(shotId) {
+  const shot = state.shots.find((item) => item.id === shotId);
+  if (!shot) return;
+  designerSelectedShotId = shot.id;
+  const index = state.shots.indexOf(shot);
+  if (state.selected !== shot) selectShot(index);
+  const layout = shot.html_layout || {};
+  const width = layout.width || "100%";
+  el.htmlDesignerShotName.textContent = `${shot.id} · ${shot.title}`;
+  el.htmlDesignerWidthInput.value = width;
+  const percent = htmlVisualEditor.widthPercent(width, 50);
+  el.htmlDesignerWidthRange.value = percent;
+  el.htmlDesignerWidthValue.value = `${percent}%`;
+  el.htmlDesignerCaption.value = layout.caption || "";
+  el.htmlDesignerAlignment.value = layout.alignment || "center";
+  el.htmlDesignerWrap.value = layout.wrap || (["left", "right"].includes(layout.position) ? layout.position : "none");
+  const visualPosition = ["before", "after", "inline"].includes(layout.position) ? layout.position : "before";
+  document.querySelectorAll("[data-html-position]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.htmlPosition === visualPosition);
+  });
+  const frameDocument = el.htmlDesignerFrame.contentDocument;
+  frameDocument?.querySelectorAll("figure[data-shot-id]").forEach((figure) => {
+    figure.classList.toggle("ficframe-editor-selected", figure.dataset.shotId === shot.id);
+  });
+  el.htmlDesignerStatus.textContent = `${shot.id} 已选中`;
+}
+
+function syncDesignerLayoutToMainEditor(shot) {
+  if (state.selected !== shot) return;
+  loadHtmlLayoutEditor();
+}
+
+function updateDesignerImageLayout(changes) {
+  const shot = designerShot();
+  if (!shot) return;
+  shot.html_layout = {
+    position: "before",
+    alignment: "center",
+    wrap: "none",
+    width: "100%",
+    caption: "",
+    ...(shot.html_layout || {}),
+    ...changes,
+  };
+  const figure = [...(el.htmlDesignerFrame.contentDocument?.querySelectorAll("figure[data-shot-id]") || [])]
+    .find((item) => item.dataset.shotId === shot.id);
+  htmlVisualEditor.applyFigureLayout(figure, shot.html_layout);
+  syncDesignerLayoutToMainEditor(shot);
+  selectDesignerShot(shot.id);
+  scheduleWorkspaceDraftSave();
+}
+
+function installDesignerDocument() {
+  const documentRef = el.htmlDesignerFrame.contentDocument;
+  if (!documentRef) return;
+  const figures = [...documentRef.querySelectorAll("figure[data-shot-id]")];
+  el.htmlDesignerEmpty.hidden = figures.length > 0;
+  let editorStyle = documentRef.querySelector("#ficframe-editor-style");
+  if (!editorStyle) {
+    editorStyle = documentRef.createElement("style");
+    editorStyle.id = "ficframe-editor-style";
+    editorStyle.textContent = `
+      figure[data-shot-id] { cursor: grab; position: relative; transition: outline-color .15s ease, opacity .15s ease; }
+      figure[data-shot-id] > img { touch-action: none; user-select: none; -webkit-user-drag: none; }
+      figure[data-shot-id]:hover { outline: 2px solid #267b7c66; outline-offset: 5px; }
+      figure.ficframe-editor-selected { outline: 3px solid #267b7c; outline-offset: 6px; }
+      figure.ficframe-editor-dragging { cursor: grabbing; opacity: .72; }
+      .ficframe-resize-handle { background: #267b7c; border: 3px solid #fff; border-radius: 50%; bottom: -13px; cursor: nwse-resize; display: none; height: 26px; position: absolute; right: -13px; touch-action: none; user-select: none; width: 26px; z-index: 10; }
+      figure.ficframe-editor-selected > .ficframe-resize-handle { display: block; }
+    `;
+    documentRef.head.append(editorStyle);
+  }
+  htmlVisualEditor.applyDocumentSettings(documentRef, state.htmlSettings);
+  figures.forEach((figure) => {
+    const shot = state.shots.find((item) => item.id === figure.dataset.shotId);
+    if (!shot) return;
+    const initialPosition = figure.dataset.position;
+    let anchor = initialPosition === "after" ? figure.previousElementSibling : figure.nextElementSibling;
+    while (anchor?.matches?.("figure[data-shot-id]")) {
+      anchor = initialPosition === "after" ? anchor.previousElementSibling : anchor.nextElementSibling;
+    }
+    figure.ficframeTextAnchor = anchor;
+    htmlVisualEditor.applyFigureLayout(figure, shot.html_layout || {});
+    figure.addEventListener("click", (event) => {
+      event.preventDefault();
+      selectDesignerShot(figure.dataset.shotId);
+    });
+    const image = figure.querySelector("img");
+    if (image) {
+      image.draggable = false;
+      installDesignerMoveGesture(image, figure);
+    }
+    const handle = documentRef.createElement("span");
+    handle.className = "ficframe-resize-handle";
+    handle.setAttribute("role", "slider");
+    handle.setAttribute("aria-label", "调整图片宽度");
+    handle.tabIndex = 0;
+    figure.append(handle);
+    installDesignerResizeGesture(handle, figure);
+  });
+  const preferred = designerSelectedShotId && figures.some((figure) => figure.dataset.shotId === designerSelectedShotId)
+    ? designerSelectedShotId
+    : figures[0]?.dataset.shotId;
+  if (preferred) selectDesignerShot(preferred);
+}
+
+function installDesignerMoveGesture(target, figure) {
+  target.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    selectDesignerShot(figure.dataset.shotId);
+    const startX = event.clientX;
+    let moved = false;
+    target.setPointerCapture(event.pointerId);
+    const onMove = (moveEvent) => {
+      const delta = moveEvent.clientX - startX;
+      if (Math.abs(delta) < 6) return;
+      moved = true;
+      figure.classList.add("ficframe-editor-dragging");
+      figure.style.transform = `translateX(${Math.max(-80, Math.min(80, delta))}px)`;
+    };
+    const onEnd = (endEvent) => {
+      target.removeEventListener("pointermove", onMove);
+      target.removeEventListener("pointerup", onEnd);
+      target.removeEventListener("pointercancel", onEnd);
+      figure.classList.remove("ficframe-editor-dragging");
+      figure.style.transform = "";
+      if (!moved) return;
+      const main = figure.ownerDocument.querySelector("main");
+      const pointerPosition = htmlVisualEditor.positionFromPointer(endEvent.clientX, main?.getBoundingClientRect());
+      const alignment = pointerPosition === "before" ? "center" : pointerPosition;
+      const currentWidth = designerShot()?.html_layout?.width || "100%";
+      const changes = { alignment };
+      if (alignment !== "center" && ["auto", "100%"].includes(currentWidth)) changes.width = "80%";
+      updateDesignerImageLayout(changes);
+    };
+    target.addEventListener("pointermove", onMove);
+    target.addEventListener("pointerup", onEnd);
+    target.addEventListener("pointercancel", onEnd);
+  });
+}
+
+function installDesignerResizeGesture(handle, figure) {
+  handle.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    selectDesignerShot(figure.dataset.shotId);
+    const main = figure.ownerDocument.querySelector("main");
+    const mainWidth = main?.getBoundingClientRect().width || 1;
+    const startX = event.clientX;
+    const startWidth = figure.getBoundingClientRect().width;
+    let nextWidth = designerShot()?.html_layout?.width || `${Math.round(startWidth / mainWidth * 100)}%`;
+    handle.setPointerCapture(event.pointerId);
+    const onMove = (moveEvent) => {
+      moveEvent.preventDefault();
+      const percentage = htmlVisualEditor.resizeWidthPercent(startWidth, moveEvent.clientX - startX, mainWidth);
+      nextWidth = `${percentage}%`;
+      figure.style.width = nextWidth;
+      el.htmlDesignerWidthRange.value = percentage;
+      el.htmlDesignerWidthValue.value = nextWidth;
+      el.htmlDesignerWidthInput.value = nextWidth;
+    };
+    const onEnd = (endEvent) => {
+      endEvent.preventDefault();
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onEnd);
+      handle.removeEventListener("pointercancel", onEnd);
+      if (handle.hasPointerCapture(endEvent.pointerId)) handle.releasePointerCapture(endEvent.pointerId);
+      updateDesignerImageLayout({ width: nextWidth });
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onEnd);
+    handle.addEventListener("pointercancel", onEnd);
+  });
+}
+
+async function refreshHtmlDesignerPreview({ persist = true } = {}) {
+  if (!state.runId) return;
+  setBusy(el.htmlDesignerRefreshBtn, true);
+  try {
+    if (persist) await persistStoryboard({ quiet: true });
+    const data = await api(`/api/export/${encodeURIComponent(state.runId)}`);
+    el.htmlDesignerFrame.onload = installDesignerDocument;
+    el.htmlDesignerFrame.src = `${data.export_html_url || data.html_url}?preview=${Date.now()}`;
+    el.htmlDesignerStatus.textContent = "预览已更新";
+  } catch (error) {
+    el.htmlDesignerStatus.textContent = `预览失败：${error.message}`;
+  } finally {
+    setBusy(el.htmlDesignerRefreshBtn, false);
+  }
+}
+
+async function openHtmlDesigner() {
+  if (!state.runId) {
+    el.health.textContent = "请先生成或恢复一个分镜 run";
+    return;
+  }
+  saveSelectedPrompt();
+  saveShotEditor();
+  saveHtmlSettings();
+  designerSelectedShotId = state.selected?.id || state.shots.find((shot) => shot.image_url || shot.image_path)?.id || null;
+  renderDesignerSettings();
+  el.htmlDesignerDialog.showModal();
+  await refreshHtmlDesignerPreview();
+}
+
+async function saveHtmlDesigner() {
+  setBusy(el.htmlDesignerSaveBtn, true);
+  try {
+    readDesignerSettings();
+    await persistStoryboard({ quiet: true });
+    await refreshHtmlDesignerPreview({ persist: false });
+    el.htmlDesignerStatus.textContent = "排版已保存";
+    el.health.textContent = "HTML 可视化排版已保存到当前 run";
+  } finally {
+    setBusy(el.htmlDesignerSaveBtn, false);
+  }
 }
 
 function renderStoryboardVersions() {
@@ -1786,7 +2087,7 @@ for (const node of [el.shotTitle, el.shotLocation, el.shotTime, el.shotCharacter
     scheduleWorkspaceDraftSave();
   });
 }
-for (const node of [el.htmlImagePosition, el.htmlImageWidth, el.htmlImageCustomWidth, el.htmlImageCaption]) {
+for (const node of [el.htmlImagePosition, el.htmlImageWidth, el.htmlImageCustomWidth, el.htmlImageCaption, el.htmlImageAlignment, el.htmlImageWrap]) {
   node.addEventListener("input", () => {
     saveHtmlLayoutEditor();
     scheduleWorkspaceDraftSave();
@@ -1796,7 +2097,7 @@ for (const node of [el.htmlImagePosition, el.htmlImageWidth, el.htmlImageCustomW
     scheduleWorkspaceDraftSave();
   });
 }
-for (const node of [el.htmlFontFamily, el.htmlHeadingFontFamily, el.htmlFontSize, el.htmlLineHeight, el.htmlContentWidth, el.htmlTextAlign, el.htmlParagraphSpacing]) {
+for (const node of [el.htmlFontFamily, el.htmlHeadingFontFamily, el.htmlBodyFontName, el.htmlHeadingFontName, el.htmlFontSize, el.htmlLineHeight, el.htmlContentWidth, el.htmlTextAlign, el.htmlParagraphSpacing]) {
   node.addEventListener("input", () => {
     saveHtmlSettings();
     scheduleWorkspaceDraftSave();
@@ -1839,8 +2140,78 @@ el.selectedImagesBtn.addEventListener("click", imageWorkflow.generateSelected);
 el.allImagesBtn.addEventListener("click", imageWorkflow.generateAll);
 el.retryFailedBtn.addEventListener("click", imageWorkflow.retryFailed);
 el.exportBtn.addEventListener("click", exportMarkdown);
+el.openHtmlDesignerBtn.addEventListener("click", () => openHtmlDesigner().catch((error) => {
+  el.health.textContent = `打开排版工作台失败：${error.message}`;
+}));
 el.exportHtmlBtn.addEventListener("click", exportHtml);
 el.exportZipBtn.addEventListener("click", exportZip);
+el.htmlDesignerRefreshBtn.addEventListener("click", () => refreshHtmlDesignerPreview());
+el.htmlDesignerSaveBtn.addEventListener("click", () => saveHtmlDesigner().catch((error) => {
+  el.htmlDesignerStatus.textContent = `保存失败：${error.message}`;
+}));
+el.htmlDesignerExportBtn.addEventListener("click", () => exportHtml());
+el.htmlDesignerCloseBtn.addEventListener("click", () => el.htmlDesignerDialog.close());
+document.querySelectorAll("[data-preview-width]").forEach((button) => {
+  button.addEventListener("click", () => {
+    el.htmlDesignerFrame.style.width = button.dataset.previewWidth;
+    document.querySelectorAll("[data-preview-width]").forEach((item) => item.classList.toggle("active", item === button));
+  });
+});
+document.querySelectorAll("[data-html-position]").forEach((button) => {
+  button.addEventListener("click", () => updateDesignerImageLayout({ position: button.dataset.htmlPosition }));
+});
+el.htmlDesignerAlignment.addEventListener("change", () => {
+  const alignment = el.htmlDesignerAlignment.value;
+  const currentWidth = designerShot()?.html_layout?.width || "100%";
+  const changes = { alignment };
+  if (alignment !== "center" && ["auto", "100%"].includes(currentWidth)) changes.width = "80%";
+  updateDesignerImageLayout(changes);
+});
+el.htmlDesignerWrap.addEventListener("change", () => {
+  const wrap = el.htmlDesignerWrap.value;
+  const currentWidth = designerShot()?.html_layout?.width || "100%";
+  const changes = { wrap };
+  if (wrap !== "none" && ["auto", "100%"].includes(currentWidth)) changes.width = "50%";
+  updateDesignerImageLayout(changes);
+});
+el.htmlDesignerWidthRange.addEventListener("input", () => {
+  const width = `${el.htmlDesignerWidthRange.value}%`;
+  el.htmlDesignerWidthValue.value = width;
+  el.htmlDesignerWidthInput.value = width;
+  updateDesignerImageLayout({ width });
+});
+el.htmlDesignerWidthInput.addEventListener("change", () => {
+  const width = el.htmlDesignerWidthInput.value.trim();
+  if (!/^\d{1,4}(?:\.\d+)?(?:%|px|rem|em|vw)$/.test(width) && width !== "auto") {
+    el.htmlDesignerStatus.textContent = "宽度格式应为 72%、420px、30rem、30em、40vw 或 auto";
+    return;
+  }
+  updateDesignerImageLayout({ width });
+});
+el.htmlDesignerCaption.addEventListener("input", () => {
+  const shot = designerShot();
+  if (!shot) return;
+  shot.html_layout = { position: "before", alignment: "center", wrap: "none", width: "100%", ...(shot.html_layout || {}), caption: el.htmlDesignerCaption.value };
+  const figure = [...(el.htmlDesignerFrame.contentDocument?.querySelectorAll("figure[data-shot-id]") || [])]
+    .find((item) => item.dataset.shotId === shot.id);
+  htmlVisualEditor.applyFigureLayout(figure, shot.html_layout);
+  syncDesignerLayoutToMainEditor(shot);
+  scheduleWorkspaceDraftSave();
+});
+for (const node of [
+  el.htmlDesignerFontFamily,
+  el.htmlDesignerHeadingFontFamily,
+  el.htmlDesignerBodyFontName,
+  el.htmlDesignerHeadingFontName,
+  el.htmlDesignerFontSize,
+  el.htmlDesignerLineHeight,
+  el.htmlDesignerContentWidth,
+  el.htmlDesignerParagraphSpacing,
+  el.htmlDesignerTextAlign,
+]) {
+  node.addEventListener("input", readDesignerSettings);
+  node.addEventListener("change", readDesignerSettings);
+}
 el.copyBtn.addEventListener("click", async () => {
   saveSelectedPrompt();
   await navigator.clipboard.writeText(el.promptBox.value);

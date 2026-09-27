@@ -2,6 +2,8 @@
   const defaultHtmlSettings = {
     font_family: "sans",
     heading_font_family: "serif",
+    body_font_name: "",
+    heading_font_name: "",
     font_size: 18,
     line_height: 1.9,
     content_width: 920,
