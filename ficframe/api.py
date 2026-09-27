@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -18,6 +18,7 @@ from .character_diff import analyze_character_differences
 from .comfyui import ComfyUIError, normalize_comfyui_base_url
 from .config_store import public_config, public_provider_config, read_provider_config, write_env_file, write_provider_config
 from .continuity import initial_state
+from .export import build_export_bundle
 from .io import read_text, write_json, write_text
 from .llm_pipeline import (
     enhance_character_cards_with_llm,
@@ -38,7 +39,7 @@ COMFYUI_DESKTOP_DEFAULT_PORT = provider_probe.COMFYUI_DESKTOP_DEFAULT_PORT
 COMFYUI_DESKTOP_PORT_SPAN = provider_probe.COMFYUI_DESKTOP_PORT_SPAN
 from .prompt_bank import analyze_reference_visuals, build_character_prompt_bank
 from .qa import annotate_shots
-from .render import render_illustrated_novel
+from .render import normalize_html_settings
 from .runtime_paths import env_file, outputs_root, providers_file, resource_root, user_data_root, web_root
 from .segmenter import segment_novel
 from .storyboard import build_storyboard
@@ -649,6 +650,7 @@ async def pipeline(
         "storyboard_messages": [],
         "prompt_feedback_messages": [],
         "storyboard_versions": {},
+        "html_settings": normalize_html_settings(),
         "next_shot_number": len(shots) + 1,
     }
     repository.save(run_id, payload)
@@ -1160,6 +1162,23 @@ def export_markdown(run_id: str) -> str:
     return result["markdown"]
 
 
+@app.get("/api/export/{run_id}.html", response_class=HTMLResponse)
+def export_html(run_id: str) -> str:
+    result = build_exported_novel(run_id)
+    return result["html"]
+
+
+@app.get("/api/export/{run_id}.zip")
+def export_zip(run_id: str) -> FileResponse:
+    result = build_exported_novel(run_id)
+    zip_path = Path(result["zip_path"])
+    return FileResponse(
+        zip_path,
+        filename=f"illustrated_novel-{run_id}.zip",
+        media_type="application/zip",
+    )
+
+
 @app.get("/api/export/{run_id}")
 def export_markdown_info(run_id: str) -> dict[str, Any]:
     result = build_exported_novel(run_id)
@@ -1167,10 +1186,25 @@ def export_markdown_info(run_id: str) -> dict[str, Any]:
         "ok": True,
         "markdown_path": result["markdown_path"],
         "markdown_url": result["markdown_url"],
+        "export_markdown_url": result["export_markdown_url"],
+        "html_path": result["html_path"],
+        "html_url": result["html_url"],
+        "export_html_url": result["export_html_url"],
+        "export_dir": result["export_dir"],
+        "images_dir": result["images_dir"],
+        "images_url": result["images_url"],
+        "manifest_path": result["manifest_path"],
+        "manifest_url": result["manifest_url"],
+        "theme_path": result["theme_path"],
+        "theme_url": result["theme_url"],
+        "zip_path": result["zip_path"],
+        "zip_url": result["zip_url"],
+        "html_settings": result["html_settings"],
+        "manifest": result["manifest"],
     }
 
 
-def build_exported_novel(run_id: str) -> dict[str, str]:
+def build_exported_novel(run_id: str) -> dict[str, Any]:
     repository = get_run_repository()
     run_dir = run_directory(run_id)
     novel_path = run_dir / "novel.md"
@@ -1183,20 +1217,23 @@ def build_exported_novel(run_id: str) -> dict[str, str]:
         logger.warning("export failed run_id=%s reason=missing_novel", run_id)
         raise HTTPException(status_code=404, detail="小说原文不存在")
     shots = [Shot(**shot) for shot in payload.get("shots", [])]
-    markdown = render_illustrated_novel(
+    bundle = build_export_bundle(
+        run_dir,
+        run_id,
         read_text(novel_path),
         payload.get("scenes", []),
         shots,
-        run_id,
+        payload.get("html_settings"),
     )
-    markdown_path = run_dir / "illustrated_novel.md"
-    write_text(markdown_path, markdown)
-    logger.info("export completed run_id=%s markdown_path=%s", run_id, markdown_path)
-    return {
-        "markdown": markdown,
-        "markdown_path": str(markdown_path),
-        "markdown_url": f"/runs/{run_id}/illustrated_novel.md",
-    }
+    logger.info(
+        "export completed run_id=%s markdown_path=%s export_dir=%s zip_path=%s image_count=%s",
+        run_id,
+        bundle.markdown_path,
+        bundle.export_dir,
+        bundle.zip_path,
+        bundle.manifest.get("image_count", 0),
+    )
+    return {"markdown": bundle.markdown, "html": bundle.html, **bundle.info()}
 
 
 def current_shot_image(run_id: str, shot_id: str) -> dict[str, Any] | None:

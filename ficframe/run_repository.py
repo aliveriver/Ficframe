@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .io import read_text
-from .render import render_prompts, render_storyboard
+from .render import normalize_html_settings, render_prompts, render_storyboard
 from .models import Shot
 
 
@@ -124,6 +124,7 @@ class RunRepository:
         payload.setdefault("storyboard_messages", [])
         payload.setdefault("prompt_feedback_messages", [])
         payload.setdefault("storyboard_versions", {})
+        payload.setdefault("html_settings", normalize_html_settings())
         return payload
 
     @staticmethod

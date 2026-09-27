@@ -15,7 +15,9 @@
 | `ficframe/task_manager.py` | 后台任务执行、阶段更新、错误记录和 `tasks.json` 持久化 |
 | `ficframe/llm_pipeline.py` | LLM 提示词、反馈决策解析、单条分镜生成或修订 |
 | `ficframe/storyboard.py` | 不依赖 LLM 的基础分镜构建与场景选择 |
-| `ficframe/render.py` | `storyboard.md`、`prompts.md` 和图文小说投影 |
+| `ficframe/render.py` | `storyboard.md`、`prompts.md` 和图文小说正文投影 |
+| `ficframe/export.py` | 生成可携带的 Markdown + `images/` 目录、`manifest.json`、主题说明和 ZIP 成品包 |
+| `web/html_visual_editor.js` | HTML 成品预览中的图片选择、拖动定位、缩放和文本样式实时映射 |
 
 `pipeline.json` 是当前 run 的唯一规范状态。`storyboard.md` 和 `prompts.md` 是可重新生成的阅读投影，不应反向作为数据源。
 
@@ -72,6 +74,10 @@
 - `POST /api/storyboard/prompt-task`：结合独立 Prompt 反馈重建生图 Prompt。
 - `POST /api/images/task`：生成单张图片。
 - `POST /api/images/batch-task`：生成选中、全部或失败项图片。
+- `GET /api/export/{run_id}.md`：生成并返回图文 Markdown。
+- `GET /api/export/{run_id}.html`：按当前 HTML 图片布局和文本设置生成并返回 HTML。
+- `GET /api/export/{run_id}`：生成导出目录并返回 Markdown、图片目录、manifest、主题说明和 ZIP 的路径/URL。
+- `GET /api/export/{run_id}.zip`：下载 ZIP 成品包。
 - `GET /api/tasks/{task_id}`：读取任务快照。
 - `GET /api/runs/{run_id}/tasks`：读取 run 的任务历史。
 - `POST /api/tasks/{task_id}/cancel`：取消尚未开始的任务。
@@ -111,4 +117,5 @@
 - `tests/frontend/test_image_workflow.js`：图片任务结果回填和版本区域状态。
 - `tests/test_run_repository.py`：run 校验、事务写入和规范状态投影。
 - `tests/test_source_reference.py`：引用校验、重定位、描述引用和旧数据迁移。
+- `tests/test_export.py`：Markdown 图片目录、manifest、主题说明和 ZIP 内容。
 - `tests/test_task_manager.py`：任务完成、失败、日志和磁盘持久化。

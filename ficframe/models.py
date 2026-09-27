@@ -71,6 +71,7 @@ class Shot:
     image_path: str | None = None
     image_url: str | None = None
     image_versions: list[dict[str, Any]] = field(default_factory=list)
+    html_layout: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

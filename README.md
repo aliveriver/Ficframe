@@ -154,8 +154,9 @@ default = true
 12. 检查并修改分镜与 Prompt；需要时向分镜 Agent 提交反馈，或单独保存 Prompt 重建意见。
 13. 点击 `生成图片`、`生成选中`、`生成全部` 或 `重试失败`，任务面板会持续显示进度。
 14. 在分镜历史和图片版本列表中恢复需要的版本。
-15. 点击 `导出小说 MD`，得到插入配图后的完整小说 Markdown。
-16. 遇到问题时点击 `导出日志`，把 zip 日志包附到 issue。
+15. 点击 `导出小说 MD`，得到插入配图后的完整小说 Markdown；同目录下的 `images/` 保存当前图片。
+16. 点击 `导出 ZIP 成品包`，下载包含 Markdown、图片目录、`manifest.json` 和字体/主题说明的完整成品包。
+17. 遇到问题时点击 `导出日志`，把 zip 日志包附到 issue。
 
 安装版的 `<数据目录>` 是 `<安装目录>/data/`；源码运行时则是仓库根目录。输出目录：
 
@@ -167,7 +168,16 @@ default = true
 ├── prompts.md
 ├── continuity.json
 ├── illustrated_novel.md
+├── illustrated_novel.html
 ├── images/
+├── export/
+│   ├── illustrated_novel.md
+│   ├── illustrated_novel.html
+│   ├── images/
+│   ├── manifest.json
+│   ├── THEME.md
+│   ├── theme.json
+│   └── illustrated_novel-<run_id>.zip
 └── references/
 ```
 
@@ -184,6 +194,8 @@ default = true
 ```text
 <数据目录>/outputs/web-runs/<run_id>/images/
 ```
+
+每次导出还会生成一个可独立携带的 `export/` 目录。`export/illustrated_novel.md` 和 `export/illustrated_novel.html` 使用相对于自身的 `images/` 路径；移动整个 `export/` 目录即可继续阅读。点击 `可视化排版` 可以直接在成品预览中选择、拖动和缩放图片，并为每张图独立设置正文前后位置、左中右对齐、文字环绕、精确宽度和图注；全文字体与段落样式也会实时预览。字体既可选择预设，也可填写阅读设备已安装的字体名称，未安装时自动使用预设回退字体。ZIP 成品包包含 Markdown、HTML、当前图片、`manifest.json` 和字体/主题说明，适合备份或发布。
 
 ## API 供应商配置
 
@@ -470,7 +482,8 @@ examples/minimal/
 │   ├── pipeline.py             # CLI 完整流水线
 │   ├── prompt_bank.py          # Prompt Bank 与 VLM 参考图分析
 │   ├── providers.py            # LLM / VLM / 图片 API 适配
-│   ├── render.py               # Markdown 导出
+│   ├── render.py               # Markdown 与 HTML 导出正文渲染
+│   ├── export.py               # Markdown 图片目录与 ZIP 成品包
 │   ├── runtime_paths.py         # 安装资源与便携数据目录
 │   ├── segmenter.py            # 小说切段
 │   └── storyboard.py           # 分镜生成

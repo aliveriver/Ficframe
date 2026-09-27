@@ -1,8 +1,10 @@
 (function initStoryboardWorkspace(global) {
   function createClient(jsonRequest, fetchImpl = global.fetch.bind(global)) {
     return {
-      save(runId, shots) {
-        return postJson(jsonRequest, "/api/storyboard/save", { run_id: runId, shots });
+      save(runId, shots, htmlSettings = null) {
+        const body = { run_id: runId, shots };
+        if (htmlSettings) body.html_settings = htmlSettings;
+        return postJson(jsonRequest, "/api/storyboard/save", body);
       },
       generate(runId, input) {
         return postJson(jsonRequest, "/api/storyboard/generate", { run_id: runId, ...input });

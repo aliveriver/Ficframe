@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>FicFrame</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=20260819-0013" />
+    <link rel="stylesheet" href="/assets/styles.css?v=20260927-0015" />
   </head>
   <body>
     <main class="shell">
@@ -382,6 +382,55 @@
               <span>生成依据</span>
               <p id="shotSourceExcerpt">选择分镜后显示对应小说段落</p>
             </div>
+            <fieldset class="html-layout-panel span-2">
+              <legend>HTML 图片布局</legend>
+              <div class="inline-fields">
+                <label>
+                  <span>与正文关系</span>
+                  <select id="htmlImagePosition">
+                    <option value="before">正文前</option>
+                    <option value="after">正文后</option>
+                    <option value="inline">行内显示</option>
+                  </select>
+                </label>
+                <label>
+                  <span>图片宽度</span>
+                  <select id="htmlImageWidth">
+                    <option value="100%">100%</option>
+                    <option value="80%">80%</option>
+                    <option value="65%">65%</option>
+                    <option value="50%">50%</option>
+                    <option value="35%">35%</option>
+                    <option value="auto">原始比例</option>
+                    <option value="custom">自定义</option>
+                  </select>
+                </label>
+                <label>
+                  <span>图片说明</span>
+                  <input id="htmlImageCaption" placeholder="可选图注" />
+                </label>
+                <label>
+                  <span>图片对齐</span>
+                  <select id="htmlImageAlignment">
+                    <option value="left">左对齐</option>
+                    <option value="center">居中</option>
+                    <option value="right">右对齐</option>
+                  </select>
+                </label>
+                <label>
+                  <span>文字环绕</span>
+                  <select id="htmlImageWrap">
+                    <option value="none">不环绕</option>
+                    <option value="left">图片左侧</option>
+                    <option value="right">图片右侧</option>
+                  </select>
+                </label>
+                <label>
+                  <span>自定义宽度</span>
+                  <input id="htmlImageCustomWidth" placeholder="例如 420px 或 72%" />
+                </label>
+              </div>
+            </fieldset>
             <section class="storyboard-version-panel span-2">
               <div class="section-head tight">
                 <h3>分镜版本</h3>
@@ -443,7 +492,63 @@
               </div>
             </details>
             <button id="exportBtn" type="button">导出小说 MD</button>
+            <button id="openHtmlDesignerBtn" class="primary" type="button">可视化排版</button>
+            <button id="exportHtmlBtn" type="button">导出 HTML</button>
+            <button id="exportZipBtn" type="button">导出 ZIP 成品包</button>
           </div>
+          <details class="panel-disclosure">
+            <summary>HTML 文本设置</summary>
+            <div class="batch-options html-text-options">
+              <label>
+                <span>正文</span>
+                <select id="htmlFontFamily">
+                  <option value="sans">无衬线</option>
+                  <option value="serif">衬线</option>
+                  <option value="system">系统字体</option>
+                </select>
+              </label>
+              <label>
+                <span>标题</span>
+                <select id="htmlHeadingFontFamily">
+                  <option value="serif">衬线</option>
+                  <option value="sans">无衬线</option>
+                  <option value="system">系统字体</option>
+                </select>
+              </label>
+              <label>
+                <span>正文字体名称</span>
+                <input id="htmlBodyFontName" placeholder="例如 霞鹜文楷" />
+              </label>
+              <label>
+                <span>标题字体名称</span>
+                <input id="htmlHeadingFontName" placeholder="例如 思源宋体" />
+              </label>
+              <label>
+                <span>字号（px）</span>
+                <input id="htmlFontSize" type="number" min="14" max="30" step="1" />
+              </label>
+              <label>
+                <span>行高</span>
+                <input id="htmlLineHeight" type="number" min="1.3" max="2.6" step="0.1" />
+              </label>
+              <label>
+                <span>正文宽度（px）</span>
+                <input id="htmlContentWidth" type="number" min="560" max="1400" step="10" />
+              </label>
+              <label>
+                <span>段落对齐</span>
+                <select id="htmlTextAlign">
+                  <option value="left">左对齐</option>
+                  <option value="justify">两端对齐</option>
+                  <option value="center">居中</option>
+                </select>
+              </label>
+              <label>
+                <span>段落间距（em）</span>
+                <input id="htmlParagraphSpacing" type="number" min="0.4" max="2.4" step="0.1" />
+              </label>
+            </div>
+          </details>
           <details class="panel-disclosure">
             <summary>批量图片设置</summary>
             <div class="batch-options">
@@ -484,12 +589,135 @@
       </div>
     </dialog>
 
+    <dialog id="htmlDesignerDialog" class="html-designer-dialog">
+      <header class="html-designer-head">
+        <div>
+          <h2>HTML 可视化排版</h2>
+          <p id="htmlDesignerStatus">选择预览中的图片开始编辑</p>
+        </div>
+        <div class="html-designer-actions">
+          <button id="htmlDesignerRefreshBtn" type="button">刷新预览</button>
+          <button id="htmlDesignerSaveBtn" class="primary" type="button">保存排版</button>
+          <button id="htmlDesignerExportBtn" type="button">导出 HTML</button>
+          <button id="htmlDesignerCloseBtn" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button>
+        </div>
+      </header>
+      <div class="html-designer-workspace">
+        <section class="html-canvas-panel">
+          <div class="html-canvas-toolbar" role="group" aria-label="预览尺寸">
+            <button type="button" data-preview-width="100%" class="active">桌面</button>
+            <button type="button" data-preview-width="768px">平板</button>
+            <button type="button" data-preview-width="390px">手机</button>
+          </div>
+          <div class="html-canvas-stage">
+            <iframe id="htmlDesignerFrame" title="HTML 导出预览"></iframe>
+            <div id="htmlDesignerEmpty" class="html-designer-empty" hidden>当前 HTML 中没有可编辑的图片</div>
+          </div>
+        </section>
+        <aside class="html-inspector">
+          <section class="html-inspector-section">
+            <div class="inspector-title">
+              <span>图片</span>
+              <strong id="htmlDesignerShotName">未选择</strong>
+            </div>
+            <div class="position-control" role="group" aria-label="图片与正文关系">
+              <button type="button" data-html-position="before">正文前</button>
+              <button type="button" data-html-position="after">正文后</button>
+              <button type="button" data-html-position="inline">行内</button>
+            </div>
+            <label>
+              <span>图片对齐</span>
+              <select id="htmlDesignerAlignment">
+                <option value="left">左对齐</option>
+                <option value="center">居中</option>
+                <option value="right">右对齐</option>
+              </select>
+            </label>
+            <label>
+              <span>文字环绕</span>
+              <select id="htmlDesignerWrap">
+                <option value="none">不环绕</option>
+                <option value="left">图片左侧，文字右绕</option>
+                <option value="right">图片右侧，文字左绕</option>
+              </select>
+            </label>
+            <label>
+              <span>宽度 <output id="htmlDesignerWidthValue">100%</output></span>
+              <input id="htmlDesignerWidthRange" type="range" min="15" max="100" step="1" value="100" />
+            </label>
+            <label>
+              <span>精确宽度</span>
+              <input id="htmlDesignerWidthInput" placeholder="例如 420px 或 72%" />
+            </label>
+            <label>
+              <span>图注</span>
+              <textarea id="htmlDesignerCaption" rows="3" placeholder="输入这张图片的图注"></textarea>
+            </label>
+          </section>
+          <section class="html-inspector-section">
+            <div class="inspector-title"><span>文本</span></div>
+            <div class="html-inspector-grid">
+              <label>
+                <span>正文</span>
+                <select id="htmlDesignerFontFamily">
+                  <option value="sans">无衬线</option>
+                  <option value="serif">衬线</option>
+                  <option value="system">系统字体</option>
+                </select>
+              </label>
+              <label>
+                <span>标题</span>
+                <select id="htmlDesignerHeadingFontFamily">
+                  <option value="serif">衬线</option>
+                  <option value="sans">无衬线</option>
+                  <option value="system">系统字体</option>
+                </select>
+              </label>
+              <label>
+                <span>正文字体名称</span>
+                <input id="htmlDesignerBodyFontName" placeholder="例如 霞鹜文楷" />
+              </label>
+              <label>
+                <span>标题字体名称</span>
+                <input id="htmlDesignerHeadingFontName" placeholder="例如 思源宋体" />
+              </label>
+              <label>
+                <span>字号 <output id="htmlDesignerFontSizeValue">18px</output></span>
+                <input id="htmlDesignerFontSize" type="range" min="14" max="30" step="1" />
+              </label>
+              <label>
+                <span>行高 <output id="htmlDesignerLineHeightValue">1.9</output></span>
+                <input id="htmlDesignerLineHeight" type="range" min="1.3" max="2.6" step="0.1" />
+              </label>
+              <label>
+                <span>版心 <output id="htmlDesignerContentWidthValue">920px</output></span>
+                <input id="htmlDesignerContentWidth" type="range" min="560" max="1400" step="10" />
+              </label>
+              <label>
+                <span>段距 <output id="htmlDesignerParagraphSpacingValue">1em</output></span>
+                <input id="htmlDesignerParagraphSpacing" type="range" min="0.4" max="2.4" step="0.1" />
+              </label>
+              <label class="span-2">
+                <span>对齐</span>
+                <select id="htmlDesignerTextAlign">
+                  <option value="left">左对齐</option>
+                  <option value="justify">两端对齐</option>
+                  <option value="center">居中</option>
+                </select>
+              </label>
+            </div>
+          </section>
+        </aside>
+      </div>
+    </dialog>
+
     <script src="/assets/prompt_state.js?v=20260818-0011"></script>
-    <script src="/assets/workspace_state.js?v=20260823-0015"></script>
+    <script src="/assets/workspace_state.js?v=20260927-0016"></script>
     <script src="/assets/storyboard_workspace.js?v=20260819-0014"></script>
     <script src="/assets/novel_source.js?v=20260823-0015"></script>
     <script src="/assets/task_monitor.js?v=20260823-0016"></script>
     <script src="/assets/image_workflow.js?v=20260823-0017"></script>
-    <script src="/assets/app.js?v=20260823-0020"></script>
+    <script src="/assets/html_visual_editor.js?v=20260927-0002"></script>
+    <script src="/assets/app.js?v=20260927-0022"></script>
   </body>
 </html>

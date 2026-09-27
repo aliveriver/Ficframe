@@ -1,4 +1,20 @@
 (function initWorkspaceState(global) {
+  const defaultHtmlSettings = {
+    font_family: "sans",
+    heading_font_family: "serif",
+    body_font_name: "",
+    heading_font_name: "",
+    font_size: 18,
+    line_height: 1.9,
+    content_width: 920,
+    text_align: "left",
+    paragraph_spacing: 1,
+  };
+
+  function createHtmlSettings(value = {}) {
+    return { ...defaultHtmlSettings, ...(value && typeof value === "object" ? value : {}) };
+  }
+
   function createInitialState() {
     return {
       runId: null, shots: [], scenes: [], autoCharacters: [], manualCharacters: [], characters: [],
@@ -6,6 +22,7 @@
       selectedShotIds: new Set(), selectedCharacterIndex: 0, providerConfig: { active: {}, sources: [] },
       selectedProviderId: null, referenceBindings: [], novelText: "", storyboardMessages: [],
       promptFeedbackMessages: [], storyboardVersions: {},
+      htmlSettings: createHtmlSettings(),
       novelSelection: { start: null, end: null, text: "" }, novelDialogMode: "browse",
     };
   }
@@ -19,6 +36,7 @@
       selectedShotIds: Array.from(state.selectedShotIds), selectedCharacterIndex: state.selectedCharacterIndex,
       novelText: state.novelText, storyboardMessages: state.storyboardMessages,
       promptFeedbackMessages: state.promptFeedbackMessages, storyboardVersions: state.storyboardVersions,
+      htmlSettings: state.htmlSettings,
       savedAt: Date.now(),
     };
   }
@@ -47,6 +65,7 @@
     Object.assign(state, {
       runId: null, shots: [], scenes: [], originalShots: [], selected: null,
       storyboardMessages: [], promptFeedbackMessages: [], storyboardVersions: {}, novelText: "",
+      htmlSettings: createHtmlSettings(),
     });
     state.selectedShotIds.clear();
   }
@@ -55,5 +74,5 @@
     Object.assign(state, createInitialState());
   }
 
-  global.FicFrameWorkspaceState = { createInitialState, loadDraft, resetAll, resetRun, saveDraft, serializeDraft };
+  global.FicFrameWorkspaceState = { createHtmlSettings, createInitialState, loadDraft, resetAll, resetRun, saveDraft, serializeDraft };
 })(window);
