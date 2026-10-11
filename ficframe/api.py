@@ -40,7 +40,13 @@ COMFYUI_DESKTOP_PORT_SPAN = provider_probe.COMFYUI_DESKTOP_PORT_SPAN
 from .prompt_bank import analyze_reference_visuals, build_character_prompt_bank
 from .qa import annotate_shots
 from .render import normalize_html_settings
-from .runtime_paths import env_file, outputs_root, providers_file, resource_root, user_data_root, web_root
+from .runtime_paths import env_file, outputs_root, providers_file, resource_root, user_data_root, visual_presets_root, web_root
+from .visual_presets import (
+    VisualPresetStore,
+)
+from .visual_preset_workflow import SELECTION_FIELDS, bind_run_defaults, bind_storyboard_shot, resolve_generation
+from .visual_preset_routes import VisualPresetController, VisualPresetDependencies
+from .image_reference_workflow import reference_preflight, visual_paths, purpose_prompt, reference_failure, reference_rejected
 from .segmenter import segment_novel
 from .storyboard import build_storyboard
 from .storyboard_workflow import backfill_storyboard_sources, normalize_novel_text, storyboard_snapshot
@@ -83,6 +89,8 @@ def run_directory(run_id: str) -> Path:
 
 _RUN_REPOSITORIES: dict[str, RunRepository] = {}
 _TASK_MANAGERS: dict[str, TaskManager] = {}
+_VISUAL_PRESET_STORE: VisualPresetStore | None = None
+_VISUAL_TASK_MANAGERS: dict[str, TaskManager] = {}
 
 
 def get_run_repository() -> RunRepository:
@@ -104,6 +112,22 @@ def get_task_manager() -> TaskManager:
         manager = TaskManager(repository)
         _TASK_MANAGERS[key] = manager
     return manager
+
+
+def get_visual_preset_store() -> VisualPresetStore:
+    global _VISUAL_PRESET_STORE
+    root = visual_presets_root()
+    if _VISUAL_PRESET_STORE is None or _VISUAL_PRESET_STORE.root.resolve() != root.resolve():
+        _VISUAL_PRESET_STORE = VisualPresetStore(root)
+    return _VISUAL_PRESET_STORE
+
+
+def get_visual_task_manager() -> TaskManager:
+    root = get_visual_preset_store().root / "analysis-tasks"
+    key = str(root.resolve())
+    if key not in _VISUAL_TASK_MANAGERS:
+        _VISUAL_TASK_MANAGERS[key] = TaskManager(RunRepository(root))
+    return _VISUAL_TASK_MANAGERS[key]
 
 
 @app.middleware("http")
@@ -146,6 +170,8 @@ class ConfigRequest(BaseModel):
 
 class ProvidersRequest(BaseModel):
     config: dict[str, Any]
+
+
 
 
 class ProviderTestRequest(BaseModel):
@@ -249,7 +275,10 @@ def get_task(task_id: str) -> dict[str, Any]:
     try:
         return get_task_manager().get(task_id)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="未找到该任务") from exc
+        try:
+            return get_visual_task_manager().get(task_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="未找到该任务") from exc
 
 
 @app.get("/api/runs/{run_id}/tasks")
@@ -266,7 +295,12 @@ def cancel_task(task_id: str) -> dict[str, Any]:
     try:
         return get_task_manager().cancel(task_id)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="未找到该任务") from exc
+        try:
+            return get_visual_task_manager().cancel(task_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="未找到该任务") from exc
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -326,6 +360,8 @@ def test_provider(request: ProviderTestRequest) -> dict[str, Any]:
     except ValueError as exc:
         logger.warning("provider test rejected source=%s error=%s", redact(source), exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 
 
 def test_comfyui_provider(base_url: str, api_key: str = "") -> dict[str, Any]:
@@ -650,6 +686,7 @@ async def pipeline(
         "storyboard_messages": [],
         "prompt_feedback_messages": [],
         "storyboard_versions": {},
+        "visual_presets": {"style_id": None, "composition_id": None},
         "html_settings": normalize_html_settings(),
         "next_shot_number": len(shots) + 1,
     }
@@ -780,6 +817,7 @@ def get_storyboard_controller() -> StoryboardController:
             respond_to_feedback=lambda *args, **kwargs: respond_to_storyboard_feedback(*args, **kwargs),
             polish_prompt=lambda *args, **kwargs: polish_shot_prompt(*args, **kwargs),
             logger=logger,
+            bind_visual_presets=lambda shot, payload, old: bind_storyboard_shot(get_visual_preset_store(), shot, payload, old),
         )
     )
 
@@ -988,6 +1026,65 @@ def dedupe_cards(cards: list[CharacterCard]) -> list[CharacterCard]:
     return unique
 
 
+def visual_prompt_for_generation(run_id: str, shot: Shot) -> tuple[str, str, dict[str, Any]]:
+    """Pin selections before provider calls, including failures and retries."""
+    repository = get_run_repository()
+    store = get_visual_preset_store()
+    try:
+        if repository.exists(run_id):
+            with repository.transaction(run_id) as payload:
+                defaults = bind_run_defaults(store, payload)
+                payload["visual_presets"] = defaults
+                positive, negative, snapshot = resolve_generation(store, payload, shot)
+                for item in payload.get("shots", []):
+                    if item.get("id") == shot.id:
+                        for key in SELECTION_FIELDS:
+                            item[key] = to_dict(getattr(shot, key))
+                        break
+            return positive, negative, snapshot
+        return resolve_generation(store, {}, shot)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+def record_visual_generation(run_id: str, shot: Shot, visual_snapshot: dict[str, Any]) -> None:
+    """Legacy Python entrypoint; image persistence now commits this atomically."""
+    try:
+        with get_run_repository().transaction(run_id) as payload:
+            for item in payload.get("shots", []):
+                if item.get("id") == shot.id:
+                    item["last_generation_visual_snapshot"] = json.loads(json.dumps(visual_snapshot, ensure_ascii=False))
+                    break
+    except RunNotFoundError:
+        pass
+
+
+def image_generation_inputs(provider: Any, run_id: str, shot: Shot, size: str):
+    prompt, negative, snapshot = visual_prompt_for_generation(run_id, shot)
+    entries = reference_image_entries_for_shot(run_id, shot)
+    groups = [group for _, group in entries]
+    identities = [path for group in groups for path in group]
+    store = get_visual_preset_store()
+    preflight = reference_preflight(store, provider, snapshot, len(identities), size)
+    if not preflight["ok"]:
+        raise HTTPException(400, preflight["message"])
+    paths = visual_paths(store, snapshot)
+    kwargs = {"reference_images": identities, "reference_image_groups": groups,
+              "reference_regions": reference_regions_for_characters(shot, [name for name, _ in entries]),
+              "regional_guidance": shot.regional_guidance}
+    for kind in ("style", "composition"):
+        if paths[kind]:
+            kwargs[f"{kind}_reference_images"] = paths[kind]
+    prompt = purpose_prompt(prompt, len(identities), len(paths["style"]), len(paths["composition"]))
+    snapshot["positive_prompt"] = prompt
+    if paths["style"] or paths["composition"]:
+        kwargs["reference_roles_embedded"] = True
+        snapshot["reference_delivery"] = {"identity_count": len(identities), "style_count": len(paths["style"]),
+                                          "composition_count": len(paths["composition"]), "capability": preflight,
+                                          "order": ["identity", "style", "composition"]}
+    return prompt, negative, snapshot, kwargs
+
+
 @app.post("/api/images")
 def generate_image(request: ImageRequest) -> dict[str, Any]:
     shot = Shot(**request.shot)
@@ -999,29 +1096,24 @@ def generate_image(request: ImageRequest) -> dict[str, Any]:
         image_url = str(current.get("image_url") or clean_image_url(request.run_id, shot.id))
         logger.info("image generation skipped existing run_id=%s shot_id=%s path=%s", request.run_id, shot.id, target)
         return {"image_path": current.get("image_path"), "image_url": image_url, "skipped": True, "activated": True}
+    prompt, negative_prompt, visual_snapshot, reference_kwargs = image_generation_inputs(provider, request.run_id, shot, request.size)
     try:
-        reference_entries = reference_image_entries_for_shot(request.run_id, shot)
-        reference_names = [name for name, _ in reference_entries]
-        reference_groups = [group for _, group in reference_entries]
-        references = [path for group in reference_groups for path in group]
-        logger.info("image generation started run_id=%s shot_id=%s size=%s reference_count=%s", request.run_id, shot.id, request.size, len(references))
+        logger.info("image generation started run_id=%s shot_id=%s size=%s", request.run_id, shot.id, request.size)
         provider.image(
-            shot.positive_prompt,
+            prompt,
             target,
             size=request.size,
-            negative_prompt=shot.negative_prompt,
-            reference_images=references,
-            reference_image_groups=reference_groups,
-            reference_regions=reference_regions_for_characters(shot, reference_names),
-            regional_guidance=shot.regional_guidance,
+            negative_prompt=negative_prompt,
+            **reference_kwargs,
             purpose=f"image:single:{request.run_id}:{shot.id}",
         )
     except ProviderError as exc:
-        logger.warning("image generation failed run_id=%s shot_id=%s error=%s", request.run_id, shot.id, exc)
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        message = reference_failure(get_visual_preset_store(), provider, request.size, exc) if reference_kwargs.get("reference_roles_embedded") else str(exc)
+        logger.warning("image generation failed run_id=%s shot_id=%s error=%s", request.run_id, shot.id, message)
+        raise HTTPException(status_code=400, detail=message) from exc
     image_url = image_url_for_path(request.run_id, target)
     activate = request.activate if request.activate is not None else not bool(current)
-    payload = update_shot_image(request.run_id, shot.id, str(target), image_url, activate=activate)
+    payload = update_shot_image(request.run_id, shot.id, str(target), image_url, activate=activate, visual_snapshot=visual_snapshot)
     logger.info("image generation completed run_id=%s shot_id=%s path=%s activated=%s", request.run_id, shot.id, target, activate)
     return {
         "image_path": str(target),
@@ -1029,6 +1121,9 @@ def generate_image(request: ImageRequest) -> dict[str, Any]:
         "raw_image_url": image_url,
         "activated": activate,
         "image_versions": payload.get("image_versions", []),
+        "visual_preset_snapshot": visual_snapshot,
+        "visual_prompt": prompt,
+        "visual_negative_prompt": negative_prompt,
     }
 
 
@@ -1086,7 +1181,12 @@ def _generate_all_images(request: dict[str, Any], reporter: TaskReporter | None 
             logger.info("batch image item skipped existing run_id=%s shot_id=%s", run_id, shot.id)
             continue
         target = image_target_for_generation(run_dir, shot.id, bool(current))
-        result = generate_batch_image_item(provider, run_id, shot, target, size, retry_count, activate=not bool(current))
+        try:
+            result = generate_batch_image_item(provider, run_id, shot, target, size, retry_count, activate=not bool(current))
+        except (HTTPException, ValueError) as exc:
+            # A stale selection must not discard successful results of other shots.
+            result = {"shot_id": shot.id, "ok": False, "attempts": 0,
+                      "error": str(exc.detail if isinstance(exc, HTTPException) else exc)}
         results.append(result)
     logger.info("batch image generation completed run_id=%s ok_count=%s total=%s", run_id, len([item for item in results if item["ok"]]), len(results))
     write_json(run_dir / "image_results.json", {"run_id": run_id, "size": size, "retry_count": retry_count, "skip_existing": skip_existing, "results": results})
@@ -1117,27 +1217,21 @@ def generate_batch_image_item(
     retry_count: int,
     activate: bool,
 ) -> dict[str, Any]:
-    reference_entries = reference_image_entries_for_shot(run_id, shot)
-    reference_names = [name for name, _ in reference_entries]
-    reference_groups = [group for _, group in reference_entries]
-    references = [path for group in reference_groups for path in group]
+    prompt, negative_prompt, visual_snapshot, reference_kwargs = image_generation_inputs(provider, run_id, shot, size)
     last_error = ""
     for attempt in range(retry_count + 1):
         try:
             provider.image(
-                shot.positive_prompt,
+                prompt,
                 target,
                 size=size,
-                negative_prompt=shot.negative_prompt,
-                reference_images=references,
-                reference_image_groups=reference_groups,
-                reference_regions=reference_regions_for_characters(shot, reference_names),
-                regional_guidance=shot.regional_guidance,
+                negative_prompt=negative_prompt,
+                **reference_kwargs,
                 purpose=f"image:batch:{run_id}:{shot.id}:attempt{attempt + 1}",
             )
             image_url = image_url_for_path(run_id, target)
-            payload = update_shot_image(run_id, shot.id, str(target), image_url, activate=activate)
-            logger.info("batch image item completed run_id=%s shot_id=%s reference_count=%s attempt=%s", run_id, shot.id, len(references), attempt + 1)
+            payload = update_shot_image(run_id, shot.id, str(target), image_url, activate=activate, visual_snapshot=visual_snapshot)
+            logger.info("batch image item completed run_id=%s shot_id=%s attempt=%s", run_id, shot.id, attempt + 1)
             return {
                 "shot_id": shot.id,
                 "ok": True,
@@ -1147,10 +1241,15 @@ def generate_batch_image_item(
                 "raw_image_url": image_url,
                 "activated": activate,
                 "image_versions": payload.get("image_versions", []),
+                "visual_preset_snapshot": visual_snapshot,
+                "visual_prompt": prompt,
+                "visual_negative_prompt": negative_prompt,
             }
         except ProviderError as exc:
-            last_error = str(exc)
-            logger.warning("batch image item failed run_id=%s shot_id=%s attempt=%s error=%s", run_id, shot.id, attempt + 1, exc)
+            last_error = reference_failure(get_visual_preset_store(), provider, size, exc) if reference_kwargs.get("reference_roles_embedded") else str(exc)
+            logger.warning("batch image item failed run_id=%s shot_id=%s attempt=%s error=%s", run_id, shot.id, attempt + 1, last_error)
+            if reference_kwargs.get("reference_roles_embedded") and reference_rejected(exc):
+                return {"shot_id": shot.id, "ok": False, "attempts": attempt + 1, "error": last_error}
             if attempt < retry_count:
                 time.sleep(min(2 * (attempt + 1), 6))
     return {"shot_id": shot.id, "ok": False, "attempts": retry_count + 1, "error": last_error}
@@ -1261,7 +1360,14 @@ def versioned_url_for_path(image_url: str, path: Path) -> str:
     return f"{image_url}?v={version}"
 
 
-def update_shot_image(run_id: str, shot_id: str, image_path: str, image_url: str, activate: bool = True) -> dict[str, Any]:
+def update_shot_image(
+    run_id: str,
+    shot_id: str,
+    image_path: str,
+    image_url: str,
+    activate: bool = True,
+    visual_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     result: dict[str, Any] = {}
     try:
         with get_run_repository().transaction(run_id) as payload:
@@ -1278,7 +1384,12 @@ def update_shot_image(run_id: str, shot_id: str, image_path: str, image_url: str
                         "created_at": int(Path(str(existing_path)).stat().st_mtime) if Path(str(existing_path)).exists() else int(time.time()),
                     })
                 if not any(item.get("image_url") == image_url for item in versions if isinstance(item, dict)):
-                    versions.append({"image_path": image_path, "image_url": image_url, "created_at": int(time.time())})
+                    version = {"image_path": image_path, "image_url": image_url, "created_at": int(time.time())}
+                    if isinstance(visual_snapshot, dict):
+                        version["visual_preset_snapshot"] = json.loads(json.dumps(visual_snapshot, ensure_ascii=False))
+                    versions.append(version)
+                if isinstance(visual_snapshot, dict):
+                    shot["last_generation_visual_snapshot"] = json.loads(json.dumps(visual_snapshot, ensure_ascii=False))
                 if activate:
                     shot["image_path"] = image_path
                     shot["image_url"] = image_url
@@ -1447,3 +1558,10 @@ def hydrate_provider_secret(source: dict[str, Any]) -> dict[str, Any]:
 # 上方保留的函数为现有调用方和测试提供稳定的 Python API。
 _storyboard_http_controller = get_storyboard_controller()
 app.include_router(_storyboard_http_controller.router)
+app.include_router(VisualPresetController(VisualPresetDependencies(
+    store=lambda: get_visual_preset_store(),
+    repository=lambda: get_run_repository(),
+    task_manager=lambda: get_visual_task_manager(),
+    provider=lambda: OpenAICompatibleProvider(),
+    reference_entries=lambda run_id, shot: reference_image_entries_for_shot(run_id, shot),
+)).router)

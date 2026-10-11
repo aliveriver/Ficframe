@@ -20,7 +20,7 @@ function makeElements() {
   };
 }
 
-function makeController(state, elements, result) {
+function makeController(state, elements, result, overrides = {}) {
   return FicFrameImageWorkflow.createController({
     state,
     elements,
@@ -34,6 +34,7 @@ function makeController(state, elements, result) {
     saveWorkspaceDraft: () => {},
     renderShots: () => {},
     selectedImageSize: () => "1024x1024",
+    ...overrides,
   });
 }
 
@@ -60,6 +61,28 @@ test("图片任务结果会回填当前分镜及图片版本", async () => {
   assert.equal(state.shots[0].image_url, "/runs/run-1/images/shot-1.png");
   assert.equal(state.shots[0].image_versions.length, 1);
   assert.match(elements.health.textContent, /图片已生成/);
+});
+
+test("single, selected, all and retry generation use newly persisted shot bindings", async () => {
+  for (const action of ["generateCurrent", "generateSelected", "generateAll", "retryFailed"]) {
+    const shot = { id: "shot-1", positive_prompt: "BASE" };
+    const state = { runId: "run", shots: [shot], selected: shot, selectedShotIds: new Set([shot.id]) };
+    const elements = makeElements();
+    let prepared = false;
+    let submitted;
+    const controller = makeController(state, elements, { results: [] }, {
+      prepareGeneration: async () => {
+        state.shots = [{ ...shot, style_preset_snapshot: { id: "style_1", version: 1 } }];
+        state.selected = state.shots[0];
+        prepared = true;
+      },
+      api: async (_, options) => { assert.equal(prepared, true); submitted = JSON.parse(options.body); return { task_id: "task" }; },
+    });
+    await controller[action]();
+    const sent = submitted.shot || submitted.shots[0];
+    assert.equal(sent.style_preset_snapshot.id, "style_1", action);
+    assert.equal(sent.style_preset_snapshot.version, 1, action);
+  }
 });
 
 test("没有选中分镜时版本区域会清空", () => {

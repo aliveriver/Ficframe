@@ -78,6 +78,7 @@ class StoryboardDependencies:
     respond_to_feedback: Callable[..., dict[str, Any]]
     polish_prompt: Callable[..., Shot]
     logger: Any
+    bind_visual_presets: Callable[..., Shot] | None = None
 
 
 class StoryboardController:
@@ -103,9 +104,11 @@ class StoryboardController:
                     raise HTTPException(status_code=400, detail="分镜 ID 不能为空或重复")
                 seen.add(shot.id)
                 old = existing.get(shot.id, {})
-                for field in ["image_path", "image_url", "image_versions"]:
+                for field in ["image_path", "image_url", "image_versions", "last_generation_visual_snapshot"]:
                     if field in old:
                         setattr(shot, field, old[field])
+                if self.dependencies.bind_visual_presets:
+                    shot = self.dependencies.bind_visual_presets(shot, payload, old)
                 saved.append(to_dict(shot))
             saved_by_id = {str(item.get("id")): item for item in saved}
             changed_items = [
@@ -182,6 +185,8 @@ class StoryboardController:
                 )
             except (ProviderError, json.JSONDecodeError, TypeError) as exc:
                 raise HTTPException(status_code=502, detail=f"LLM 生成分镜失败：{exc}") from exc
+            if self.dependencies.bind_visual_presets:
+                shot = self.dependencies.bind_visual_presets(shot, payload, {})
             shot_data = to_dict(shot)
             sync_legacy_source_fields(shot_data, shot.source_ref)
             payload.setdefault("scenes", []).append(to_dict(scene))
@@ -319,6 +324,7 @@ class StoryboardController:
             restored.image_path = current.get("image_path")
             restored.image_url = current.get("image_url")
             restored.image_versions = current.get("image_versions", [])
+            restored.last_generation_visual_snapshot = current.get("last_generation_visual_snapshot", {})
             payload["shots"][current_index] = to_dict(restored)
             result = {
                 **self._storyboard_result(payload),
@@ -380,6 +386,7 @@ class StoryboardController:
             "prompt_feedback_messages": payload.get("prompt_feedback_messages", []),
             "storyboard_versions": payload.get("storyboard_versions", {}),
             "html_settings": normalize_html_settings(payload.get("html_settings")),
+            "visual_presets": payload.get("visual_presets", {"style_id": None, "composition_id": None}),
         }
 
     @staticmethod

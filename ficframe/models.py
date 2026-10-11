@@ -72,6 +72,18 @@ class Shot:
     image_url: str | None = None
     image_versions: list[dict[str, Any]] = field(default_factory=list)
     html_layout: dict[str, Any] = field(default_factory=dict)
+    # Visual preset selection is layered on top of the hand-edited prompt.
+    # ``inherit`` uses the run default, ``preset`` uses the selected id and
+    # ``none`` explicitly disables that category for this shot.
+    style_preset_id: str | None = None
+    composition_preset_id: str | None = None
+    style_preset_mode: str = "inherit"
+    composition_preset_mode: str = "inherit"
+    style_reference_mode: str = "inherit"
+    composition_reference_mode: str = "inherit"
+    style_preset_snapshot: dict[str, Any] = field(default_factory=dict)
+    composition_preset_snapshot: dict[str, Any] = field(default_factory=dict)
+    last_generation_visual_snapshot: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

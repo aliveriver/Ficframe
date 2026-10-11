@@ -371,6 +371,84 @@ textarea {
   white-space: pre-wrap;
 }
 
+.visual-preset-panel {
+  border-top: var(--rule-sm) solid var(--color-rule);
+  display: grid;
+  gap: var(--space-sm);
+  padding-top: var(--space-md);
+}
+
+.reference-warning:not([hidden]) {
+  border-left: 3px solid var(--color-ink);
+  padding: var(--space-sm);
+  background: var(--color-panel);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.visual-preset-quick-analysis > div {
+  display: grid;
+  gap: var(--space-sm);
+  padding-top: var(--space-sm);
+}
+
+.visual-preset-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  padding: 3px 0;
+}
+
+.visual-preset-actions {
+  display: inline-flex;
+  gap: var(--space-xs);
+  margin-left: auto;
+}
+
+.visual-preset-references {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.visual-preset-references img {
+  width: 76px;
+  height: 76px;
+  object-fit: contain;
+  border: var(--rule-sm) solid var(--color-rule);
+  border-radius: 6px;
+}
+
+#visualPresetStatus {
+  max-height: 260px;
+  overflow: auto;
+}
+
+#visualPresetEffective, #visualPromptSnapshot {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.visual-preset-thumb {
+  height: 32px;
+  object-fit: cover;
+  width: 32px;
+}
+
+.visual-preset-dialog {
+  max-height: min(90vh, 760px);
+  overflow: auto;
+  width: min(720px, calc(100vw - 32px));
+}
+
+.visual-preset-dialog form {
+  display: grid;
+  gap: var(--space-md);
+}
+
 .diff-readout {
   max-height: 260px;
   overflow: auto;

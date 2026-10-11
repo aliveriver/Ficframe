@@ -22,6 +22,7 @@
       selectedShotIds: new Set(), selectedCharacterIndex: 0, providerConfig: { active: {}, sources: [] },
       selectedProviderId: null, referenceBindings: [], novelText: "", storyboardMessages: [],
       promptFeedbackMessages: [], storyboardVersions: {},
+      visualPresets: [], visualPresetDefaults: { style_id: null, composition_id: null },
       htmlSettings: createHtmlSettings(),
       novelSelection: { start: null, end: null, text: "" }, novelDialogMode: "browse",
     };
@@ -36,6 +37,7 @@
       selectedShotIds: Array.from(state.selectedShotIds), selectedCharacterIndex: state.selectedCharacterIndex,
       novelText: state.novelText, storyboardMessages: state.storyboardMessages,
       promptFeedbackMessages: state.promptFeedbackMessages, storyboardVersions: state.storyboardVersions,
+      visualPresets: state.visualPresets, visualPresetDefaults: state.visualPresetDefaults,
       htmlSettings: state.htmlSettings,
       savedAt: Date.now(),
     };
@@ -65,6 +67,7 @@
     Object.assign(state, {
       runId: null, shots: [], scenes: [], originalShots: [], selected: null,
       storyboardMessages: [], promptFeedbackMessages: [], storyboardVersions: {}, novelText: "",
+      visualPresetDefaults: { style_id: null, composition_id: null },
       htmlSettings: createHtmlSettings(),
     });
     state.selectedShotIds.clear();

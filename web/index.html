@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>FicFrame</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=20260927-0015" />
+    <link rel="stylesheet" href="/assets/styles.css?v=20261011-visual2" />
   </head>
   <body>
     <main class="shell">
@@ -295,6 +295,33 @@
               <input id="customImageSize" placeholder="自定义，如 2K 或 2048x2048" />
             </div>
           </label>
+          <section class="visual-preset-panel" aria-labelledby="visualPresetHeading">
+            <div class="section-head tight"><h3 id="visualPresetHeading">画风与构图规范</h3><button id="refreshVisualPresetsBtn" type="button">刷新</button></div>
+            <p class="muted">画风与构图独立选择文本或原图参考；原图不进入角色身份分组。效果取决于模型。</p>
+            <label><span>当前 run 默认画风</span><select id="runStylePreset"><option value="">不使用</option></select></label>
+            <label><span>画风参考模式</span><select id="runStyleReferenceMode"><option value="text">仅文本规范</option><option value="image">原图参考＋文本规范</option></select></label>
+            <label><span>当前 run 默认构图</span><select id="runCompositionPreset"><option value="">不使用</option></select></label>
+            <label><span>构图参考模式</span><select id="runCompositionReferenceMode"><option value="text">仅文本规范</option><option value="image">原图参考＋文本规范</option></select></label>
+            <button id="adoptRunVisualPresetsBtn" type="button">run 默认采用最新版</button>
+            <p class="muted">应用时固定预设版本；编辑预设后，可在这里显式更新。</p>
+            <div class="actions compact"><button id="createStylePresetBtn" type="button">新建画风</button><button id="createCompositionPresetBtn" type="button">新建构图</button></div>
+            <details class="visual-preset-quick-analysis"><summary>从参考图提炼文字草稿（VLM）</summary>
+              <div>
+                <label><span>画风参考图</span><input id="stylePresetImages" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" multiple /></label>
+                <button id="analyzeStylePresetBtn" type="button">分析画风参考图</button>
+                <label><span>构图参考图</span><input id="compositionPresetImages" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" multiple /></label>
+                <button id="analyzeCompositionPresetBtn" type="button">分析构图参考图</button>
+              </div>
+            </details>
+            <p id="visualReferenceWarning" class="reference-warning" role="alert" hidden></p>
+            <details class="reference-capability-panel"><summary>图片模型多图能力</summary>
+              <p id="imageReferenceCapability" class="readout" role="status" aria-live="polite">正在检查当前图片模型…</p>
+              <button id="testImageReferencesBtn" type="button">实际测试多图参考（可能计费）</button>
+              <p class="muted">使用内置色块，不上传用户原图或小说。测试当前已保存的图片模型与尺寸；接口接受不代表理解准确。批量时按所需最多图片数测试。</p>
+            </details>
+            <div id="visualPresetStatus" class="readout"></div>
+            <button id="resumeVisualPresetDraftBtn" type="button">继续编辑未保存草稿</button>
+          </section>
           <div id="charactersBox" class="readout"></div>
           <div id="characterDiffBox" class="readout diff-readout"></div>
         </aside>
@@ -378,6 +405,11 @@
               <span>画面目标</span>
               <textarea id="shotVisualGoal" rows="2"></textarea>
             </label>
+            <label><span>单条画风规范</span><select id="shotStylePreset"><option value="inherit">沿用 run 默认</option><option value="none">不使用</option></select></label>
+            <label><span>单条画风参考模式</span><select id="shotStyleReferenceMode"><option value="inherit">沿用 run 参考模式</option><option value="text">仅文本规范</option><option value="image">原图参考＋文本规范</option></select></label>
+            <label><span>单条构图规范</span><select id="shotCompositionPreset"><option value="inherit">沿用 run 默认</option><option value="none">不使用</option></select></label>
+            <label><span>单条构图参考模式</span><select id="shotCompositionReferenceMode"><option value="inherit">沿用 run 参考模式</option><option value="text">仅文本规范</option><option value="image">原图参考＋文本规范</option></select></label>
+            <div class="span-2"><button id="adoptShotVisualPresetsBtn" type="button">本分镜指定预设采用最新版</button></div>
             <div class="source-basis span-2">
               <span>生成依据</span>
               <p id="shotSourceExcerpt">选择分镜后显示对应小说段落</p>
@@ -447,6 +479,13 @@
             <span>负向 Prompt</span>
             <textarea id="negativePromptBox" rows="4" spellcheck="false"></textarea>
           </label>
+          <details class="panel-disclosure">
+            <summary>实际生图规范与最终 Prompt</summary>
+            <p class="muted">规范为软约束，实际效果取决于图片模型；原始 Prompt 保持独立编辑。</p>
+            <pre id="visualPresetEffective" class="readout"></pre>
+            <label><span>最终正向 Prompt（只读预览）</span><textarea id="visualFinalPrompt" rows="6" readonly></textarea></label>
+            <label><span>最终负向 Prompt（只读预览）</span><textarea id="visualFinalNegative" rows="3" readonly></textarea></label>
+          </details>
           <details class="panel-disclosure prompt-feedback-panel">
             <summary>Prompt 重建意见（独立历史）</summary>
             <div id="promptFeedbackHistory" class="feedback-history compact-history"></div>
@@ -563,6 +602,7 @@
             </div>
           </details>
           <figure id="preview" class="preview"></figure>
+          <div id="visualPromptSnapshot" class="readout"></div>
           <div id="imageVersions" class="image-versions"></div>
           <pre id="qaBox"></pre>
         </section>
@@ -587,6 +627,23 @@
         <button id="clearNovelSelectionBtn" type="button">清除选区</button>
         <button id="generateShotBtn" class="primary" type="button">让 LLM 添加分镜</button>
       </div>
+    </dialog>
+
+    <dialog id="visualPresetDialog" class="novel-dialog visual-preset-dialog">
+      <form id="visualPresetForm" method="dialog">
+        <div class="dialog-head"><h2 id="visualPresetDialogTitle">视觉规范预设</h2><button id="cancelVisualPresetBtn" type="button">取消</button></div>
+        <label><span>名称</span><input id="visualPresetName" maxlength="120" required /></label>
+        <label><span>预设建议模式</span><select id="visualPresetReferenceMode"><option value="text">仅文本规范</option><option value="image">原图参考＋文本规范</option></select></label>
+        <p class="muted">文本模式可不上传图片；原图模式会向支持的图片模型发送参考图，文字描述可选。应用后仍可在 run 或单条分镜切换模式。</p>
+        <label><span>参考图（可选，最多 8 张，每张 20 MB）</span><input id="visualPresetReferenceFiles" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" multiple /></label>
+        <div class="actions compact"><button id="uploadVisualPresetReferencesBtn" type="button">上传参考图，不分析</button><button id="analyzeEditorReferencesBtn" type="button">用 VLM 提炼文字草稿</button><button id="clearVisualPresetReferencesBtn" type="button">移除参考图</button></div>
+        <label><span>正向规范</span><textarea id="visualPresetPositive" rows="7" spellcheck="false"></textarea></label>
+        <label><span>负向约束（可选）</span><textarea id="visualPresetNegative" rows="4" spellcheck="false"></textarea></label>
+        <details><summary>结构化分析（可编辑）</summary><textarea id="visualPresetStructured" rows="6" spellcheck="false"></textarea></details>
+        <div id="visualPresetDraftImages" class="visual-preset-references"></div>
+        <p id="visualPresetDraftState" class="muted"></p>
+        <div class="dialog-actions"><button id="saveVisualPresetBtn" class="primary" type="submit">确认保存预设</button></div>
+      </form>
     </dialog>
 
     <dialog id="htmlDesignerDialog" class="html-designer-dialog">
@@ -712,12 +769,13 @@
     </dialog>
 
     <script src="/assets/prompt_state.js?v=20260818-0011"></script>
-    <script src="/assets/workspace_state.js?v=20260927-0016"></script>
+    <script src="/assets/workspace_state.js?v=20261011-visual2"></script>
     <script src="/assets/storyboard_workspace.js?v=20260819-0014"></script>
     <script src="/assets/novel_source.js?v=20260823-0015"></script>
-    <script src="/assets/task_monitor.js?v=20260823-0016"></script>
-    <script src="/assets/image_workflow.js?v=20260823-0017"></script>
+    <script src="/assets/task_monitor.js?v=20261011-visual2"></script>
+    <script src="/assets/image_workflow.js?v=20261011-visual2"></script>
+    <script src="/assets/visual_presets.js?v=20261011-visual2"></script>
     <script src="/assets/html_visual_editor.js?v=20260927-0002"></script>
-    <script src="/assets/app.js?v=20260927-0022"></script>
+    <script src="/assets/app.js?v=20261011-visual2"></script>
   </body>
 </html>

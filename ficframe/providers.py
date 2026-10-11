@@ -103,7 +103,10 @@ class OpenAICompatibleProvider:
     ) -> dict[str, Any]:
         url = build_url(endpoint.base_url, path)
         timeout = self._timeout_for(label)
+        private_visual_analysis = purpose.startswith(("visual_preset:", "reference_probe:", "visual_reference:"))
         request_summary = summarize_payload(payload)
+        if private_visual_analysis:
+            request_summary.pop("text_preview", None)
         started = time.perf_counter()
         logger.info(
             "provider request label=%s purpose=%s provider=%s url=%s model=%s timeout_s=%s summary=%s",
@@ -128,7 +131,7 @@ class OpenAICompatibleProvider:
                 path,
                 duration_ms,
                 request_summary,
-                exc,
+                type(exc).__name__ if private_visual_analysis else exc,
             )
             raise ProviderError(provider_exception_message(label, exc, timeout)) from exc
         duration_ms = int((time.perf_counter() - started) * 1000)
@@ -142,7 +145,8 @@ class OpenAICompatibleProvider:
             response.status_code,
             duration_ms,
             payload.get("model", ""),
-            summarize_response(response),
+            {"content_type": response.headers.get("content-type", ""), "body_bytes": len(response.content)}
+            if private_visual_analysis else summarize_response(response),
         )
         if response.status_code >= 400:
             logger.warning(
@@ -153,7 +157,7 @@ class OpenAICompatibleProvider:
                 path,
                 response.status_code,
                 request_summary,
-                response.text[:500],
+                "[visual analysis response omitted]" if private_visual_analysis else response.text[:500],
             )
             raise ProviderError(f"{response.status_code} {url}: {response.text[:1000]}")
         return response.json()
@@ -171,6 +175,7 @@ class OpenAICompatibleProvider:
         headers = self._headers(endpoint, label)
         headers.pop("Content-Type", None)
         timeout = self._timeout_for(label)
+        private_reference = purpose.startswith(("visual_reference:", "reference_probe:"))
         request_summary = {
             "model": data.get("model", ""),
             "data_keys": sorted(data.keys()),
@@ -200,7 +205,7 @@ class OpenAICompatibleProvider:
                 path,
                 duration_ms,
                 request_summary,
-                exc,
+                type(exc).__name__ if private_reference else exc,
             )
             raise ProviderError(provider_exception_message(label, exc, timeout)) from exc
         duration_ms = int((time.perf_counter() - started) * 1000)
@@ -215,10 +220,11 @@ class OpenAICompatibleProvider:
             duration_ms,
             data.get("model", ""),
             len(files),
-            summarize_response(response),
+            {"content_type": response.headers.get("content-type", ""), "body_bytes": len(response.content)}
+            if private_reference else summarize_response(response),
         )
         if response.status_code >= 400:
-            logger.warning("provider multipart failed label=%s purpose=%s url=%s path=%s status=%s body=%s", label, purpose, safe_url(url), path, response.status_code, response.text[:500])
+            logger.warning("provider multipart failed label=%s purpose=%s url=%s path=%s status=%s body=%s", label, purpose, safe_url(url), path, response.status_code, "[reference response omitted]" if private_reference else response.text[:500])
             raise ProviderError(f"{response.status_code} {url}: {response.text[:1000]}")
         return response.json()
 
@@ -327,12 +333,28 @@ class OpenAICompatibleProvider:
         reference_regions: list[list[float] | None] | None = None,
         regional_guidance: bool | None = None,
         purpose: str = "",
+        style_reference_images: list[Path] | None = None,
+        composition_reference_images: list[Path] | None = None,
+        reference_roles_embedded: bool = False,
     ) -> Path:
         endpoint = self.config.image
         groups = [group for group in (reference_image_groups or []) if group]
         references = [path for group in groups for path in group] if groups else (reference_images or [])
         provider = effective_image_provider(endpoint)
+        style_references = style_reference_images or []
+        composition_references = composition_reference_images or []
+        has_visual_references = bool(style_references or composition_references)
+        if has_visual_references:
+            if provider in {"siliconflow", "comfyui"}:
+                raise ProviderError("当前适配器不支持独立画风/构图原图参考，请改用仅文本模式。")
+            from .image_reference_workflow import purpose_prompt
+            if not reference_roles_embedded:
+                prompt = purpose_prompt(prompt, len(references), len(style_references), len(composition_references))
+            references = [*references, *style_references, *composition_references]
+            if not purpose.startswith("reference_probe:"):
+                purpose = "visual_reference:" + purpose
         cloud_prompt = image_prompt_with_negative(prompt, negative_prompt)
+        reference_prompt = cloud_prompt if has_visual_references else reference_aware_prompt(cloud_prompt, bool(references))
         logger.info("image request purpose=%s provider=%s model=%s size=%s reference_count=%s", purpose, provider, model or endpoint.model, size, len(references))
 
         if provider == "comfyui":
@@ -372,7 +394,7 @@ class OpenAICompatibleProvider:
         if provider == "grsai":
             payload = {
                 "model": model or endpoint.model,
-                "prompt": reference_aware_prompt(cloud_prompt, bool(references)),
+                "prompt": reference_prompt,
                 "images": [to_data_url(path) for path in references],
                 "aspectRatio": size,
                 "replyType": "json",
@@ -381,7 +403,7 @@ class OpenAICompatibleProvider:
         elif provider == "ark":
             payload = {
                 "model": model or endpoint.model,
-                "prompt": reference_aware_prompt(cloud_prompt, bool(references)),
+                "prompt": reference_prompt,
                 "sequential_image_generation": os.getenv("FICFRAME_IMAGE_SEQUENTIAL", "disabled"),
                 "response_format": os.getenv("FICFRAME_IMAGE_RESPONSE_FORMAT", "url"),
                 "size": size,
@@ -419,7 +441,7 @@ class OpenAICompatibleProvider:
                 "images/edits",
                 {
                     "model": model or endpoint.model,
-                    "prompt": reference_aware_prompt(cloud_prompt, True),
+                    "prompt": reference_prompt,
                     "size": size,
                     "n": "1",
                 },
@@ -447,7 +469,7 @@ class OpenAICompatibleProvider:
                 with httpx.Client(timeout=self.config.image_timeout) as client:
                     response = client.get(item["url"])
             except httpx.HTTPError as exc:
-                logger.warning("image download exception error=%s", exc)
+                logger.warning("image download exception error=%s", type(exc).__name__ if has_visual_references else exc)
                 raise ProviderError(provider_exception_message("image download", exc, self.config.image_timeout)) from exc
             if response.status_code >= 400:
                 logger.warning("image download failed status=%s", response.status_code)

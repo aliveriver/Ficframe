@@ -64,3 +64,12 @@ def outputs_root() -> Path:
     path = user_data_root() / "outputs"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def visual_presets_root(create: bool = True) -> Path:
+    """Global style/composition preset storage, independent from any run."""
+    path = user_data_root(create=create) / "visual-presets"
+    if create:
+        (path / "references").mkdir(parents=True, exist_ok=True)
+        (path / "drafts").mkdir(parents=True, exist_ok=True)
+    return path

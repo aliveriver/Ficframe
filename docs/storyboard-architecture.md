@@ -9,6 +9,7 @@
 | `ficframe/api.py` | FastAPI 应用装配、通用路由、任务入口和兼容 API |
 | `ficframe/provider_probe.py` | provider、ComfyUI 与本地端口的可达性探测 |
 | `ficframe/run_repository.py` | run 路径校验、`pipeline.json` 读写、事务和投影刷新 |
+| `ficframe/visual_presets.py` | 全局画风/构图预设存储、参考图校验、VLM 草稿字段规范化和 Prompt 约束组装 |
 | `ficframe/storyboard_routes.py` | 分镜请求模型、HTTP 路由和用例编排 |
 | `ficframe/storyboard_workflow.py` | 分镜版本、来源校验、旧数据迁移和重生成保护 |
 | `ficframe/source_reference.py` | `source_ref` 构建、校验、锚点重定位和旧字段迁移 |
@@ -20,6 +21,26 @@
 | `web/html_visual_editor.js` | HTML 成品预览中的图片选择、拖动定位、缩放和文本样式实时映射 |
 
 `pipeline.json` 是当前 run 的唯一规范状态。`storyboard.md` 和 `prompts.md` 是可重新生成的阅读投影，不应反向作为数据源。
+
+### 视觉规范预设
+
+画风（`style`）和构图（`composition`）是独立的全局预设，存放在用户数据目录的 `visual-presets/`，参考图也不进入 run 的角色参考图目录。run 在 `visual_presets` 中记录两个默认 ID 及 `*_snapshot`；`Shot` 用 `*_preset_mode`（`inherit`、`preset`、`none`）表示继承、覆盖或显式禁用。应用预设时固定版本；更改全局预设不自动改变已有绑定，只有显式选择或 `refresh` 才采用最新版。run 默认更新只改变继承项。旧 pipeline 缺少这些字段时由 `RunRepository` 补默认值；早期仅保存默认 ID 的 run 可从匹配的继承分镜快照补全绑定。
+
+职责分为 `visual_presets.py`（原子 JSON 存储、上传校验、纯 Prompt 组装）、`visual_preset_analysis.py`（类型限定 VLM 分析与结果规范化）、`visual_preset_workflow.py`（版本绑定、统一生成解析）、`visual_preset_routes.py`（CRUD、分析和 run API）、`web/visual_presets.js`（前端独立控制器）。单张、选中、全部和失败重试共用解析器，临时组合原始 Prompt 与两类规范，不改写手工 Prompt。生成前事务固定选择，即使调用失败也可稳定重试；成功图片与 `visual_preset_snapshot` 在同一事务提交，记录 ID、版本、规范、参考图路径、组装版本及实际正负 Prompt。`last_generation_visual_snapshot` 表示最近成功生成，当前图片实际规范从相应图片版本读取。
+
+VLM 分析复用 `TaskManager`，任务独立持久化于 `visual-presets/analysis-tasks/analysis/tasks.json`，不依赖 run。分析只生成草稿，类型限定的结构化字段可编辑；未配置、异常或无效返回提供可手填草稿，供应商异常不原样持久化以免回显凭据或图像请求内容。浏览器单独保存编辑草稿和待分析 task ID，刷新后可恢复。选择保存排队串行，生图等待选择及分镜保存完成再提交。
+
+参考图上传校验数量、扩展名、MIME、文件头和大小；客户端文件名去路径并安全化。预览接口仅可访问存储内三段 `drafts|references/<owner>/<filename>` 图片路径，不开放整个存储目录。删除或替换参考图时保留历史原文件，分析草稿和任务结果也暂不自动清理，避免悬空引用；后续垃圾回收需同时考虑 run、历史版本、任务与待确认编辑器。没有 ControlNet、漫画页或画格概念。
+
+### 文本 / 原图双模式及多图能力验证
+
+预设的 `reference_mode` 为 `text` 或 `image`（旧预设默认为文本），仅作为选择 run 预设时的建议。run 分别记录 `style_reference_mode`、`composition_reference_mode`，单条 `Shot` 同名字段还可取 `inherit`，独立于 `*_preset_mode` 的预设来源选择。绑定快照记录当时有效模式与原始图片路径；仅文本模式不发送视觉图片，即使预设保留参考图。手工原图上传不调用 VLM，分析操作仍只返回待确认草稿。新字段加入保存、修订和浏览器恢复链路，旧 run 继续默认文本。
+
+`image_reference_workflow.py` 负责图片用途 Prompt、原图路径解析、总图数 preflight、能力记录和显式实际测试。单张/批量共用 `image_generation_inputs`。`provider.image` 新增独立 `style_reference_images`、`composition_reference_images` 参数，不写入 `reference_image_groups`。云端最终发送顺序为角色身份、画风、构图，Prompt 使用 1-based 序号逐组说明用途；视觉图片存在时不再套用“所有图片都是角色设计”的旧身份模板。原有仅角色参考行为保持不变。模式、用途排序、数量、能力依据随生成快照保存。
+
+能力测试需 `confirmed: true`，复用全局后台任务机制，发送 2–32 张内置 PNG 色块，实际生成一张图（可能计费），临时输入和输出仅在任务自有临时目录保存，结束自动清理。成功仅表示多图请求得到图片，无法证明每张图被模型使用。浏览器保存测试 task ID，刷新或临时断网后可继续监控原任务，不重复发起收费测试；并发点击也只提交一次。能力缓存 `visual-presets/reference-capabilities.json` 按供应商、地址、模型、凭据散列、尺寸和适配器版本隔离，不保存 API key。preflight 统计人设＋画风＋构图总数；超过测试数量、未验证或已拒绝时阻止原图生成。限流、鉴权、超时等记为 `unknown`，不误判“不支持”，明确拒绝参考图时记为 `unsupported`，可重新测试；不做静默文本降级。
+
+当前 SiliconFlow 适配器没有发送视觉原图的参数，ComfyUI 只有现有身份参考工作流，两者标为适配器不支持，不触发无意义收费测试。通用编辑接口、GRSAI、Ark 沿用已有图片参数形状，通过用户确认测试验证其具体模型；不新增 ControlNet/IP-Adapter 样式或布局工作流。视觉原图调用和测试日志不保存文本预览、图像内容及供应商原始错误响应。
 
 ## 核心不变量
 
@@ -74,6 +95,15 @@
 - `POST /api/storyboard/prompt-task`：结合独立 Prompt 反馈重建生图 Prompt。
 - `POST /api/images/task`：生成单张图片。
 - `POST /api/images/batch-task`：生成选中、全部或失败项图片。
+- `POST /api/visual-presets/analyze-task`：后台分析画风或构图参考图，返回待确认草稿。
+- `GET/POST/PATCH/DELETE /api/visual-presets`：全局视觉预设的列表、创建、编辑和删除。
+- `GET /api/visual-presets/reference/{zone}/{owner}/{filename}`：安全预览参考图。
+- `POST /api/runs/{run_id}/visual-presets`：保存默认选择；`refresh: true` 显式采用最新版。
+- `POST /api/runs/{run_id}/shots/{shot_id}/visual-presets`：保存单条选择；同样支持显式更新。
+- `POST /api/runs/{run_id}/visual-preview`：只读预览生图规范和最终 Prompt。
+- `POST /api/visual-presets/upload`：只上传原图并返回草稿路径，不调用 VLM 或自动保存预设。
+- `GET /api/image-reference-capability?size=...`：查询当前已保存图片模型/尺寸的多图能力，不产生外部请求。
+- `POST /api/image-reference-test-task`：确认后实际多图测试，返回后台任务；`confirmed`、`reference_count`、`size`。
 - `GET /api/export/{run_id}.md`：生成并返回图文 Markdown。
 - `GET /api/export/{run_id}.html`：按当前 HTML 图片布局和文本设置生成并返回 HTML。
 - `GET /api/export/{run_id}`：生成导出目录并返回 Markdown、图片目录、manifest、主题说明和 ZIP 的路径/URL。

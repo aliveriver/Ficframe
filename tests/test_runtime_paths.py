@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ficframe.desktop import available_port
-from ficframe.runtime_paths import user_data_root
+from ficframe.runtime_paths import user_data_root, visual_presets_root
 
 
 class RuntimePathTests(unittest.TestCase):
@@ -31,6 +31,20 @@ class RuntimePathTests(unittest.TestCase):
             os.environ, {"FICFRAME_DATA_DIR": directory}, clear=False
         ):
             self.assertEqual(user_data_root(create=False), Path(directory).resolve())
+
+    def test_visual_presets_use_overridden_global_data_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"FICFRAME_DATA_DIR": directory}):
+            root = visual_presets_root()
+            self.assertEqual(root, Path(directory).resolve() / "visual-presets")
+            self.assertTrue((root / "drafts").is_dir())
+            self.assertTrue((root / "references").is_dir())
+
+    def test_visual_presets_use_packaged_data_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("FICFRAME_DATA_DIR", None)
+            executable = Path(directory) / "FicFrame.exe"
+            with patch("ficframe.runtime_paths.is_frozen", return_value=True), patch.object(sys, "executable", str(executable)):
+                self.assertEqual(visual_presets_root(create=False), executable.parent / "data" / "visual-presets")
 
 
 class DesktopPortTests(unittest.TestCase):

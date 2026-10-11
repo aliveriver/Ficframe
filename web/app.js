@@ -48,6 +48,47 @@ const el = {
   rulesPanel: document.querySelector("#rulesPanel"),
   imageSize: document.querySelector("#imageSize"),
   customImageSize: document.querySelector("#customImageSize"),
+  runStylePreset: document.querySelector("#runStylePreset"),
+  runCompositionPreset: document.querySelector("#runCompositionPreset"),
+  shotStylePreset: document.querySelector("#shotStylePreset"),
+  shotCompositionPreset: document.querySelector("#shotCompositionPreset"),
+  refreshVisualPresetsBtn: document.querySelector("#refreshVisualPresetsBtn"),
+  createStylePresetBtn: document.querySelector("#createStylePresetBtn"),
+  createCompositionPresetBtn: document.querySelector("#createCompositionPresetBtn"),
+  stylePresetImages: document.querySelector("#stylePresetImages"),
+  compositionPresetImages: document.querySelector("#compositionPresetImages"),
+  analyzeStylePresetBtn: document.querySelector("#analyzeStylePresetBtn"),
+  analyzeCompositionPresetBtn: document.querySelector("#analyzeCompositionPresetBtn"),
+  visualPresetStatus: document.querySelector("#visualPresetStatus"),
+  visualPresetDialog: document.querySelector("#visualPresetDialog"),
+  visualPresetForm: document.querySelector("#visualPresetForm"),
+  visualPresetDialogTitle: document.querySelector("#visualPresetDialogTitle"),
+  visualPresetName: document.querySelector("#visualPresetName"),
+  visualPresetPositive: document.querySelector("#visualPresetPositive"),
+  visualPresetNegative: document.querySelector("#visualPresetNegative"),
+  visualPresetDraftState: document.querySelector("#visualPresetDraftState"),
+  cancelVisualPresetBtn: document.querySelector("#cancelVisualPresetBtn"),
+  saveVisualPresetBtn: document.querySelector("#saveVisualPresetBtn"),
+  visualPresetStructured: document.querySelector("#visualPresetStructured"),
+  visualPresetDraftImages: document.querySelector("#visualPresetDraftImages"),
+  resumeVisualPresetDraftBtn: document.querySelector("#resumeVisualPresetDraftBtn"),
+  adoptRunVisualPresetsBtn: document.querySelector("#adoptRunVisualPresetsBtn"),
+  adoptShotVisualPresetsBtn: document.querySelector("#adoptShotVisualPresetsBtn"),
+  visualPresetEffective: document.querySelector("#visualPresetEffective"),
+  visualFinalPrompt: document.querySelector("#visualFinalPrompt"),
+  visualFinalNegative: document.querySelector("#visualFinalNegative"),
+  runStyleReferenceMode: document.querySelector("#runStyleReferenceMode"),
+  runCompositionReferenceMode: document.querySelector("#runCompositionReferenceMode"),
+  shotStyleReferenceMode: document.querySelector("#shotStyleReferenceMode"),
+  shotCompositionReferenceMode: document.querySelector("#shotCompositionReferenceMode"),
+  visualPresetReferenceMode: document.querySelector("#visualPresetReferenceMode"),
+  visualPresetReferenceFiles: document.querySelector("#visualPresetReferenceFiles"),
+  uploadVisualPresetReferencesBtn: document.querySelector("#uploadVisualPresetReferencesBtn"),
+  analyzeEditorReferencesBtn: document.querySelector("#analyzeEditorReferencesBtn"),
+  clearVisualPresetReferencesBtn: document.querySelector("#clearVisualPresetReferencesBtn"),
+  imageReferenceCapability: document.querySelector("#imageReferenceCapability"),
+  testImageReferencesBtn: document.querySelector("#testImageReferencesBtn"),
+  visualReferenceWarning: document.querySelector("#visualReferenceWarning"),
   charactersBox: document.querySelector("#charactersBox"),
   characterDiffBox: document.querySelector("#characterDiffBox"),
   shotList: document.querySelector("#shotList"),
@@ -105,6 +146,7 @@ const el = {
   skipExistingImages: document.querySelector("#skipExistingImages"),
   imageRetryCount: document.querySelector("#imageRetryCount"),
   preview: document.querySelector("#preview"),
+  visualPromptSnapshot: document.querySelector("#visualPromptSnapshot"),
   imageVersions: document.querySelector("#imageVersions"),
   qaBox: document.querySelector("#qaBox"),
   htmlFontFamily: document.querySelector("#htmlFontFamily"),
@@ -229,6 +271,11 @@ const novelSource = window.FicFrameNovelSource.createController({
   escapeHtml,
   loadNovel: loadNovelForRun,
 });
+const visualPresets = window.FicFrameVisualPresets.createController({
+  state, elements: el, api, taskMonitor, escapeHtml, setBusy,
+  storage: localStorage, saveWorkspaceDraft, persistStoryboard,
+  selectedImageSize,
+});
 const imageWorkflow = window.FicFrameImageWorkflow.createController({
   state,
   elements: el,
@@ -239,9 +286,11 @@ const imageWorkflow = window.FicFrameImageWorkflow.createController({
   setBusy,
   saveSelectedPrompt,
   saveCharacterEditor,
+  saveShotEditor,
   saveWorkspaceDraft,
   renderShots,
   selectedImageSize,
+  prepareGeneration: visualPresets.prepareGeneration,
 });
 
 function saveWorkspaceDraft() {
@@ -269,6 +318,7 @@ function hydrateWorkspace(payload, preferredShotId = null) {
   const previousRunId = state.runId;
   state.runId = payload.runId || payload.run_id;
   state.shots = payload.shots || [];
+  state.selected = null;
   state.scenes = payload.scenes || [];
   const allCharacters = payload.characters || [];
   const partitioned = partitionCharacters(allCharacters);
@@ -284,6 +334,8 @@ function hydrateWorkspace(payload, preferredShotId = null) {
   state.storyboardMessages = payload.storyboardMessages || payload.storyboard_messages || [];
   state.promptFeedbackMessages = payload.promptFeedbackMessages || payload.prompt_feedback_messages || [];
   state.storyboardVersions = payload.storyboardVersions || payload.storyboard_versions || {};
+  state.visualPresetDefaults = payload.visualPresetDefaults || (Array.isArray(payload.visual_presets) ? { style_id: null, composition_id: null } : payload.visual_presets) || { style_id: null, composition_id: null };
+  visualPresets.renderSelectors();
   state.htmlSettings = workspaceState.createHtmlSettings(payload.htmlSettings || payload.html_settings || state.htmlSettings);
   state.selectedShotIds = new Set(payload.selectedShotIds || []);
   state.selectedCharacterIndex = Math.min(payload.selectedCharacterIndex || 0, Math.max(0, state.characters.length - 1));
@@ -308,6 +360,7 @@ async function refreshRunAfterTask(runId, preferredShotId = null) {
 
 function clearRunArtifacts(message = "新输入已选择，请重新生成分镜") {
   workspaceState.resetRun(state);
+  visualPresets.renderSelectors();
   el.runId.textContent = "新输入未运行";
   el.shotList.innerHTML = "";
   el.promptBox.value = "";
@@ -327,6 +380,7 @@ function clearRunArtifacts(message = "新输入已选择，请重新生成分镜
 function clearWorkspaceForRecording(message = "") {
   localStorage.removeItem(WORKSPACE_KEY);
   workspaceState.resetAll(state);
+  visualPresets.renderSelectors();
   el.runId.textContent = "未运行";
   el.shotList.innerHTML = "";
   el.promptBox.value = "";
@@ -639,6 +693,8 @@ async function saveProviders() {
     renderProviderDetail();
     await checkHealth();
     el.health.textContent = "供应商配置已保存";
+    await visualPresets.refreshCapability();
+    await visualPresets.preview();
   } catch (error) {
     el.providerTestResult.textContent = error.message;
     el.health.textContent = error.message;
@@ -766,6 +822,7 @@ function selectShot(index) {
   renderStoryboardVersions();
   el.qaBox.textContent = (state.selected?.qa_notes || []).join("\n");
   el.preview.innerHTML = state.selected?.image_url ? `<img alt="${state.selected.id}" src="${state.selected.image_url}" />` : "";
+  renderVisualPromptSnapshot();
   imageWorkflow.renderVersions();
   document.querySelectorAll(".shot").forEach((node, nodeIndex) => {
     node.classList.toggle("active", nodeIndex === index);
@@ -795,6 +852,7 @@ function loadShotEditor() {
   el.shotSourceExcerpt.textContent = shot
     ? sourceReferenceSummary(shot)
     : "选择分镜后显示对应小说段落";
+  visualPresets.loadShot();
   loadHtmlLayoutEditor();
 }
 
@@ -816,7 +874,12 @@ function saveShotEditor() {
   state.selected.camera = el.shotCamera.value.trim();
   state.selected.composition = el.shotComposition.value.trim();
   state.selected.visual_goal = el.shotVisualGoal.value.trim();
+  visualPresets.saveShot();
   saveHtmlLayoutEditor();
+}
+
+function renderVisualPromptSnapshot() {
+  visualPresets.renderSnapshot();
 }
 
 function loadHtmlLayoutEditor() {
@@ -1584,6 +1647,7 @@ function renderPromptFeedbackHistory() {
 
 async function persistStoryboard({ quiet = false } = {}) {
   if (!state.runId) return;
+  await visualPresets.flush();
   saveSelectedPrompt();
   saveShotEditor();
   saveHtmlSettings();
@@ -1594,6 +1658,8 @@ async function persistStoryboard({ quiet = false } = {}) {
   state.promptFeedbackMessages = data.prompt_feedback_messages || state.promptFeedbackMessages;
   state.storyboardVersions = data.storyboard_versions || state.storyboardVersions;
   state.htmlSettings = workspaceState.createHtmlSettings(data.html_settings || state.htmlSettings);
+  state.visualPresetDefaults = data.visual_presets || state.visualPresetDefaults;
+  state.selected = null;
   renderHtmlSettings();
   renderShots(preferredId);
   renderFeedbackHistory();
@@ -2076,10 +2142,12 @@ el.testProviderBtn.addEventListener("click", testProvider);
 el.promptBox.addEventListener("input", () => {
   saveSelectedPrompt();
   scheduleWorkspaceDraftSave();
+  visualPresets.schedulePreview();
 });
 el.negativePromptBox.addEventListener("input", () => {
   saveSelectedPrompt();
   scheduleWorkspaceDraftSave();
+  visualPresets.schedulePreview();
 });
 for (const node of [el.shotTitle, el.shotLocation, el.shotTime, el.shotCharacters, el.shotMood, el.shotCamera, el.shotComposition, el.shotVisualGoal]) {
   node.addEventListener("input", () => {
@@ -2087,6 +2155,7 @@ for (const node of [el.shotTitle, el.shotLocation, el.shotTime, el.shotCharacter
     scheduleWorkspaceDraftSave();
   });
 }
+visualPresets.bindEvents();
 for (const node of [el.htmlImagePosition, el.htmlImageWidth, el.htmlImageCustomWidth, el.htmlImageCaption, el.htmlImageAlignment, el.htmlImageWrap]) {
   node.addEventListener("input", () => {
     saveHtmlLayoutEditor();
@@ -2268,6 +2337,10 @@ el.feedbackInput.addEventListener("keydown", (event) => {
 window.addEventListener("beforeunload", saveWorkspaceDraft);
 
 renderHtmlSettings();
+visualPresets.refresh().catch(() => {});
+visualPresets.refreshCapability().catch((error) => { el.imageReferenceCapability.textContent = `能力检查失败：${error.message}`; });
+visualPresets.resumeProbe().catch((error) => { el.health.textContent = `恢复多图测试失败：${error.message}`; });
+visualPresets.resume().catch((error) => { el.health.textContent = `恢复规范草稿失败：${error.message}`; });
 loadConfig().catch((error) => {
   el.health.textContent = error.message;
 });

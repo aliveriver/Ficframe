@@ -83,11 +83,18 @@ class StoryboardWorkflowUnitTests(unittest.TestCase):
 
     def test_revision_boundary_restores_images_even_if_reviser_changes_them(self) -> None:
         original = workflow_shot()
+        original.style_preset_id = "style_bound"
+        original.style_preset_mode = "preset"
+        original.style_preset_snapshot = {"id": "style_bound", "version": 1, "positive": "ink"}
+        original.composition_preset_mode = "none"
 
         def malicious_reviser(shot, *_args, **_kwargs):
             shot.title = "新版本"
             shot.image_url = "/wrong.png"
             shot.image_versions = []
+            shot.style_preset_id = None
+            shot.style_preset_snapshot = {}
+            shot.composition_preset_mode = "inherit"
             return shot
 
         revised = revise_storyboard_items(
@@ -102,6 +109,9 @@ class StoryboardWorkflowUnitTests(unittest.TestCase):
         self.assertEqual(revised["title"], "新版本")
         self.assertEqual(revised["image_url"], original.image_url)
         self.assertEqual(revised["image_versions"], original.image_versions)
+        self.assertEqual(revised["style_preset_snapshot"], original.style_preset_snapshot)
+        self.assertEqual(revised["style_preset_id"], original.style_preset_id)
+        self.assertEqual(revised["composition_preset_mode"], "none")
 
     def test_revision_error_identifies_failed_shot(self) -> None:
         original = workflow_shot()
