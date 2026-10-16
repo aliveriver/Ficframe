@@ -284,8 +284,11 @@ class WorkflowTests(unittest.TestCase):
                 )
 
         self.assertTrue(result["ok"])
-        self.assertEqual(captured["prompt"], "positive only")
-        self.assertEqual(captured["negative_prompt"], "negative only")
+        self.assertTrue(str(captured["prompt"]).endswith("positive only"))
+        self.assertIn("one frozen moment", captured["prompt"])
+        self.assertNotIn("negative only", captured["prompt"])
+        self.assertTrue(str(captured["negative_prompt"]).startswith("negative only,"))
+        self.assertIn("panel grid", captured["negative_prompt"])
 
     def test_llm_layout_drives_overlapping_two_dimensional_masks(self) -> None:
         example = Path(__file__).resolve().parents[2] / "examples" / "comfyui" / "ficframe_sdxl_ipadapter_api.json"

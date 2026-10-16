@@ -131,5 +131,5 @@ def resolve_generation(store: VisualPresetStore, payload: dict[str, Any], shot: 
     active_kinds = visual_preset_kinds()
     snapshot = {kind: deepcopy(getattr(shot, f"{kind}_preset_snapshot")) if kind in active_kinds else {} for kind in KINDS}
     positive, negative = build_visual_prompt(shot.positive_prompt, shot.negative_prompt, snapshot["style"], snapshot["composition"])
-    snapshot.update({"assembly_version": 3, "positive_prompt": positive, "negative_prompt": negative})
+    snapshot.update({"assembly_version": 4, "positive_prompt": positive, "negative_prompt": negative})
     return positive, negative, snapshot

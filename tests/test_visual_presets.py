@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from ficframe import api, features
 from ficframe.models import Shot, to_dict
-from ficframe.prompts import DEFAULT_STYLE_FINISH, REFERENCE_CONTINUITY, build_negative_prompt
+from ficframe.prompts import DEFAULT_STYLE_FINISH, REFERENCE_CONTINUITY, SINGLE_FRAME_RULE, build_negative_prompt, single_frame_constraints
 from ficframe.run_repository import RunRepository
 from ficframe.style import DEFAULT_STYLE
 from ficframe.storyboard_visual_guidance import style_neutral_errors
@@ -34,6 +34,21 @@ class VisualPresetTests(unittest.TestCase):
         self.assertNotIn("person_name", style["raw"])
         self.assertEqual(composition["structured"]["shot"], "wide")
 
+    def test_one_frame_layout_is_enforced_independently_of_drawing_style(self):
+        scene = "Scene: First she smooths the sheet, then they hold hands, later they touch foreheads.\nLighting: Lights out, no lamps."
+        for style in (None, {"positive": "ink", "reference_mode": "text"},
+                      {"reference_mode": "image", "reference_images": ["style.png"]}):
+            with self.subTest(style=style):
+                positive, negative = build_visual_prompt(scene, "extra fingers", style)
+                self.assertTrue(positive.startswith(SINGLE_FRAME_RULE))
+                self.assertIn(scene, positive)
+                self.assertIn("one frozen moment", positive)
+                for exclusion in ("panel grid", "nine-panel grid", "split screen", "collage", "storyboard sheet", "speech bubbles"):
+                    self.assertIn(exclusion, negative)
+                self.assertIn("extra fingers", negative)
+                self.assertEqual(single_frame_constraints(positive, negative), (positive, negative))
+                self.assertNotIn("manga", negative)
+
     def test_prompt_assembly_does_not_replace_original_prompt(self) -> None:
         positive, negative = build_visual_prompt(
             "original scene", "existing negative",
@@ -54,7 +69,8 @@ class VisualPresetTests(unittest.TestCase):
         style = {"id": "style_1", "reference_mode": "image", "reference_images": ["references/style/ref.png"],
                  "positive": "", "negative": ""}
         positive, negative = build_visual_prompt(original, original_negative, style)
-        self.assertTrue(positive.startswith("Style priority:"))
+        self.assertTrue(positive.startswith(SINGLE_FRAME_RULE))
+        self.assertIn("Style priority:", positive)
         self.assertIn("head-to-body and facial proportions", positive)
         self.assertIn("Bedroom, morning. Exactly two adults hold hands.", positive)
         self.assertIn("identity and age", positive)
@@ -65,9 +81,9 @@ class VisualPresetTests(unittest.TestCase):
         self.assertIn("bad anatomy", negative)
         self.assertIn("wrong hair color", negative)
         # Without an active style, even the generated defaults remain intact.
-        self.assertEqual(build_visual_prompt(original, original_negative), (original, original_negative))
+        self.assertEqual(build_visual_prompt(original, original_negative), single_frame_constraints(original, original_negative))
         self.assertEqual(build_visual_prompt(original, original_negative, {"id": "empty", "positive": ""}),
-                         (original, original_negative))
+                         single_frame_constraints(original, original_negative))
 
     def test_structured_style_is_used_and_custom_scene_lighting_is_preserved(self) -> None:
         original = "Scene: bedroom\n\nLighting and style:\nMorning sunlight through the window."

@@ -7,6 +7,7 @@ from typing import Any
 from .logging_utils import get_logger
 from .models import CharacterCard, Scene, Shot
 from .providers import OpenAICompatibleProvider, ProviderError
+from .prompts import SINGLE_FRAME_LLM_RULE
 from .text_utils import compact
 from .storyboard_visual_guidance import remember_prompt_style, style_neutral_errors
 from .visual_presets import VisualPresetStore
@@ -29,10 +30,11 @@ def storyboard_text(provider: OpenAICompatibleProvider, system: str, payload: di
             " Selected visual_guides are pinned text-only guidance. No images are attached. "
             "Do not invent visual observations or call a vision model. "
             "The current shot prompts include the user's edits: preserve their scene facts, light sources, "
-            "time, actions, dialogue, props, composition, character identity and explicit non-style constraints. "
+            "time, props, composition, character identity and explicit non-style constraints for the chosen moment; "
+            "use dialogue and earlier or later actions as narrative context. "
             "Compare previous_generated_prompt when available to identify and preserve user modifications. "
             "When the style selection changes, replace obsolete style definitions and negative style exclusions "
-            "instead of appending a second conflicting style. Preserve unrelated edits and all factual content, "
+            "instead of appending a second conflicting style. Preserve unrelated edits and factual content for the chosen moment, "
             "including facts inside mixed Lighting and style sections or unfamiliar sections such as Action. "
             "In text mode, write the supplied textual style into the prompt. "
             "If no guide is selected now, stop enforcing the previous preset and use the normal prompt behavior. "
@@ -45,10 +47,16 @@ def storyboard_text(provider: OpenAICompatibleProvider, system: str, payload: di
             "Neither positive_prompt nor negative_prompt may define drawing style, rendering, linework, "
             "stylization or artistic proportions. Do not exclude chibi, flat colors or cel shading. "
             "The image model alone chooses the drawing treatment from actual style references. "
-            "Keep physical scene lighting in a separate Lighting section, with all story facts intact."
+            "Keep physical scene lighting in a separate Lighting section, with the selected moment's facts intact."
         )
         payload.get("required_schema", {})["positive_prompt"] = "English structured scene prompt; preserve facts and user edits, omit all artistic style definitions"
         payload.get("required_schema", {})["negative_prompt"] = "English constraints on quality, anatomy and identity; no artistic style exclusions"
+    system += SINGLE_FRAME_LLM_RULE
+    schema = payload.get("required_schema", {})
+    if "positive_prompt" in schema:
+        schema["positive_prompt"] += "; describe only one frozen moment in one continuous full-frame scene, no chronological action lists or transcribed dialogue"
+    if "negative_prompt" in schema:
+        schema["negative_prompt"] += "; exclude panel grids, multi-panel layout, insets, collages, storyboard sheets, captions and speech bubbles"
     raw = provider.text(system, json.dumps(payload, ensure_ascii=False), purpose=purpose)
     if not image_style:
         return raw
@@ -58,7 +66,7 @@ def storyboard_text(provider: OpenAICompatibleProvider, system: str, payload: di
         # Give the full candidate and original to the LLM. No regex deletes any
         # narrative, negative prompt, unknown section or user-authored text.
         repair = {**payload, "candidate": data, "corrections_required": errors}
-        raw = provider.text(system + " Correct the candidate while preserving every non-style fact and user edit. Return the full required JSON.",
+        raw = provider.text(system + " Correct the candidate while preserving non-style facts and user edits for the chosen moment. Keep source text intact. Return the full required JSON.",
                             json.dumps(repair, ensure_ascii=False), purpose=purpose + ":style_repair")
         data = parse_llm_json(raw)
         if style_neutral_errors(data):

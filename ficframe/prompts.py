@@ -52,6 +52,40 @@ DEFAULT_CONTINUITY_NEGATIVE = (
     "romantic exaggeration when not in story, overly dramatic posing, chibi, childlike appearance"
 )
 
+SINGLE_FRAME_RULE = (
+    "Output format: exactly one full-frame illustration, one continuous scene, one camera view, "
+    "one frozen moment in time. Select one emotionally meaningful instant from any sequence below; "
+    "earlier and later events and quoted dialogue are narrative context only. Show each character "
+    "once in one physically consistent pose. No panel grid, split screen, collage, inset, montage, "
+    "comic page, storyboard sheet, sequence of repeated characters, panel borders, captions or speech bubbles. "
+    "Reference sheets may guide appearance or drawing technique, but never copy their panel layout."
+)
+SINGLE_FRAME_NEGATIVE = (
+    "multiple panels, panel grid, nine-panel grid, split screen, collage, montage, inset panels, "
+    "comic page layout, storyboard sheet, panel borders, sequential repeated characters, speech bubbles, captions"
+)
+SINGLE_FRAME_LLM_RULE = (
+    " Each shot is ONE illustration, not a sequence of panels. Choose ONE visually meaningful frozen moment "
+    "that fits the user's latest feedback and visual_goal. Give every character one simultaneous, physically "
+    "consistent pose and a single expression. Do not transcribe the whole story, dialogue or successive actions "
+    "into positive_prompt or per-character actions. Earlier/later events and remembered scenes are context only; "
+    "keep the original source_text/source_excerpt intact in their own fields. Preserve user edits and factual "
+    "details applicable to the chosen moment, including location, darkness, light sources, identity and props. "
+    "Express dialogue through the chosen visible expression, never captions or speech bubbles. "
+    "Explicitly require one continuous full-frame scene, with no grids, multiple panels, insets, collages or "
+    "storyboard layout; include these layout exclusions in negative_prompt. These are output-layout constraints, "
+    "not drawing-style definitions: selected style references still control drawing technique."
+)
+
+
+def single_frame_constraints(positive: str, negative: str) -> tuple[str, str]:
+    """Constrain the final request without editing the stored narrative prompt."""
+    if SINGLE_FRAME_RULE not in positive:
+        positive = SINGLE_FRAME_RULE + ("\n\n" + positive if positive else "")
+    existing = {term.strip().casefold() for term in negative.split(",")}
+    missing = [term for term in SINGLE_FRAME_NEGATIVE.split(", ") if term.casefold() not in existing]
+    return positive, ", ".join(part for part in (negative, ", ".join(missing)) if part)
+
 
 def without_default_style(positive: str, negative: str) -> tuple[str, str]:
     """Remove the generated style scaffold when a selected guide replaces it."""

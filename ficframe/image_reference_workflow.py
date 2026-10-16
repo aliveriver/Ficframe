@@ -31,7 +31,7 @@ def purpose_prompt(prompt: str, identity_count: int, style_count: int, compositi
     for count, instruction in (
         (identity_count, "character identity and appearance only; apply the selected drawing style to these identities"),
         (style_count, "drawing style only: match stylization, head-to-body and facial proportions, shape simplification, linework, rendering, palette, light, materials and level of detail; ignore depicted identities, clothing, props, plot and layout"),
-        (composition_count, "composition only: shot scale, viewpoint, placement, whitespace and spatial relationships; ignore depicted identities, clothing, props, plot and drawing style"),
+        (composition_count, "composition only: shot scale, viewpoint, placement, whitespace and spatial relationships within one continuous frame; ignore depicted identities, clothing, props, plot, drawing style, panel borders and multi-panel layouts"),
     ):
         if count:
             parts.append(f"Images {offset + 1}-{offset + count}: {instruction}.")

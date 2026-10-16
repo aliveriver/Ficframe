@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterable
 
-from .prompts import without_default_style
+from .prompts import single_frame_constraints, without_default_style
 from .runtime_paths import visual_presets_root
 
 
@@ -162,7 +162,7 @@ def build_visual_prompt(base_positive: str, base_negative: str, style: dict[str,
             positive_parts.append(f"{label}: {positive}")
         if negative:
             negative_parts.append(f"{label} avoid: {negative}")
-    return "\n\n".join(part for part in positive_parts if part), ", ".join(part for part in negative_parts if part)
+    return single_frame_constraints("\n\n".join(part for part in positive_parts if part), ", ".join(part for part in negative_parts if part))
 
 
 class VisualPresetStore:

@@ -18,7 +18,7 @@ from ficframe.llm_pipeline import polish_shot_prompt
 from ficframe.pipeline import polish_shots_with_llm
 from ficframe.storyboard_visual_guidance import style_neutral_errors
 from ficframe.providers import EndpointConfig, ProviderError
-from ficframe.prompts import build_negative_prompt, build_positive_prompt
+from ficframe.prompts import SINGLE_FRAME_RULE, build_negative_prompt, build_positive_prompt, single_frame_constraints
 from ficframe.run_repository import RunRepository
 from ficframe.task_manager import TaskManager
 from ficframe.visual_presets import MAX_REFERENCE_BYTES, VisualPresetStore, preset_snapshot
@@ -178,6 +178,29 @@ class VisualPresetIntegrationTests(unittest.TestCase):
             self.assertEqual(kwargs["negative_prompt"], preview.json()["negative_prompt"])
         self.assertEqual(self.repository.load("run")["shots"][0]["positive_prompt"], shot["positive_prompt"])
         self.assertEqual(self.store.get(style["id"])["version"], 1)
+
+    def test_existing_sequence_gets_one_frame_constraints_in_preview_single_and_batch(self):
+        shot = self.repository.load("run")["shots"][0]
+        original = "Scene: Bedroom, lights out. First she smooths the sheet. Then he warms her foot. Later they laugh and touch foreheads.\nLighting: No lamps or screen light."
+        shot.update(positive_prompt=original, negative_prompt="extra fingers")
+        preview = self.client.post("/api/runs/run/visual-preview", json={"shot": shot})
+        self.assertEqual(preview.status_code, 200, preview.text)
+        single = self.client.post("/api/images", json={"run_id": "run", "shot": shot})
+        batch = self.client.post("/api/images/batch", json={"run_id": "run", "shots": [shot], "skip_existing": False})
+        self.assertEqual(single.status_code, 200, single.text)
+        self.assertEqual(batch.status_code, 200, batch.text)
+        self.assertTrue(batch.json()["results"][0]["ok"], batch.text)
+        self.assertEqual(len(self.provider.calls), 2)
+        for prompt, kwargs in self.provider.calls:
+            self.assertTrue(prompt.startswith(SINGLE_FRAME_RULE))
+            self.assertIn(original, prompt)
+            self.assertEqual(prompt, preview.json()["positive_prompt"])
+            self.assertEqual(kwargs["negative_prompt"], preview.json()["negative_prompt"])
+            self.assertIn("panel grid", kwargs["negative_prompt"])
+        saved = self.repository.load("run")["shots"][0]
+        self.assertEqual(saved["positive_prompt"], "USER BASE")
+        self.assertEqual(saved["image_versions"][-1]["visual_preset_snapshot"]["assembly_version"], 4)
+        self.assertEqual(saved["image_versions"][-1]["visual_preset_snapshot"]["positive_prompt"], preview.json()["positive_prompt"])
 
     def test_initial_pipeline_llm_receives_text_policy_before_writing_prompts(self):
         style = self.create(positive="flat manga", reference_mode="image",
@@ -636,7 +659,7 @@ class VisualPresetIntegrationTests(unittest.TestCase):
         self.repository.save("legacy", {"shots": [shot_data()]})
         payload = self.repository.load("legacy")
         positive, negative, snapshot = resolve_generation(self.store, payload, Shot(**payload["shots"][0]))
-        self.assertEqual((positive, negative), ("USER BASE", "USER NEG"))
+        self.assertEqual((positive, negative), single_frame_constraints("USER BASE", "USER NEG"))
         self.assertEqual(snapshot["style"], {})
         style = self.create()
         old = shot_data()
