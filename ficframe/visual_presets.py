@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import mimetypes
 import os
@@ -11,6 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterable
 
+from .prompts import without_default_style
 from .runtime_paths import visual_presets_root
 
 
@@ -86,7 +88,7 @@ def normalize_vlm_draft(preset_type: str, value: Any) -> dict[str, Any]:
     if kind == "style":
         positive_keys = ("positive", "positive_prompt", "style_prompt", "style_constraints")
         negative_keys = ("negative", "negative_prompt", "avoid", "negative_constraints")
-        allowed = {"linework", "color", "lighting", "materials", "background", "rendering", "positive", "negative", "summary"}
+        allowed = {"stylization", "proportions", "linework", "color", "lighting", "materials", "background", "rendering", "positive", "negative", "summary"}
     else:
         positive_keys = ("positive", "positive_prompt", "composition_prompt", "composition_constraints")
         negative_keys = ("negative", "negative_prompt", "avoid", "negative_constraints")
@@ -111,14 +113,50 @@ def normalize_vlm_draft(preset_type: str, value: Any) -> dict[str, Any]:
     }
 
 
+def style_guide_text(style: dict[str, Any] | None) -> tuple[str, str]:
+    if not isinstance(style, dict):
+        return "", ""
+    guide = str(style.get("positive") or "").strip()
+    analysis = style.get("vlm_analysis")
+    structured = style.get("structured") or (analysis.get("structured", {}) if isinstance(analysis, dict) else {})
+    structured = normalize_vlm_draft("style", {"structured": structured})["structured"]
+    details = "; ".join(f"{key}: {value.strip()}" for key, value in structured.items()
+                        if isinstance(value, str) and value.strip())
+    return guide, details
+
+
+def has_style_guide(style: dict[str, Any] | None) -> bool:
+    guide, details = style_guide_text(style)
+    return bool(guide or details or (isinstance(style, dict) and style.get("reference_mode") == "image" and style.get("reference_images")))
+
+
 def build_visual_prompt(base_positive: str, base_negative: str, style: dict[str, Any] | None = None, composition: dict[str, Any] | None = None) -> tuple[str, str]:
     """Assemble visual constraints without mutating the user's original prompt."""
-    positive_parts = [str(base_positive or "").strip()]
-    negative_parts = [str(base_negative or "").strip()]
+    positive = str(base_positive or "").strip()
+    negative = str(base_negative or "").strip()
+    style_parts = []
+    if has_style_guide(style):
+        guide, details = style_guide_text(style)
+        positive, negative = without_default_style(positive, negative)
+        style_parts.append(
+            "Style priority: The selected style guide and its style reference images define the visual treatment "
+            "of the entire illustration, including stylization, head-to-body and facial proportions, shape simplification, "
+            "linework, shading, texture and level of detail. They take precedence over conflicting rendering tags "
+            "in the scene prompt and the drawing style of character identity references. Preserve the requested scene, "
+            "each character's recognizable identity and age, actions and spatial relationships while applying this style consistently."
+        )
+        if guide and style.get("reference_mode") != "image":
+            style_parts.append(f"Style guide: {guide}")
+        if details and style.get("reference_mode") != "image":
+            style_parts.append(f"Style details: {details}")
+    positive_parts = [*style_parts, positive]
+    negative_parts = [negative]
     for label, item in (("Style guide", style), ("Composition guide", composition)):
         if not isinstance(item, dict):
             continue
-        positive = str(item.get("positive") or "").strip()
+        if label == "Style guide" and item.get("reference_mode") == "image":
+            continue
+        positive = str(item.get("positive") or "").strip() if label == "Composition guide" else ""
         negative = str(item.get("negative") or "").strip()
         if positive:
             positive_parts.append(f"{label}: {positive}")
@@ -191,16 +229,42 @@ class VisualPresetStore:
             refs = values.get("reference_paths", item.get("reference_images", []))
             if mode == "image" and not refs:
                 raise ValueError("原图参考模式至少需要一张参考图")
-            item["reference_mode"] = mode
-            if "name" in values: item["name"] = _safe_name(values["name"])
-            if "positive" in values: item["positive"] = str(values["positive"] or "").strip()
-            if "negative" in values: item["negative"] = str(values["negative"] or "").strip()
-            if isinstance(values.get("vlm_analysis"), dict): item["vlm_analysis"] = normalize_vlm_draft(item["type"], values["vlm_analysis"])
+            updated = dict(item, reference_mode=mode)
+            if "name" in values: updated["name"] = _safe_name(values["name"])
+            if "positive" in values: updated["positive"] = str(values["positive"] or "").strip()
+            if "negative" in values: updated["negative"] = str(values["negative"] or "").strip()
+            if isinstance(values.get("vlm_analysis"), dict): updated["vlm_analysis"] = normalize_vlm_draft(item["type"], values["vlm_analysis"])
+            references_changed = False
             if "reference_paths" in values:
-                item["reference_images"] = self._copy_references(preset_id, [], values["reference_paths"])
-            item["version"] = int(item.get("version") or 1) + 1; item["updated_at"] = _now()
+                references_changed = not self._same_references(item.get("reference_images", []), refs)
+                if references_changed:
+                    updated["reference_images"] = refs
+            # The snapshot covers editable content; raw analysis and redundant
+            # analysis prompt fields are metadata, not a new visual revision.
+            if preset_snapshot(updated) == preset_snapshot(item):
+                return json.loads(json.dumps(item, ensure_ascii=False))
+            if references_changed:
+                updated["reference_images"] = self._copy_references(preset_id, [], refs)
+            updated["version"] = int(item.get("version") or 1) + 1
+            updated["updated_at"] = _now()
+            item.update(updated)
             self._write(data)
             return json.loads(json.dumps(item, ensure_ascii=False))
+
+    def _same_references(self, current: list[str], requested: list[str]) -> bool:
+        if len(requested) > MAX_REFERENCE_COUNT:
+            raise ValueError("最多支持 8 张参考图")
+        sources = [self.reference_path(path) for path in requested]
+        if current == requested:
+            return True
+        if len(current) != len(requested):
+            return False
+        try:
+            originals = [self.reference_path(path) for path in current]
+        except (ValueError, OSError):
+            return False
+        return all(hashlib.sha256(old.read_bytes()).digest() == hashlib.sha256(new.read_bytes()).digest()
+                   for old, new in zip(originals, sources))
 
     def delete(self, preset_id: str) -> None:
         _safe_id(preset_id)

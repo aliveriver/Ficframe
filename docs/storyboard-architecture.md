@@ -15,6 +15,7 @@
 | `ficframe/visual_presets.py` | 全局画风/构图预设存储、参考图校验、VLM 草稿字段规范化和 Prompt 约束组装 |
 | `ficframe/storyboard_routes.py` | 分镜请求模型、HTTP 路由和用例编排 |
 | `ficframe/storyboard_workflow.py` | 分镜版本、来源校验、旧数据迁移和重生成保护 |
+| `ficframe/storyboard_visual_guidance.py` | 分镜 LLM 视觉不支持判定、摘要兼容性上下文及中性 Style 段 |
 | `ficframe/source_reference.py` | `source_ref` 构建、校验、锚点重定位和旧字段迁移 |
 | `ficframe/task_manager.py` | 后台任务执行、阶段更新、错误记录和 `tasks.json` 持久化 |
 | `ficframe/llm_pipeline.py` | LLM 提示词、反馈决策解析、单条分镜生成或修订 |
@@ -39,6 +40,14 @@ Web 路由负责上传、供应商选择和任务调度，CLI 负责文件路径
 画风（`style`）和构图（`composition`）是独立的全局预设，存放在用户数据目录的 `visual-presets/`，参考图也不进入 run 的角色参考图目录。run 在 `visual_presets` 中记录两个默认 ID 及 `*_snapshot`；`Shot` 用 `*_preset_mode`（`inherit`、`preset`、`none`）表示继承、覆盖或显式禁用。应用预设时固定版本；更改全局预设不自动改变已有绑定，只有显式选择或 `refresh` 才采用最新版。run 默认更新只改变继承项。旧 pipeline 缺少这些字段时由 `RunRepository` 补默认值；早期仅保存默认 ID 的 run 可从匹配的继承分镜快照补全绑定。
 
 职责分为 `visual_presets.py`（原子 JSON 存储、上传校验、纯 Prompt 组装）、`visual_preset_analysis.py`（类型限定 VLM 分析与结果规范化）、`visual_preset_workflow.py`（版本绑定、统一生成解析）、`visual_preset_routes.py`（CRUD、分析和 run API）、`web/visual_presets.js`（前端独立控制器）。单张、选中、全部和失败重试共用解析器，临时组合原始 Prompt 与两类规范，不改写手工 Prompt。生成前事务固定选择，即使调用失败也可稳定重试；成功图片与 `visual_preset_snapshot` 在同一事务提交，记录 ID、版本、规范、参考图路径、组装版本及实际正负 Prompt。`last_generation_visual_snapshot` 表示最近成功生成，当前图片实际规范从相应图片版本读取。
+
+预设更新先比较规范快照中的实际可编辑内容，未变化时不写存储、不更新时间或版本。参考图按顺序比较文件内容，相同字节的重新上传沿用已保存路径；实际更换图片才复制新文件，保留历史引用。分析原始输出及与规范重复的分析文字不单独产生视觉版本。
+
+初次分镜在 LLM 精修前绑定默认规范；补充分镜、手动/Agent 重生成、Prompt 重建和格式修复均接收绑定的 `visual_guides`，但始终只调用文本接口，不读取或附加参考图，也不探测视觉能力或自动调用 VLM。原图模式使用 `guidance_mode=compatibility_only`，摘要移至 `compatibility_context`，仅用于避免冲突；LLM 不写画风定义或画风负向排斥。文本模式由 LLM 按文字规范描述画风；没有预设时保留原有生成流程。原图只在最终生图时读取、校验并发送，原图模式不把摘要和摘要负向词当作最终风格约束叠加。
+
+`storyboard_visual_guidance.py` 只验证返回的 Style/Lighting and style 标题和常见负向画风词，不用正则删除任何 Prompt 内容。发现问题时，将完整候选与原始输入交给 LLM 修正一次，要求将混合段里的物理光照、动作、用户修改移至适合的段落；仍不合格则保留旧稿并报告失败。检查是有限的语法校验，不代表能够证明所有自然语言描述都不存在语义冲突。
+
+`Shot.prompt_style_snapshot` 记录 Prompt 对应的画风，`prompt_generation_baseline` 保存上次成功 LLM 输出，帮助下次更新识别用户修改。选择画风不修改 Prompt；预览比较当前画风与 Prompt 快照并返回持久的更新提醒。单条覆盖、继承默认、模式切换、采用新版均走相同逻辑，切回原绑定不再提醒。成功重建才更新快照；保存接口保护服务端基线，重建前归档可恢复的完整版本。旧记录首次绑定时从原绑定快照补基线。
 
 VLM 分析复用 `TaskManager`，任务独立持久化于 `visual-presets/analysis-tasks/analysis/tasks.json`，不依赖 run。分析只生成草稿，类型限定的结构化字段可编辑；未配置、异常或无效返回提供可手填草稿，供应商异常不原样持久化以免回显凭据或图像请求内容。浏览器单独保存编辑草稿和待分析 task ID，刷新后可恢复。选择保存排队串行，生图等待选择及分镜保存完成再提交。
 

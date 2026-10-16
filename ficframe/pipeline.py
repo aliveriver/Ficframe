@@ -18,6 +18,8 @@ from .qa import annotate_shots
 from .render import render_prompts, render_storyboard
 from .segmenter import segment_novel
 from .storyboard import build_storyboard
+from .visual_presets import VisualPresetStore
+from .visual_preset_workflow import bind_shot, prepare_storyboard_prompt
 
 
 logger = get_logger("pipeline")
@@ -25,14 +27,14 @@ logger = get_logger("pipeline")
 
 def polish_shots_with_llm(
     shots: list[Shot], cards: list[CharacterCard], provider: OpenAICompatibleProvider,
-    concurrency: int = 1, run_id: str = "cli",
+    concurrency: int = 1, run_id: str = "cli", visual_store: VisualPresetStore | None = None,
 ) -> list[Shot]:
     """Keep shot order and isolate individual failures in both execution modes."""
     workers = max(1, min(8, safe_int(concurrency, 3)))
 
     def polish_one(shot: Shot) -> Shot:
         try:
-            return polish_shot_prompt(shot, cards, provider, purpose=f"pipeline:{run_id}:polish_shot:{shot.id}")
+            return polish_shot_prompt(shot, cards, provider, purpose=f"pipeline:{run_id}:polish_shot:{shot.id}", visual_store=visual_store)
         except Exception as exc:
             logger.warning("shot polish failed run_id=%s shot_id=%s error=%s", run_id, shot.id, exc)
             shot.qa_notes.append(f"LLM 分镜精修失败，已保留本地 prompt：{exc}")
@@ -48,6 +50,7 @@ def build_story_payload(
     novel: str, cards: list[CharacterCard], *, max_shots: int = 8,
     provider: OpenAICompatibleProvider | None = None, run_id: str = "cli",
     llm_concurrency: int = 1, fast_llm: bool = False,
+    visual_store: VisualPresetStore | None = None, visual_defaults: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Shared scene-to-storyboard workflow for Web uploads and the CLI."""
     scenes = segment_novel(novel, cards)
@@ -62,9 +65,12 @@ def build_story_payload(
     for shot in shots:
         if shot.source_start is not None and shot.source_end is not None:
             shot.source_text = novel[shot.source_start:shot.source_end]
+        if visual_store is not None and visual_defaults is not None:
+            bind_shot(visual_store, shot, visual_defaults)
+            prepare_storyboard_prompt(shot)
     annotate_shots(shots, cards)
     if provider:
-        shots = polish_shots_with_llm(shots, cards, provider, llm_concurrency, run_id)
+        shots = polish_shots_with_llm(shots, cards, provider, llm_concurrency, run_id, visual_store)
     elif fast_llm:
         for shot in shots:
             shot.qa_notes.append("快速 LLM 模式：已跳过逐张 Prompt 精修，可在右侧手动编辑或使用独立 LLM 按钮增强角色。")

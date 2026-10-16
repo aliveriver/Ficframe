@@ -7,7 +7,10 @@ from unittest.mock import patch
 
 from ficframe import api, features
 from ficframe.models import Shot, to_dict
+from ficframe.prompts import DEFAULT_STYLE_FINISH, REFERENCE_CONTINUITY, build_negative_prompt
 from ficframe.run_repository import RunRepository
+from ficframe.style import DEFAULT_STYLE
+from ficframe.storyboard_visual_guidance import style_neutral_errors
 from ficframe.visual_presets import (
     VisualPresetStore,
     build_visual_prompt,
@@ -43,6 +46,58 @@ class VisualPresetTests(unittest.TestCase):
         self.assertIn("existing negative", negative)
         self.assertIn("Composition guide avoid: centered", negative)
 
+    def test_image_only_style_replaces_conflicting_generated_style_and_proportions(self) -> None:
+        rendering = f"{DEFAULT_STYLE['lighting']}, {DEFAULT_STYLE['palette']}, {DEFAULT_STYLE['line']}."
+        original = (f"{DEFAULT_STYLE['medium']}\n\nScene:\nBedroom, morning. Exactly two adults hold hands.\n\n"
+                    f"Continuity:\n{REFERENCE_CONTINUITY}\n\nLighting and style:\n{rendering}\n{DEFAULT_STYLE_FINISH}")
+        original_negative = build_negative_prompt() + ", wrong hair color"
+        style = {"id": "style_1", "reference_mode": "image", "reference_images": ["references/style/ref.png"],
+                 "positive": "", "negative": ""}
+        positive, negative = build_visual_prompt(original, original_negative, style)
+        self.assertTrue(positive.startswith("Style priority:"))
+        self.assertIn("head-to-body and facial proportions", positive)
+        self.assertIn("Bedroom, morning. Exactly two adults hold hands.", positive)
+        self.assertIn("identity and age", positive)
+        for conflicting in (DEFAULT_STYLE["medium"], rendering, "Lighting and style:", REFERENCE_CONTINUITY):
+            self.assertNotIn(conflicting, positive)
+        self.assertNotIn("chibi", negative)
+        self.assertNotIn("childlike appearance", negative)
+        self.assertIn("bad anatomy", negative)
+        self.assertIn("wrong hair color", negative)
+        # Without an active style, even the generated defaults remain intact.
+        self.assertEqual(build_visual_prompt(original, original_negative), (original, original_negative))
+        self.assertEqual(build_visual_prompt(original, original_negative, {"id": "empty", "positive": ""}),
+                         (original, original_negative))
+
+    def test_structured_style_is_used_and_custom_scene_lighting_is_preserved(self) -> None:
+        original = "Scene: bedroom\n\nLighting and style:\nMorning sunlight through the window."
+        positive, negative = build_visual_prompt(original, "hand errors", {
+            "positive": "simple manga", "negative": "photorealism",
+            "structured": {"stylization": "chibi", "proportions": "two heads tall", "linework": "bold flat lines",
+                           "shot": "ignored composition"},
+        })
+        self.assertIn("Style guide: simple manga", positive)
+        self.assertIn("stylization: chibi", positive)
+        self.assertIn("proportions: two heads tall", positive)
+        self.assertIn("linework: bold flat lines", positive)
+        self.assertIn(original, positive)
+        self.assertNotIn("ignored composition", positive)
+        self.assertIn("Style guide avoid: photorealism", negative)
+        # A deliberate standalone exclusion is separate from our default scaffold.
+        self.assertIn("chibi", build_visual_prompt(original, "chibi", {"positive": "watercolor"})[1])
+        custom_global_style = {**DEFAULT_STYLE, "negative_prompt": "blur, wrong identity"}
+        _, negative = build_visual_prompt(original, build_negative_prompt(custom_global_style), {"positive": "chibi"})
+        self.assertNotIn("chibi", negative)
+        self.assertIn("wrong identity", negative)
+
+    def test_style_validation_never_deletes_mixed_lighting_or_unknown_sections(self):
+        original = {"positive_prompt": "Scene: bedroom.\nLighting and style: Morning sunlight enters the east window.\nStyle: watercolor.\nAction: She offers a glass of water.",
+                    "negative_prompt": "chibi, flat colors, cel shading, extra fingers"}
+        before = dict(original)
+        self.assertEqual(len(style_neutral_errors(original)), 2)
+        self.assertEqual(original, before)
+        self.assertFalse(style_neutral_errors({"positive_prompt": "Lighting: Morning sunlight enters the east window.\nAction: She offers a glass of water.", "negative_prompt": "extra fingers"}))
+
     def test_store_versions_and_reference_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = VisualPresetStore(directory)
@@ -52,6 +107,68 @@ class VisualPresetTests(unittest.TestCase):
             reference = Path(directory) / item["reference_images"][0]
             store.delete(item["id"])
             self.assertTrue(reference.exists())
+
+    def test_unchanged_save_preserves_version_timestamp_storage_and_references(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = VisualPresetStore(directory)
+            for content in ("", "ink lines"):
+                with self.subTest(content=content):
+                    item = store.create(name="Ink", preset_type="style", positive=content, reference_mode="image",
+                                        reference_files=[("ref.png", b"\x89PNG\r\n\x1a\ncontent")])
+                    saved_json = store.path.read_bytes()
+                    saved_files = sorted(store.root.rglob("*"))
+                    values = {"name": " Ink ", "positive": f" {content} ", "negative": " ",
+                              "reference_mode": "image", "reference_paths": item["reference_images"],
+                              "vlm_analysis": {"positive": content, "negative": "", "structured": {}}}
+                    with patch("ficframe.visual_presets._now", return_value=item["updated_at"] + 100):
+                        for update in ({}, values, values):
+                            self.assertEqual(store.update(item["id"], update), item)
+                    self.assertEqual(store.path.read_bytes(), saved_json)
+                    self.assertEqual(sorted(store.root.rglob("*")), saved_files)
+
+    def test_reuploaded_identical_images_do_not_create_a_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = VisualPresetStore(directory)
+            first = b"\x89PNG\r\n\x1a\nfirst"
+            second = b"\x89PNG\r\n\x1a\nsecond"
+            item = store.create(name="Ink", preset_type="style", reference_mode="image",
+                                reference_files=[("first.png", first), ("second.png", second)])
+            reuploaded = store.save_draft_references([("renamed.png", first), ("renamed-again.png", second)])
+            with patch.object(store, "_copy_references", wraps=store._copy_references) as copy:
+                self.assertEqual(store.update(item["id"], {"reference_paths": reuploaded}), item)
+                changed_text = store.update(item["id"], {"positive": "new ink", "reference_paths": reuploaded})
+                self.assertEqual(changed_text["version"], 2)
+                self.assertEqual(changed_text["reference_images"], item["reference_images"])
+                copy.assert_not_called()
+            reordered = store.update(item["id"], {"reference_paths": list(reversed(reuploaded))})
+            self.assertEqual(reordered["version"], 3)
+            self.assertEqual([store.reference_path(path).read_bytes() for path in reordered["reference_images"]], [second, first])
+            for path in item["reference_images"]:
+                self.assertTrue(store.reference_path(path).exists())
+
+    def test_each_editable_field_creates_one_revision_only_when_changed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = VisualPresetStore(directory)
+            item = store.create(name="Ink", preset_type="style", reference_files=[("ref.png", b"\x89PNG\r\n\x1a\nfirst")])
+            different = store.save_draft_references([("ref.png", b"\x89PNG\r\n\x1a\nsecond")])
+            changes = ({"name": "Manga"}, {"positive": "flat colors"}, {"negative": "glossy"},
+                       {"reference_mode": "image"}, {"vlm_analysis": {"structured": {"proportions": "two heads tall"}}},
+                       {"reference_paths": different})
+            for version, values in enumerate(changes, start=2):
+                with self.subTest(values=values):
+                    updated = store.update(item["id"], values)
+                    self.assertEqual(updated["version"], version)
+                    self.assertEqual(store.update(item["id"], values), updated)
+
+    def test_unchanged_reference_save_still_validates_paths_and_image_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = VisualPresetStore(directory)
+            item = store.create(name="Ink", preset_type="style")
+            for values in ({"reference_paths": ["../private.png"]}, {"reference_paths": ["drafts/missing/ref.png"]},
+                           {"reference_paths": ["drafts/missing/ref.png"] * 9}, {"reference_mode": "image"}):
+                with self.subTest(values=values), self.assertRaises(ValueError):
+                    store.update(item["id"], values)
+            self.assertEqual(store.get(item["id"]), item)
 
     def test_upload_validation_rejects_path_traversal_and_oversize(self) -> None:
         with self.assertRaises(ValueError):

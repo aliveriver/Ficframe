@@ -13,8 +13,12 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from ficframe import api, features
-from ficframe.models import Shot, to_dict
+from ficframe.models import Scene, Shot, to_dict
+from ficframe.llm_pipeline import polish_shot_prompt
+from ficframe.pipeline import polish_shots_with_llm
+from ficframe.storyboard_visual_guidance import style_neutral_errors
 from ficframe.providers import EndpointConfig, ProviderError
+from ficframe.prompts import build_negative_prompt, build_positive_prompt
 from ficframe.run_repository import RunRepository
 from ficframe.task_manager import TaskManager
 from ficframe.visual_presets import MAX_REFERENCE_BYTES, VisualPresetStore, preset_snapshot
@@ -38,11 +42,25 @@ class FakeProvider:
         self.response = response or json.dumps({"positive": "ink lines", "negative": "glossy",
                                                "structured": {"linework": "ink", "shot": "ignored", "person_name": "ignored"}})
         self.calls = []
+        self.text_calls = []
+        self.text_responses = []
+        self.reject_images = False
         self.fail_once = False
 
     def vision(self, system, prompt, paths, **kwargs):
         self.calls.append((system, prompt, paths))
         return self.response
+
+    def text(self, system, user, **kwargs):
+        self.text_calls.append((system, json.loads(user), deepcopy(kwargs)))
+        if self.reject_images and kwargs.get("image_paths"):
+            raise ProviderError("400 This model does not support image inputs")
+        if self.text_responses:
+            return self.text_responses.pop(0)
+        return json.dumps({"positive_prompt": "Scene: quiet bedroom, early morning. Composition: two adults hold hands. "
+                          "Characters: two distinct adult identities. Relationships: tender companionship." +
+                          ("" if json.loads(user).get("visual_guides", {}).get("style", {}).get("reference_mode") == "image" else " Style: simple flat manga lines."),
+                           "negative_prompt": "extra people, duplicate character, wrong character identity"})
 
     def image(self, prompt, out_path, **kwargs):
         self.calls.append((prompt, deepcopy(kwargs)))
@@ -101,13 +119,376 @@ class VisualPresetIntegrationTests(unittest.TestCase):
         original = self.repository.load("other")["visual_presets"]["style_snapshot"]
         update = self.client.patch(f"/api/visual-presets/{item['id']}", json={"positive": "painted", "reference_paths": paths})
         self.assertEqual(update.json()["version"], 2)
-        self.assertNotEqual(update.json()["reference_images"], item["reference_images"])
+        self.assertEqual(update.json()["reference_images"], item["reference_images"])
         self.assertEqual(self.client.get("/api/visual-presets", params={"preset_type": "composition"}).json()["presets"][0]["id"], composition["id"])
         self.assertEqual(self.client.delete(f"/api/visual-presets/{item['id']}").status_code, 200)
         self.assertEqual(self.client.get(f"/api/visual-presets/{item['id']}").status_code, 404)
         self.assertEqual(self.repository.load("other")["visual_presets"]["style_snapshot"], original)
         for path in [*paths, *item["reference_images"], *update.json()["reference_images"]]:
             self.assertEqual(self.client.get("/api/visual-presets/reference/" + path).content, PNG)
+
+    def test_editor_round_trip_does_not_increment_bound_preset_version(self):
+        paths = self.store.save_draft_references([("style.png", PNG)])
+        item = self.create(positive="", reference_mode="image", reference_paths=paths)
+        self.defaults(item["id"])
+        original = self.repository.load("run")
+        response = self.client.patch(f"/api/visual-presets/{item['id']}", json={
+            "name": item["name"], "positive": "", "negative": "", "reference_mode": "image",
+            "reference_paths": item["reference_images"], "vlm_analysis": {"positive": "", "negative": "", "structured": {}},
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), item)
+        refreshed = self.defaults(item["id"], refresh=True)
+        self.assertEqual(refreshed["visual_presets"], original["visual_presets"])
+        self.assertEqual(refreshed["shots"][0]["style_preset_snapshot"]["version"], 1)
+
+    def test_image_only_style_overrides_default_rendering_in_preview_single_and_batch(self):
+        style = self.create(positive="", reference_mode="image",
+                            reference_paths=self.store.save_draft_references([("style.png", PNG), ("style2.png", PNG)]))
+        scene = Scene(id="scene", chapter="Chapter 1", index=1, text="Two adults hold hands.", summary="Two adults hold hands.",
+                      characters=["Alice", "Bob"], location="bedroom", time="morning", mood=["tender"], visual_type="双人情绪特写", visual_priority=1)
+        shot = shot_data()
+        shot.update(positive_prompt=build_positive_prompt(scene, [], []), negative_prompt=build_negative_prompt())
+        self.repository.save("run", {"shots": [shot]})
+        self.defaults(style["id"])
+        shot = self.repository.load("run")["shots"][0]
+        identity = self.repository.run_dir("run") / "identity.png"
+        identity.write_bytes(PNG)
+        with patch.object(api, "reference_image_entries_for_shot", return_value=[("Alice", [identity]), ("Bob", [identity])]):
+            preview = self.client.post("/api/runs/run/visual-preview", json={"shot": shot})
+            single = self.client.post("/api/images", json={"run_id": "run", "shot": shot, "overwrite": True})
+            batch = self.client.post("/api/images/batch", json={"run_id": "run", "shots": [shot], "skip_existing": False})
+        for response in (preview, single, batch):
+            self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(batch.json()["results"][0]["ok"], batch.text)
+        for prompt, kwargs in self.provider.calls:
+            self.assertTrue(prompt.startswith("Reference image roles"))
+            self.assertIn("Images 1-2: character identity", prompt)
+            self.assertIn("Images 3-4: drawing style only", prompt)
+            self.assertIn("primary visual target", prompt)
+            self.assertIn("head-to-body and facial proportions", prompt)
+            self.assertIn("Two adults hold hands.", prompt)
+            self.assertNotIn("subtle painterly texture", prompt)
+            self.assertNotIn("soft volumetric light", prompt)
+            self.assertNotIn("high quality anime light novel illustration", prompt)
+            self.assertNotIn("chibi", kwargs["negative_prompt"])
+            self.assertEqual(len(kwargs["style_reference_images"]), 2)
+            self.assertEqual(kwargs["reference_images"], [identity, identity])
+            self.assertEqual(prompt, preview.json()["positive_prompt"])
+            self.assertEqual(kwargs["negative_prompt"], preview.json()["negative_prompt"])
+        self.assertEqual(self.repository.load("run")["shots"][0]["positive_prompt"], shot["positive_prompt"])
+        self.assertEqual(self.store.get(style["id"])["version"], 1)
+
+    def test_initial_pipeline_llm_receives_text_policy_before_writing_prompts(self):
+        style = self.create(positive="flat manga", reference_mode="image",
+                            reference_paths=self.store.save_draft_references([("style.png", PNG)]))
+        with patch("ficframe.pipeline.refine_scenes_with_llm", side_effect=lambda scenes, *_args, **_kwargs: scenes), \
+             patch("ficframe.pipeline.build_character_prompt_bank", return_value=SimpleNamespace(mode="local")), \
+             patch("ficframe.pipeline.analyze_character_differences", return_value={}):
+            result = self.client.post("/api/pipeline", data={"run_id": "styled", "use_llm": "true", "llm_profile": "full",
+                                      "style_id": style["id"], "style_reference_mode": "image", "prepared_characters": '[{"name":"Alice"}]'},
+                                      files={"novel": ("novel.md", b"# Chapter 1\n\nAlice waits at the station."),
+                                             "characters": ("characters.md", b"## Alice\nAn adult with dark blue hair.")})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(len(self.provider.text_calls), len(result.json()["shots"]))
+        self.assertGreater(len(self.provider.text_calls), 0)
+        for system, user, kwargs in self.provider.text_calls:
+            self.assertEqual(user["visual_guides"]["style"]["id"], style["id"])
+            self.assertEqual(user["visual_guides"]["style"]["compatibility_context"]["positive"], "flat manga")
+            self.assertEqual(user["visual_guides"]["style"]["image_indices"], [])
+            self.assertNotIn("image_paths", kwargs)
+            self.assertNotIn("subtle painterly texture", user["shot"]["positive_prompt"])
+            self.assertNotIn("chibi", user["shot"]["negative_prompt"])
+            self.assertIn("No images are attached", system)
+
+    def test_new_revised_and_prompt_rebuilt_shots_receive_pinned_text_only_guidance(self):
+        style = self.create(positive="old flat manga", reference_mode="image",
+                            reference_paths=self.store.save_draft_references([("style.png", PNG)]))
+        self.defaults(style["id"])
+        self.store.update(style["id"], {"positive": "new painterly style"})
+        self.repository.novel_path("run").write_text("Two adults hold hands.", encoding="utf-8")
+        responses = [
+            self.client.post("/api/storyboard/generate", json={"run_id": "run", "description": "Two adults hold hands."}),
+            self.client.post("/api/storyboard/regenerate", json={"run_id": "run", "shot_ids": ["shot_1"]}),
+            self.client.post("/api/storyboard/prompt", json={"run_id": "run", "shot_id": "shot_1"}),
+        ]
+        for response in responses:
+            self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(self.provider.text_calls), 3)
+        for system, user, kwargs in self.provider.text_calls:
+            self.assertEqual(user["visual_guides"]["style"]["version"], 1)
+            self.assertEqual(user["visual_guides"]["style"]["compatibility_context"]["positive"], "old flat manga")
+            self.assertNotIn("image_paths", kwargs)
+            self.assertIn("do not copy characters, outfits", system)
+
+    def test_storyboard_text_mode_and_disabled_style_do_not_send_images(self):
+        style = self.create(positive="flat manga", reference_mode="text",
+                            reference_paths=self.store.save_draft_references([("style.png", PNG)]))
+        self.defaults(style["id"])
+        result = self.client.post("/api/storyboard/prompt", json={"run_id": "run", "shot_id": "shot_1"})
+        self.assertEqual(result.status_code, 200, result.text)
+        _, user, kwargs = self.provider.text_calls[-1]
+        self.assertEqual(user["visual_guides"]["style"]["reference_mode"], "text")
+        self.assertEqual(user["visual_guides"]["style"]["image_indices"], [])
+        self.assertNotIn("image_paths", kwargs)
+        self.selection("shot_1", style_preset_mode="none")
+        result = self.client.post("/api/storyboard/prompt", json={"run_id": "run", "shot_id": "shot_1"})
+        self.assertEqual(result.status_code, 200, result.text)
+        _, user, kwargs = self.provider.text_calls[-1]
+        self.assertEqual(user.get("visual_guides", {}), {})
+        self.assertNotIn("image_paths", kwargs)
+
+    def test_prompt_repair_keeps_text_only_bound_guidance(self):
+        style = self.create(positive="flat manga", reference_mode="image",
+                            reference_paths=self.store.save_draft_references([("style.png", PNG)]))
+        self.defaults(style["id"])
+        self.provider.text_responses = [json.dumps({"positive_prompt": "需要修正格式", "negative_prompt": "extra people"})]
+        shot = Shot(**self.repository.load("run")["shots"][0])
+        result = polish_shot_prompt(shot, [], self.provider, visual_store=self.store)
+        self.assertEqual(len(self.provider.text_calls), 2)
+        first, repaired = self.provider.text_calls
+        self.assertEqual(first[1]["visual_guides"], repaired[1]["visual_guides"])
+        self.assertNotIn("image_paths", first[2])
+        self.assertNotIn("image_paths", repaired[2])
+        self.assertFalse(style_neutral_errors(to_dict(result)))
+
+    def test_text_only_llm_uses_existing_summary_only_to_avoid_conflicts(self):
+        style = self.create(positive="simple manga", reference_mode="image", negative="painterly texture",
+                            vlm_analysis={"structured": {"proportions": "two heads tall"}},
+                            reference_paths=self.store.save_draft_references([("style.png", PNG)]))
+        self.defaults(style["id"])
+        self.provider.reject_images = True
+        for _ in range(2):
+            response = self.client.post("/api/storyboard/prompt", json={"run_id": "run", "shot_id": "shot_1"})
+            self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(self.provider.text_calls), 2)  # both are text-only, no capability probe
+        self.assertEqual(self.provider.calls, [])
+        system, user, kwargs = self.provider.text_calls[-1]
+        self.assertNotIn("image_paths", kwargs)
+        guide = user["visual_guides"]["style"]
+        self.assertEqual(guide["guidance_mode"], "compatibility_only")
+        self.assertEqual(guide["compatibility_context"], {"positive": "simple manga", "negative": "painterly texture",
+                                                       "structured": {"proportions": "two heads tall"}})
+        for field in ("positive", "negative", "structured"):
+            self.assertNotIn(field, guide)
+        self.assertEqual(guide["image_indices"], [])
+        self.assertEqual(guide["reference_mode"], "image")
+        self.assertIn("never as a target style to imitate", system)
+        shot = response.json()["shot"]
+        self.assertEqual(shot["style_preset_snapshot"]["reference_mode"], "image")
+        self.assertNotIn("simple flat manga lines", shot["positive_prompt"])
+        self.assertFalse(style_neutral_errors(shot))
+        self.assertNotIn("LLM 不支持图片", str(shot["qa_notes"]))
+        self.assertEqual(self.store.get(style["id"]), style)
+
+    def test_text_only_llm_never_analyzes_images_or_reuses_inferred_style_cache(self):
+        style = self.create(positive="", reference_mode="image",
+                            reference_paths=self.store.save_draft_references([("style.png", PNG)]))
+        self.defaults(style["id"])
+        self.provider.reject_images = True
+        cache = self.store.root / "storyboard-analysis-cache"
+        cache.mkdir()
+        legacy = cache / "legacy.json"
+        legacy.write_text(json.dumps({"positive": "INFERRED_VLM_STYLE"}), encoding="utf-8")
+        before = {path: path.read_bytes() for path in self.store.root.rglob("*") if path.is_file()}
+        shots = [Shot(**item) for item in self.repository.load("run")["shots"]]
+        with patch.object(self.provider, "vision", side_effect=AssertionError("Automatic VLM analysis must not run")) as vision:
+            result = polish_shots_with_llm(shots, [], self.provider, concurrency=2, visual_store=self.store)
+        vision.assert_not_called()
+        self.assertEqual(self.provider.calls, [])
+        fallback = [(user, kwargs) for _, user, kwargs in self.provider.text_calls if not kwargs.get("image_paths")]
+        self.assertEqual(len(fallback), 2)
+        for user, _ in fallback:
+            self.assertEqual(user["visual_guides"]["style"]["compatibility_context"], {})
+            self.assertNotIn("INFERRED_VLM_STYLE", json.dumps(user))
+        self.assertTrue(all(not style_neutral_errors(to_dict(shot)) for shot in result))
+        self.assertTrue(all("simple flat manga lines" not in shot.positive_prompt for shot in result))
+        self.assertEqual({path: path.read_bytes() for path in self.store.root.rglob("*") if path.is_file()}, before)
+        self.assertEqual(self.store.get(style["id"]), style)
+
+    def test_storyboard_never_reads_images_but_generation_keeps_original_images(self):
+        style = self.create(positive="", reference_mode="image",
+                            reference_paths=self.store.save_draft_references([("style.png", PNG)]))
+        self.defaults(style["id"])
+        self.provider.reject_images = True
+        self.provider.config.vlm.api_key = None
+        response = self.client.post("/api/storyboard/prompt", json={"run_id": "run", "shot_id": "shot_1"})
+        self.assertEqual(response.status_code, 200, response.text)
+        system, user, kwargs = self.provider.text_calls[-1]
+        self.assertEqual(user["visual_guides"]["style"]["guidance_mode"], "compatibility_only")
+        self.assertNotIn("image_paths", kwargs)
+        self.assertIn("Do not invent visual observations", system)
+        shot = response.json()["shot"]
+        self.assertNotIn("LLM 不支持图片", str(shot["qa_notes"]))
+        self.assertEqual(shot["style_preset_snapshot"]["reference_mode"], "image")
+        self.assertFalse(style_neutral_errors(shot))
+        generated = self.client.post("/api/images", json={"run_id": "run", "shot": shot})
+        self.assertEqual(generated.status_code, 200, generated.text)
+        self.assertEqual(len(self.provider.calls[0][1]["style_reference_images"]), 1)
+        self.assertIn("style reference", self.provider.calls[0][0])
+        self.assertIn("if a summary conflicts with the style images, follow the images", self.provider.calls[0][0])
+        self.assertEqual(self.store.get(style["id"]), style)
+
+    def test_configured_vlm_is_never_called_by_storyboard(self):
+        style = self.create(positive="", reference_mode="image",
+                            reference_paths=self.store.save_draft_references([("style.png", PNG)]))
+        self.defaults(style["id"])
+        self.provider.reject_images = True
+        with patch.object(self.provider, "vision", side_effect=ProviderError("private-key private-reference")) as vision:
+            for shot_id in ("shot_1", "shot_2"):
+                response = self.client.post("/api/storyboard/prompt", json={"run_id": "run", "shot_id": shot_id})
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertNotIn("private-key", response.text)
+                self.assertNotIn("private-reference", response.text)
+                self.assertNotIn("image_paths", self.provider.text_calls[-1][2])
+        vision.assert_not_called()
+
+    def test_text_only_new_and_revised_storyboards_keep_styles_neutral(self):
+        style = self.create(positive="", reference_mode="image",
+                            reference_paths=self.store.save_draft_references([("style.png", PNG)]))
+        self.defaults(style["id"])
+        self.repository.novel_path("run").write_text("Two adults hold hands.", encoding="utf-8")
+        self.provider.reject_images = True
+        for path, request in (("generate", {"description": "Two adults hold hands."}),
+                              ("regenerate", {"shot_ids": ["shot_1"]})):
+            with self.subTest(path=path):
+                response = self.client.post(f"/api/storyboard/{path}", json={"run_id": "run", **request})
+                self.assertEqual(response.status_code, 200, response.text)
+                shot = response.json().get("shot") or response.json()["shots"][0]
+                self.assertFalse(style_neutral_errors(shot))
+                self.assertNotIn("simple flat manga lines", shot["positive_prompt"])
+                self.assertEqual(shot["style_preset_snapshot"]["reference_mode"], "image")
+        self.assertEqual(self.provider.calls, [])
+
+    def test_provider_errors_are_not_hidden_by_image_fallback(self):
+        style = self.create(positive="", reference_mode="image",
+                            reference_paths=self.store.save_draft_references([("style.png", PNG)]))
+        self.defaults(style["id"])
+        self.repository.novel_path("run").write_text("fixture novel", encoding="utf-8")
+        with patch.object(self.provider, "text", side_effect=ProviderError("429 image service rate limited")) as text:
+            response = self.client.post("/api/storyboard/generate", json={"run_id": "run", "description": "Two adults hold hands."})
+        self.assertEqual(response.status_code, 502, response.text)
+        self.assertEqual(text.call_count, 1)
+        self.assertEqual(self.provider.calls, [])
+
+    def test_style_switch_retains_user_edits_until_llm_updates_and_archives_them(self):
+        old = self.create(positive="soft watercolor")
+        self.defaults(old["id"])
+        original = {"positive_prompt": "Scene: bedroom.\nComposition: close view of two adults.\nCharacters: two distinct adults.\nLighting and style: Morning sunlight enters the east window; soft watercolor.\nAction: She offers a blue glass of water.\nUser details: Keep the cat-shaped clock at 9:40.",
+                    "negative_prompt": "extra fingers, red glass, cel shading"}
+        with self.repository.transaction("run") as payload:
+            payload["shots"][0].update(original, prompt_style_snapshot=preset_snapshot(old), prompt_generation_baseline={**original, "positive_prompt": "Scene: bedroom. Style: soft watercolor."})
+        new = self.create(positive="coarse ink", reference_mode="image", reference_paths=self.store.save_draft_references([("new.png", PNG)]))
+        selected = self.selection("shot_1", style_preset_mode="preset", style_preset_id=new["id"], style_reference_mode="image")
+        self.assertEqual(selected["positive_prompt"], original["positive_prompt"])
+        preview = self.client.post("/api/runs/run/visual-preview", json={"shot": selected}).json()
+        self.assertTrue(preview["prompt_style_pending"])
+        self.assertIn("LLM 重建", preview["prompt_style_message"])
+        updated = {"positive_prompt": "Scene: bedroom.\nComposition: close view of two adults.\nCharacters: two distinct adults.\nLighting: Morning sunlight enters the east window.\nAction: She offers a blue glass of water.\nUser details: Keep the cat-shaped clock at 9:40.", "negative_prompt": "extra fingers, red glass"}
+        self.provider.text_responses = [json.dumps(updated)]
+        response = self.client.post("/api/storyboard/prompt", json={"run_id": "run", "shot_id": "shot_1"})
+        self.assertEqual(response.status_code, 200, response.text)
+        system, user, kwargs = self.provider.text_calls[-1]
+        self.assertEqual(user["shot"]["positive_prompt"], original["positive_prompt"])
+        self.assertEqual(user["previous_prompt_style"]["id"], old["id"])
+        self.assertIn("preserve user modifications", system)
+        self.assertNotIn("image_paths", kwargs)
+        shot = response.json()["shot"]
+        self.assertEqual(shot["positive_prompt"], updated["positive_prompt"])
+        preview = self.client.post("/api/runs/run/visual-preview", json={"shot": shot}).json()
+        self.assertFalse(preview["prompt_style_pending"])
+        self.assertNotIn("watercolor", preview["positive_prompt"])
+        self.assertNotIn("coarse ink", preview["positive_prompt"])
+        self.assertNotIn("cel shading", preview["negative_prompt"])
+        self.assertTrue(any(v["shot"]["positive_prompt"] == original["positive_prompt"] for v in response.json()["storyboard_versions"]["shot_1"]))
+
+    def test_mixed_sections_and_negative_conflicts_are_repaired_by_llm_without_slicing(self):
+        style = self.create(positive="", reference_mode="image", reference_paths=self.store.save_draft_references([("new.png", PNG)]))
+        self.defaults(style["id"])
+        bad = {"positive_prompt": "Scene: bedroom.\nComposition: two adults.\nCharacters: distinct identities.\nLighting and style: Morning sunlight enters the east window.\nStyle: watercolor.\nAction: She offers water.\nUnexpected heading: Keep the clock.", "negative_prompt": "chibi, flat colors, cel shading, extra fingers"}
+        good = {"positive_prompt": "Scene: bedroom.\nComposition: two adults.\nCharacters: distinct identities.\nLighting: Morning sunlight enters the east window.\nAction: She offers water.\nUnexpected heading: Keep the clock.", "negative_prompt": "extra fingers"}
+        self.provider.text_responses = [json.dumps(bad), json.dumps(good)]
+        result = self.client.post("/api/storyboard/prompt", json={"run_id": "run", "shot_id": "shot_1"})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(len(self.provider.text_calls), 2)
+        self.assertEqual(self.provider.text_calls[-1][1]["candidate"], bad)
+        self.assertEqual(result.json()["shot"]["positive_prompt"], good["positive_prompt"])
+        self.assertEqual(result.json()["shot"]["negative_prompt"], "extra fingers")
+
+    def test_failed_neutral_repair_preserves_prompts_and_pending_warning(self):
+        style = self.create(positive="", reference_mode="image", reference_paths=self.store.save_draft_references([("new.png", PNG)]))
+        self.defaults(style["id"])
+        before = self.repository.load("run")["shots"][0]
+        bad = json.dumps({"positive_prompt": "Scene: bedroom. Composition: close up. Characters: two adults. Style: watercolor.", "negative_prompt": "chibi, flat colors, cel shading"})
+        self.provider.text_responses = [bad, bad]
+        response = self.client.post("/api/storyboard/prompt", json={"run_id": "run", "shot_id": "shot_1"})
+        self.assertEqual(response.status_code, 502, response.text)
+        after = self.repository.load("run")["shots"][0]
+        self.assertEqual(before, after)
+        self.assertTrue(self.client.post("/api/runs/run/visual-preview", json={"shot": after}).json()["prompt_style_pending"])
+
+    def test_missing_images_do_not_block_storyboard_but_fail_image_preflight(self):
+        style = self.create(positive="", reference_mode="image", reference_paths=self.store.save_draft_references([("new.png", PNG)]))
+        self.defaults(style["id"])
+        self.store.reference_path(style["reference_images"][0]).unlink()
+        with patch.object(self.store, "reference_path", side_effect=AssertionError("Storyboard must not read images")):
+            result = self.client.post("/api/storyboard/prompt", json={"run_id": "run", "shot_id": "shot_1"})
+        self.assertEqual(result.status_code, 200, result.text)
+        generated = self.client.post("/api/images", json={"run_id": "run", "shot": result.json()["shot"]})
+        self.assertNotEqual(generated.status_code, 200)
+        self.assertFalse(self.provider.calls)
+
+    def test_empty_negative_is_saved_instead_of_restoring_old_style_exclusions(self):
+        style = self.create(positive="", reference_mode="image", reference_paths=self.store.save_draft_references([("new.png", PNG)]))
+        self.defaults(style["id"])
+        with self.repository.transaction("run") as payload:
+            payload["shots"][0]["negative_prompt"] = "chibi, flat colors, cel shading"
+        neutral = {"positive_prompt": "Scene: quiet bedroom in the early morning. Composition: close view of two adults holding hands. Characters: two distinct adult identities. Relationships: tender companionship.", "negative_prompt": ""}
+        self.provider.text_responses = [json.dumps(neutral)]
+        response = self.client.post("/api/storyboard/prompt", json={"run_id": "run", "shot_id": "shot_1"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["shot"]["negative_prompt"], "")
+        preview = self.client.post("/api/runs/run/visual-preview", json={"shot": response.json()["shot"]}).json()
+        self.assertNotIn("chibi", preview["negative_prompt"])
+
+    def test_reselecting_same_style_is_not_pending_and_server_baseline_survives_save(self):
+        style = self.create(positive="ink")
+        self.defaults(style["id"])
+        response = self.client.post("/api/storyboard/prompt", json={"run_id": "run", "shot_id": "shot_1"})
+        self.assertEqual(response.status_code, 200, response.text)
+        original = response.json()["shot"]
+        self.selection("shot_1", style_preset_mode="none")
+        selected = self.selection("shot_1", style_preset_mode="inherit")
+        self.assertFalse(self.client.post("/api/runs/run/visual-preview", json={"shot": selected}).json()["prompt_style_pending"])
+        stale = {**selected, "prompt_style_snapshot": {}, "prompt_generation_baseline": {}, "positive_prompt": selected["positive_prompt"] + "\nAction: Keep my blue glass."}
+        saved = self.client.post("/api/storyboard/save", json={"run_id": "run", "shots": [stale]})
+        self.assertEqual(saved.status_code, 200, saved.text)
+        shot = saved.json()["shots"][0]
+        self.assertEqual(shot["prompt_style_snapshot"], original["prompt_style_snapshot"])
+        self.assertEqual(shot["prompt_generation_baseline"], original["prompt_generation_baseline"])
+        self.assertIn("Keep my blue glass", shot["positive_prompt"])
+
+    def test_missing_returned_negative_is_repaired_not_inherited(self):
+        style = self.create(positive="", reference_mode="image", reference_paths=self.store.save_draft_references([("new.png", PNG)]))
+        self.defaults(style["id"])
+        self.provider.text_responses = [json.dumps({"positive_prompt": "Scene: bedroom. Composition: close view. Characters: two adults."})]
+        response = self.client.post("/api/storyboard/prompt", json={"run_id": "run", "shot_id": "shot_1"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(self.provider.text_calls), 2)
+        self.assertIn("corrections_required", self.provider.text_calls[-1][1])
+
+    def test_no_style_keeps_existing_prompt_behavior_and_text_style_writes_style(self):
+        result = self.client.post("/api/storyboard/prompt", json={"run_id": "run", "shot_id": "shot_1"})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertIn("Style: simple flat manga lines", result.json()["shot"]["positive_prompt"])
+        self.assertNotIn("visual_guides", self.provider.text_calls[-1][1])
+        style = self.create(positive="bold flat ink", reference_mode="text")
+        self.defaults(style["id"])
+        self.provider.text_responses = [json.dumps({"positive_prompt": "Scene: quiet bedroom in the early morning. Composition: close view of two adults holding hands. Characters: two distinct adult identities. Relationships: tender companionship. Style: bold flat ink.", "negative_prompt": "extra fingers"})]
+        result = self.client.post("/api/storyboard/prompt", json={"run_id": "run", "shot_id": "shot_1"})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertIn("Style: bold flat ink", result.json()["shot"]["positive_prompt"])
+        self.assertEqual(self.provider.text_calls[-1][1]["visual_guides"]["style"]["positive"], "bold flat ink")
 
     def test_analysis_draft_is_not_saved_and_nested_fields_are_scoped(self):
         result = self.client.post("/api/visual-presets/analyze", data={"preset_type": "STYLE"}, files=[("reference_images", ("../../ref.png", PNG, "image/png"))])

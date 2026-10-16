@@ -16,6 +16,7 @@ from .run_repository import RunNotFoundError, RunRepository
 from .segmenter import detect_characters, detect_location, detect_mood, detect_time, make_summary, priority, visual_type
 from .storyboard import scene_to_shot
 from .source_reference import build_description_source_ref, sync_legacy_source_fields
+from .visual_preset_workflow import prepare_storyboard_prompt
 from .storyboard_workflow import (
     StoryboardRevisionError,
     archive_storyboard_versions,
@@ -104,7 +105,7 @@ class StoryboardController:
                     raise HTTPException(status_code=400, detail="分镜 ID 不能为空或重复")
                 seen.add(shot.id)
                 old = existing.get(shot.id, {})
-                for field in ["image_path", "image_url", "image_versions", "last_generation_visual_snapshot"]:
+                for field in ["image_path", "image_url", "image_versions", "last_generation_visual_snapshot", "prompt_style_snapshot", "prompt_generation_baseline"]:
                     if field in old:
                         setattr(shot, field, old[field])
                 if self.dependencies.bind_visual_presets:
@@ -175,6 +176,7 @@ class StoryboardController:
                 shot.source_ref = build_description_source_ref(description)
             else:
                 shot.source_ref = source_ref
+            shot = self._prepare_visuals(shot, payload, {})
             try:
                 shot = self.dependencies.generate_or_revise_shot(
                     shot,
@@ -241,6 +243,7 @@ class StoryboardController:
                         messages,
                         purpose_prefix=f"storyboard:{request.run_id}:auto_regenerate",
                         revise_shot=self.dependencies.generate_or_revise_shot,
+                        prepare_shot=lambda shot, old: self._prepare_visuals(shot, payload, old),
                     )
                 except StoryboardRevisionError as exc:
                     raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -295,6 +298,7 @@ class StoryboardController:
                     payload.get("storyboard_messages", []),
                     purpose_prefix=f"storyboard:{request.run_id}:regenerate",
                     revise_shot=self.dependencies.generate_or_revise_shot,
+                    prepare_shot=lambda shot, old: self._prepare_visuals(shot, payload, old),
                 )
             except StoryboardRevisionError as exc:
                 raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -350,7 +354,7 @@ class StoryboardController:
                 raise HTTPException(status_code=404, detail="未找到该分镜")
             current = payload["shots"][target_index]
             archive_storyboard_versions(payload, [current], reason="LLM 重建生图 Prompt 前的版本", source="llm_prompt")
-            shot = Shot(**current)
+            shot = self._prepare_visuals(Shot(**current), payload, current)
             try:
                 updated = self.dependencies.polish_prompt(
                     shot,
@@ -367,6 +371,11 @@ class StoryboardController:
                 "shot": to_dict(updated),
             }
         return result
+
+    def _prepare_visuals(self, shot: Shot, payload: dict[str, Any], previous: dict[str, Any]) -> Shot:
+        if self.dependencies.bind_visual_presets:
+            shot = self.dependencies.bind_visual_presets(shot, payload, previous)
+        return prepare_storyboard_prompt(shot)
 
     @contextmanager
     def _transaction(self, run_id: str):

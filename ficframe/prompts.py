@@ -44,6 +44,31 @@ EN_LABELS = {
     "平静": "calm",
 }
 
+DEFAULT_STYLE_FINISH = "quiet emotional storytelling, professional science fiction atmosphere, detailed character design, high quality anime light novel illustration"
+REFERENCE_CONTINUITY = "Keep each individual character consistent with their own reference design, age, outfit logic, and body proportions."
+DEFAULT_CONTINUITY_NEGATIVE = (
+    "duplicate character, duplicate face, same face between different characters, same hairstyle between twins, "
+    "merged characters, wrong character identity, swapped outfits, extra characters, extra people, "
+    "romantic exaggeration when not in story, overly dramatic posing, chibi, childlike appearance"
+)
+
+
+def without_default_style(positive: str, negative: str) -> tuple[str, str]:
+    """Remove the generated style scaffold when a selected guide replaces it."""
+    rendering = f"{DEFAULT_STYLE['lighting']}, {DEFAULT_STYLE['palette']}, {DEFAULT_STYLE['line']}."
+    positive = positive.replace("\r\n", "\n")
+    positive = positive.replace(f"Lighting and style:\n{rendering}", "")
+    positive = "\n".join(line for line in positive.splitlines()
+                         if line.strip() not in {DEFAULT_STYLE["medium"], DEFAULT_STYLE_FINISH})
+    positive = positive.replace(REFERENCE_CONTINUITY,
+        "Keep each character's identity, age and scene-appropriate outfit consistent; "
+        "use the selected style guide for stylization and body proportions.")
+    # Only remove the exclusions from our generated continuity scaffold.
+    # Independently written negative constraints remain available to the user.
+    negative = negative.replace(DEFAULT_CONTINUITY_NEGATIVE,
+        DEFAULT_CONTINUITY_NEGATIVE.removesuffix(", chibi, childlike appearance"), 1)
+    return positive.strip(), negative.strip()
+
 
 def character_prompt(names: list[str], cards: list[CharacterCard]) -> str:
     by_name = {card.name: card for card in cards}
@@ -110,7 +135,7 @@ def build_positive_prompt(
         character_prompt(scene.characters, cards),
         "",
         "Continuity:",
-        "Keep each individual character consistent with their own reference design, age, outfit logic, and body proportions. "
+        REFERENCE_CONTINUITY + " "
         "For multi-character scenes, do not copy one character's face, hairstyle, clothes, or temperament onto another character.",
     ]
     if notes:
@@ -120,7 +145,7 @@ def build_positive_prompt(
         "",
         "Lighting and style:",
         f"{style['lighting']}, {style['palette']}, {style['line']}.",
-            "quiet emotional storytelling, professional science fiction atmosphere, detailed character design, high quality anime light novel illustration",
+            DEFAULT_STYLE_FINISH,
         ]
     )
     return "\n".join(piece for piece in pieces if piece is not None)
@@ -132,12 +157,7 @@ def en_label(value: str) -> str:
 
 def build_negative_prompt(style: dict | None = None) -> str:
     style = style or DEFAULT_STYLE
-    return (
-        style["negative_prompt"]
-        + ", duplicate character, duplicate face, same face between different characters, same hairstyle between twins, "
-        "merged characters, wrong character identity, swapped outfits, extra characters, extra people, "
-        "romantic exaggeration when not in story, overly dramatic posing, chibi, childlike appearance"
-    )
+    return style["negative_prompt"] + ", " + DEFAULT_CONTINUITY_NEGATIVE
 
 
 def build_negative_prompt_for_scene(

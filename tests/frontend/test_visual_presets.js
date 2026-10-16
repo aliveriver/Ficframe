@@ -66,6 +66,38 @@ test("a newly created style and reference mode can be selected before a run exis
   assert.deepEqual(writes, ["/api/visual-presets"]);
 });
 
+test("style update reminder survives preview and never rewrites manual prompts", async () => {
+  let pending = true;
+  const f = fixture({ api: async () => ({ visual_preset_snapshot: {}, positive_prompt: "preview only", negative_prompt: "preview negative",
+    prompt_style_pending: pending, prompt_style_message: pending ? "画风已调整，建议 LLM 重建，保留手工修改" : "" }) });
+  f.state.selected.positive_prompt = "USER ACTION: blue glass";
+  f.state.selected.negative_prompt = "red glass";
+  await f.controller.preview();
+  assert.equal(f.elements.promptStyleWarning.hidden, false);
+  assert.match(f.elements.promptStyleWarning.textContent, /LLM 重建/);
+  await f.controller.preview();
+  assert.equal(f.elements.promptStyleWarning.hidden, false);
+  assert.equal(f.state.selected.positive_prompt, "USER ACTION: blue glass");
+  assert.equal(f.state.selected.negative_prompt, "red glass");
+  pending = false;
+  await f.controller.preview();
+  assert.equal(f.elements.promptStyleWarning.hidden, true);
+});
+
+test("late preview for a different shot cannot clear its style reminder", async () => {
+  const replies = [];
+  const f = fixture({ api: () => new Promise((resolve) => replies.push(resolve)) });
+  const oldPreview = f.controller.preview();
+  f.state.selected = { id: "another" };
+  const newPreview = f.controller.preview();
+  replies[1]({ prompt_style_pending: true, prompt_style_message: "update needed" });
+  await newPreview;
+  replies[0]({ prompt_style_pending: false });
+  await oldPreview;
+  assert.equal(f.elements.promptStyleWarning.hidden, false);
+  assert.equal(f.elements.promptStyleWarning.textContent, "update needed");
+});
+
 test("analysis consumes task monitor result directly and requires explicit confirmation", async () => {
   const draft = { status: "analyzed", positive: "dry brush", negative: "glossy", structured: { linework: "ink" }, reference_paths: ["drafts/id/ref.png"] };
   const writes = [];
@@ -193,6 +225,23 @@ test("upload-only image mode does not need VLM and does not replace manual text"
   assert.equal(f.elements.visualPresetPositive.value, "manual style");
   assert.equal(f.elements.visualPresetReferenceMode.value, "image");
   assert.match(f.elements.visualPresetDraftImages.innerHTML, /ref.png/);
+});
+
+test("saving an unchanged preset reports its existing version and preserves structured style fields", async () => {
+  const item = { id: "style", type: "style", name: "Manga", version: 3, positive: "", negative: "", reference_mode: "image",
+    reference_images: ["references/style/ref.png"], vlm_analysis: { structured: { stylization: "chibi", proportions: "two heads tall", summary: "simple shapes" } } };
+  const writes = [];
+  const f = fixture({ api: async (path, options) => {
+    if (options?.method === "PATCH") { writes.push(JSON.parse(options.body)); return item; }
+    return { presets: [item] };
+  } });
+  f.controller.openEditor(item);
+  await f.elements.visualPresetForm.listeners.submit({ preventDefault() {} });
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0].reference_paths, item.reference_images);
+  assert.deepEqual(writes[0].vlm_analysis.structured, item.vlm_analysis.structured);
+  assert.match(f.elements.health.textContent, /内容未修改，保留 v3/);
+  assert.equal(f.elements.visualPresetDialog.open, false);
 });
 
 test("preflight prevents generation when the adapter cannot deliver images", async () => {

@@ -86,6 +86,7 @@ class ImageWorkflow:
             for item in payload.get("shots", []):
                 if item.get("id") == shot.id:
                     item.update({key: to_dict(getattr(shot, key)) for key in SELECTION_FIELDS})
+                    item["prompt_style_snapshot"] = to_dict(shot.prompt_style_snapshot)
                     break
         return result
 

@@ -84,6 +84,9 @@ class Shot:
     style_preset_snapshot: dict[str, Any] = field(default_factory=dict)
     composition_preset_snapshot: dict[str, Any] = field(default_factory=dict)
     last_generation_visual_snapshot: dict[str, Any] = field(default_factory=dict)
+    # Last successful LLM prompt's style and text, independent of live selection.
+    prompt_style_snapshot: dict[str, Any] | None = None
+    prompt_generation_baseline: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

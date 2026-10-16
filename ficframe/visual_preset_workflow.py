@@ -6,7 +6,9 @@ from typing import Any
 
 from .features import visual_preset_kinds
 from .models import Shot, to_dict
-from .visual_presets import VisualPresetStore, build_visual_prompt, preset_snapshot, validate_reference_mode
+from .prompts import without_default_style
+from .storyboard_visual_guidance import text_only_guides
+from .visual_presets import VisualPresetStore, build_visual_prompt, has_style_guide, preset_snapshot, validate_reference_mode
 
 KINDS = ("style", "composition")
 SELECTION_FIELDS = tuple(f"{kind}_preset_{field}" for kind in KINDS for field in ("id", "mode", "snapshot")) + tuple(f"{kind}_reference_mode" for kind in KINDS)
@@ -44,6 +46,9 @@ def bind_shot(store: VisualPresetStore, shot: Shot, defaults: dict[str, Any], pr
               *, refresh: bool = False) -> Shot:
     previous = previous or {}
     active_kinds = visual_preset_kinds()
+    if shot.prompt_style_snapshot is None and previous.get("positive_prompt") and "style" in active_kinds:
+        source = previous.get("prompt_style_snapshot")
+        shot.prompt_style_snapshot = deepcopy(source if source is not None else previous.get("style_preset_snapshot") or {})
     for kind in KINDS:
         if kind not in active_kinds:
             # Older or minimal clients may omit hidden controls when saving.
@@ -98,6 +103,27 @@ def bind_storyboard_shot(store: VisualPresetStore, shot: Shot, payload: dict[str
     return bind_shot(store, shot, payload["visual_presets"], previous)
 
 
+def prepare_storyboard_prompt(shot: Shot) -> Shot:
+    """Use the bound style from the first draft, without embedding live presets."""
+    if "style" in visual_preset_kinds() and shot.style_preset_mode != "none" and has_style_guide(shot.style_preset_snapshot):
+        shot.positive_prompt, shot.negative_prompt = without_default_style(shot.positive_prompt, shot.negative_prompt)
+    return shot
+
+
+def storyboard_visual_guides(shot: Shot) -> dict[str, Any]:
+    """Pass pinned text only. Actual image files are read by image generation."""
+    guides: dict[str, Any] = {}
+    for kind in visual_preset_kinds():
+        snapshot = getattr(shot, f"{kind}_preset_snapshot")
+        if not snapshot or getattr(shot, f"{kind}_preset_mode") == "none":
+            continue
+        guide = {key: deepcopy(snapshot.get(key)) for key in ("id", "name", "version", "positive", "negative", "structured")}
+        guide["reference_mode"] = validate_reference_mode(snapshot.get("reference_mode"))
+        guide["image_indices"] = []
+        guides[kind] = guide
+    return text_only_guides(guides)
+
+
 def resolve_generation(store: VisualPresetStore, payload: dict[str, Any], shot: Shot) -> tuple[str, str, dict[str, Any]]:
     defaults = bind_run_defaults(store, payload)
     previous = next((item for item in payload.get("shots", []) if item.get("id") == shot.id), to_dict(shot))
@@ -105,5 +131,5 @@ def resolve_generation(store: VisualPresetStore, payload: dict[str, Any], shot: 
     active_kinds = visual_preset_kinds()
     snapshot = {kind: deepcopy(getattr(shot, f"{kind}_preset_snapshot")) if kind in active_kinds else {} for kind in KINDS}
     positive, negative = build_visual_prompt(shot.positive_prompt, shot.negative_prompt, snapshot["style"], snapshot["composition"])
-    snapshot.update({"assembly_version": 2, "positive_prompt": positive, "negative_prompt": negative})
+    snapshot.update({"assembly_version": 3, "positive_prompt": positive, "negative_prompt": negative})
     return positive, negative, snapshot

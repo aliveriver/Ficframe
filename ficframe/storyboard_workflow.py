@@ -99,6 +99,7 @@ def revise_storyboard_items(
     feedback_history: list[dict[str, Any]],
     purpose_prefix: str,
     revise_shot: Callable[..., Shot],
+    prepare_shot: Callable[[Shot, dict[str, Any]], Shot] | None = None,
 ) -> list[dict[str, Any]]:
     """重建选中的分镜，并在业务边界上强制保留已有图片。"""
     revised: list[dict[str, Any]] = []
@@ -107,6 +108,8 @@ def revise_storyboard_items(
             revised.append(item)
             continue
         shot = Shot(**item)
+        if prepare_shot:
+            shot = prepare_shot(shot, item)
         preserved_images = {field: to_dict(getattr(shot, field)) for field in IMAGE_FIELDS}
         preserved_visuals = {field: to_dict(getattr(shot, field)) for field in (*SELECTION_FIELDS, "last_generation_visual_snapshot")}
         try:

@@ -4,8 +4,8 @@
   const DRAFT_KEY = "ficframe.visual-preset-draft.v1";
   const PROBE_KEY = "ficframe.image-reference-test.v1";
   const FIELDS = {
-    style: ["linework", "rendering", "color", "lighting", "materials", "background"],
-    composition: ["shot", "viewpoint", "subject_placement", "whitespace", "visual_weight", "relationships", "background_ratio"],
+    style: ["stylization", "proportions", "linework", "rendering", "color", "lighting", "materials", "background", "summary"],
+    composition: ["shot", "viewpoint", "subject_placement", "whitespace", "visual_weight", "relationships", "background_ratio", "summary"],
   };
 
   function referenceUrl(path) {
@@ -123,17 +123,22 @@
       const version = versions.find((item) => String(item.image_url || "").split("?")[0] === String(shot?.image_url || "").split("?")[0]);
       const candidate = version?.visual_preset_snapshot || (versions.length ? null : shot?.last_generation_visual_snapshot);
       const snapshot = (shot?.image_url || shot?.image_path) && candidate && Object.keys(candidate).length ? candidate : null;
-      el.visualPromptSnapshot.textContent = snapshot ? `当前图片实际规范（软约束）\n${snapshotText(snapshot, activeKinds)}` : "当前图片暂无规范记录（旧图片或尚未生成）";
+      el.visualPromptSnapshot.textContent = snapshot ? `当前图片实际规范\n${snapshotText(snapshot, activeKinds)}` : "当前图片暂无规范记录（旧图片或尚未生成）";
     }
     async function preview() {
       const sequence = ++previewSequence;
       const shot = state.selected;
+      if (el.promptStyleWarning && (!shot || !state.runId)) el.promptStyleWarning.hidden = true;
       if (!shot || !state.runId) { el.visualPresetEffective.textContent = "选择分镜后查看实际规范"; el.visualFinalPrompt.value = ""; el.visualFinalNegative.value = ""; el.visualReferenceWarning.hidden = true; return; }
       const id = shot.id;
       try {
         const data = await json(`/api/runs/${encodeURIComponent(state.runId)}/visual-preview`, { shot, size: selectedImageSize() });
         if (sequence !== previewSequence || state.selected?.id !== id) return;
         el.visualPresetEffective.textContent = snapshotText(data.visual_preset_snapshot, activeKinds);
+        if (el.promptStyleWarning) {
+          el.promptStyleWarning.textContent = data.prompt_style_message || "";
+          el.promptStyleWarning.hidden = !data.prompt_style_pending;
+        }
         el.visualFinalPrompt.value = data.positive_prompt;
         el.visualFinalNegative.value = data.negative_prompt;
         if (data.reference_preflight) showReferenceWarning(data.reference_preflight);
@@ -154,7 +159,10 @@
       state.visualPresetDefaults = data.visual_presets;
       for (const saved of data.shots || []) {
         const shot = state.shots.find((item) => item.id === saved.id);
-        if (shot) for (const kind of activeKinds) shot[`${kind}_preset_snapshot`] = saved[`${kind}_preset_snapshot`];
+        if (shot) {
+          for (const kind of activeKinds) shot[`${kind}_preset_snapshot`] = saved[`${kind}_preset_snapshot`];
+          shot.prompt_style_snapshot = saved.prompt_style_snapshot;
+        }
       }
       renderSelectors();
       saveWorkspaceDraft();
@@ -178,6 +186,7 @@
       const data = await json(`/api/runs/${encodeURIComponent(runId)}/shots/${encodeURIComponent(shot.id)}/visual-presets`, { shot, refresh: true });
       if (state.runId !== runId) return;
       const current = state.shots.find((item) => item.id === shot.id);
+      if (current) current.prompt_style_snapshot = data.shot.prompt_style_snapshot;
       if (current) for (const kind of activeKinds) {
         if (current[`${kind}_preset_mode`] === data.shot[`${kind}_preset_mode`] && current[`${kind}_preset_id`] === data.shot[`${kind}_preset_id`] && (current[`${kind}_reference_mode`] || "inherit") === (data.shot[`${kind}_reference_mode`] || "inherit")) current[`${kind}_preset_snapshot`] = data.shot[`${kind}_preset_snapshot`];
       }
@@ -193,6 +202,7 @@
         const data = await json(`/api/runs/${encodeURIComponent(runId)}/shots/${encodeURIComponent(shot.id)}/visual-presets`, { shot });
         if (state.runId !== runId) return;
         const current = state.shots.find((item) => item.id === shot.id);
+        if (current) current.prompt_style_snapshot = data.shot.prompt_style_snapshot;
         if (current) for (const kind of activeKinds) {
           if (current[`${kind}_preset_mode`] === shot[`${kind}_preset_mode`] && current[`${kind}_preset_id`] === shot[`${kind}_preset_id`] && (current[`${kind}_reference_mode`] || "inherit") === (shot[`${kind}_reference_mode`] || "inherit")) current[`${kind}_preset_snapshot`] = data.shot[`${kind}_preset_snapshot`];
         }
@@ -243,9 +253,10 @@
       values.reference_paths = draft.reference_paths || [];
       setBusy(el.saveVisualPresetBtn, true);
       try {
-        await json(mode === "edit" ? `/api/visual-presets/${encodeURIComponent(id)}` : "/api/visual-presets", mode === "edit" ? values : { ...values, type: kind }, mode === "edit" ? "PATCH" : "POST");
+        const saved = await json(mode === "edit" ? `/api/visual-presets/${encodeURIComponent(id)}` : "/api/visual-presets", mode === "edit" ? values : { ...values, type: kind }, mode === "edit" ? "PATCH" : "POST");
         pending = null; persistDraft(); el.visualPresetDialog.close();
-        await refresh(); el.health.textContent = "预设已保存；可在 run 或分镜中选择应用";
+        await refresh(); el.health.textContent = mode === "edit" && saved.version === draft.version
+          ? `内容未修改，保留 v${saved.version}。` : "预设已保存；可在 run 或分镜中选择应用";
       } finally { setBusy(el.saveVisualPresetBtn, false); }
     }
     async function remove(id) {

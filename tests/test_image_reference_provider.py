@@ -163,6 +163,10 @@ class ImageReferenceProviderTests(unittest.TestCase):
                 self.assertIn("Images 1-1: character identity", prompt)
                 self.assertIn("Images 2-2: drawing style only", prompt)
                 self.assertIn("Images 3-3: composition only", prompt)
+                self.assertTrue(prompt.startswith("Reference image roles"))
+                self.assertIn("primary visual target", prompt)
+                self.assertIn("head-to-body and facial proportions", prompt)
+                self.assertNotIn("soft guidance", prompt)
                 self.assertEqual(prompt.count("Reference image roles"), 1)
                 self.assertNotIn("Use every supplied reference image as the canonical character design", prompt)
 
@@ -185,6 +189,50 @@ class ImageReferenceProviderTests(unittest.TestCase):
                 provider.image(purpose_prompt("BASE", 0, 1, 0), Path(directory) / "output.png",
                                style_reference_images=[path], reference_roles_embedded=True)
             self.assertEqual(post.call_args.args[3]["prompt"].count("Reference image roles"), 1)
+
+    def test_storyboard_llm_receives_style_images_on_its_own_endpoint(self):
+        provider = self.provider("openai")
+        provider.config.llm = EndpointConfig(api_key="llm-key", model="multimodal-llm", base_url="https://llm.invalid/v1")
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [Path(directory) / "first.png", Path(directory) / "second.png"]
+            for index, path in enumerate(paths):
+                path.write_bytes(synthetic_png(index))
+            with patch.object(provider, "_post", return_value={"output_text": '{"ok": true}'}) as post:
+                self.assertEqual(provider.text("SYSTEM", "USER", image_paths=paths, purpose="storyboard:generate"), '{"ok": true}')
+            endpoint, label, route, payload = post.call_args.args
+            self.assertIs(endpoint, provider.config.llm)
+            self.assertEqual((label, route, payload["model"]), ("llm", "responses", "multimodal-llm"))
+            content = payload["input"][1]["content"]
+            self.assertEqual(content[0], {"type": "input_text", "text": "USER"})
+            self.assertEqual([item["image_url"] for item in content[1:]],
+                             ["data:image/png;base64," + base64.b64encode(path.read_bytes()).decode() for path in paths])
+            self.assertTrue(all(item["type"] == "input_image" for item in content[1:]))
+            self.assertEqual(post.call_args.kwargs["purpose"], "visual_reference:storyboard:generate")
+
+    def test_storyboard_chat_fallback_keeps_style_images(self):
+        provider = self.provider("openai")
+        provider.config.llm = EndpointConfig(api_key="key", model="deepseek-test", base_url="https://api.deepseek.com", provider="deepseek")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "style.png"
+            path.write_bytes(synthetic_png(0))
+            with patch.object(provider, "_post", side_effect=[ProviderError("404 not found"), {"choices": [{"message": {"content": "{}"}}]}]) as post:
+                provider.text("SYSTEM", "USER", image_paths=[path], purpose="storyboard:generate")
+            self.assertEqual([call.args[2] for call in post.call_args_list], ["responses", "chat/completions"])
+            content = post.call_args.args[3]["messages"][1]["content"]
+            self.assertEqual(content[1]["type"], "image_url")
+            self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    def test_storyboard_reference_error_does_not_echo_inputs_or_credentials(self):
+        provider = self.provider("openai")
+        provider.config.llm = EndpointConfig(api_key="private-key", model="multimodal-llm")
+        response = {"status": "failed", "error": {"message": "unsupported image input; private-scene private-key data:image/png;base64,YWJj"}}
+        with patch.object(provider, "_post", return_value=response), self.assertRaises(ProviderError) as raised:
+            provider.text("SYSTEM", "private-scene", purpose="visual_reference:storyboard:fallback")
+        message = str(raised.exception)
+        self.assertIn("unsupported image input", message)
+        self.assertNotIn("private-scene", message)
+        self.assertNotIn("private-key", message)
+        self.assertNotIn("YWJj", message)
 
     def test_multipart_visual_logs_do_not_echo_vendor_contents(self):
         provider = self.provider("openai")

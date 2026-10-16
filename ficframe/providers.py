@@ -232,15 +232,21 @@ class OpenAICompatibleProvider:
             raise ProviderError(f"{response.status_code} {safe_url(url)}: {detail}")
         return response.json()
 
-    def text(self, system: str, user: str, model: str | None = None, purpose: str = "") -> str:
+    def text(self, system: str, user: str, model: str | None = None, purpose: str = "",
+             image_paths: list[Path] | None = None) -> str:
         endpoint = self.config.llm
         runtime = effective_llm_provider(endpoint)
+        images = [to_data_url(path) for path in (image_paths or [])]
+        if images and not purpose.startswith("visual_reference:"):
+            purpose = "visual_reference:" + purpose
+        chat_content = [{"type": "text", "text": user},
+                        *({"type": "image_url", "image_url": {"url": url}} for url in images)] if images else user
         if runtime == "chat_completions":
             payload = {
                 "model": model or endpoint.model,
                 "messages": [
                     {"role": "system", "content": system},
-                    {"role": "user", "content": user},
+                    {"role": "user", "content": chat_content},
                 ],
                 "response_format": {"type": "json_object"},
             }
@@ -250,7 +256,8 @@ class OpenAICompatibleProvider:
                 "model": model or endpoint.model,
                 "input": [
                     {"role": "system", "content": [{"type": "input_text", "text": system}]},
-                    {"role": "user", "content": [{"type": "input_text", "text": user}]},
+                    {"role": "user", "content": [{"type": "input_text", "text": user},
+                                                  *({"type": "input_image", "image_url": url} for url in images)]},
                 ],
             }
             if is_deepseek_endpoint(endpoint):
@@ -274,14 +281,19 @@ class OpenAICompatibleProvider:
                     "model": model or endpoint.model,
                     "messages": [
                         {"role": "system", "content": system},
-                        {"role": "user", "content": user},
+                        {"role": "user", "content": chat_content},
                     ],
                     "response_format": {"type": "json_object"},
                     "reasoning_effort": "high",
                     "thinking": {"type": "enabled"},
                 }
                 data = self._post(endpoint, "llm", "chat/completions", chat_payload, purpose=f"{purpose}:chat_fallback")
-        ensure_response_completed(data)
+        try:
+            ensure_response_completed(data)
+        except ProviderError as exc:
+            if purpose.startswith("visual_reference:"):
+                raise ProviderError(safe_provider_error(str(exc), endpoint, [system, user])) from exc
+            raise
         return extract_response_text(data)
 
     def vision(self, system: str, prompt: str, image_paths: list[Path], model: str | None = None, purpose: str = "") -> str:

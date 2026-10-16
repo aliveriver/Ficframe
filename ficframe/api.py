@@ -661,7 +661,8 @@ async def pipeline(
             analyze_reference_visuals(cards, run_dir, vlm_provider, purpose=f"pipeline:{run_id}:vlm_reference_visuals")
     payload = {
         **build_story_payload(novel_text, cards, max_shots=max_shots, provider=provider if full_llm else None,
-                              run_id=run_id, llm_concurrency=llm_concurrency, fast_llm=fast_llm),
+                              run_id=run_id, llm_concurrency=llm_concurrency, fast_llm=fast_llm,
+                              visual_store=store, visual_defaults=visual_defaults),
         "run_id": run_id,
         "storyboard_messages": [], "prompt_feedback_messages": [], "storyboard_versions": {},
         "visual_presets": visual_defaults,
@@ -795,9 +796,9 @@ def get_storyboard_controller() -> StoryboardController:
             repository=get_run_repository,
             require_llm_provider=require_llm_provider,
             parse_character_payload=parse_character_payload,
-            generate_or_revise_shot=lambda *args, **kwargs: generate_or_revise_shot_with_llm(*args, **kwargs),
+            generate_or_revise_shot=lambda *args, **kwargs: generate_or_revise_shot_with_llm(*args, **kwargs, visual_store=get_visual_preset_store()),
             respond_to_feedback=lambda *args, **kwargs: respond_to_storyboard_feedback(*args, **kwargs),
-            polish_prompt=lambda *args, **kwargs: polish_shot_prompt(*args, **kwargs),
+            polish_prompt=lambda *args, **kwargs: polish_shot_prompt(*args, **kwargs, visual_store=get_visual_preset_store()),
             logger=logger,
             bind_visual_presets=lambda shot, payload, old: bind_storyboard_shot(get_visual_preset_store(), shot, payload, old),
         )

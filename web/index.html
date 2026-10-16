@@ -537,6 +537,7 @@
               </div>
             </details>
           </div>
+          <p id="promptStyleWarning" class="reference-warning" role="status" hidden></p>
           <label class="prompt-label">
             <span>正向 Prompt</span>
             <textarea id="promptBox" spellcheck="false"></textarea>
@@ -560,7 +561,7 @@
           <details class="panel-disclosure"><summary>更多设置 · Prompt、文本与批量</summary><div class="disclosure-content">
           <details class="panel-disclosure">
             <summary>实际生图规范与最终 Prompt</summary>
-            <p class="muted">规范为软约束，实际效果取决于图片模型；原始 Prompt 保持独立编辑。</p>
+            <p class="muted">已选画风优先决定画法、简化程度和人物比例；场景与角色身份沿用分镜。实际效果取决于图片模型，原始 Prompt 保持独立编辑。</p>
             <pre id="visualPresetEffective" class="readout"></pre>
             <label><span>最终正向 Prompt（只读预览）</span><textarea id="visualFinalPrompt" rows="6" readonly></textarea></label>
             <label><span>最终负向 Prompt（只读预览）</span><textarea id="visualFinalNegative" rows="3" readonly></textarea></label>
@@ -695,7 +696,7 @@
         <div class="dialog-head"><h2 id="visualPresetDialogTitle">视觉规范预设</h2><button id="cancelVisualPresetBtn" type="button">取消</button></div>
         <label><span>名称</span><input id="visualPresetName" maxlength="120" required /></label>
         <label><span>预设建议模式</span><select id="visualPresetReferenceMode"><option value="text">仅文本规范</option><option value="image">原图参考＋文本规范</option></select></label>
-        <p class="muted">文本模式可不上传图片；原图模式会向支持的图片模型发送参考图，文字描述可选。应用后仍可在 run 或单条分镜切换模式。</p>
+        <p class="muted">分镜 LLM 始终只接收文本。原图模式下，Prompt 不定义画风，参考图直接交给生图模型；已有摘要仅用于避免冲突。仅文本模式由 LLM 按规范描述画风。切换分镜画风后，建议用「LLM 重建」更新旧 Prompt，并保留手工修改。</p>
         <label><span>参考图（可选，最多 8 张，每张 20 MB）</span><input id="visualPresetReferenceFiles" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" multiple /></label>
         <div class="actions compact"><button id="uploadVisualPresetReferencesBtn" type="button">上传参考图，不分析</button><button id="analyzeEditorReferencesBtn" type="button">用 VLM 提炼文字草稿</button><button id="clearVisualPresetReferencesBtn" type="button">移除参考图</button></div>
         <label><span>正向规范</span><textarea id="visualPresetPositive" rows="7" spellcheck="false"></textarea></label>

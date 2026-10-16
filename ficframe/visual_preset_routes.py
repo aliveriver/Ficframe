@@ -14,6 +14,7 @@ from .visual_presets import MAX_REFERENCE_BYTES, MAX_REFERENCE_COUNT, normalize_
 from .visual_preset_analysis import analyze_references
 from .visual_preset_workflow import SELECTION_FIELDS, bind_run_defaults, bind_shot, resolve_generation
 from .image_reference_workflow import capability, probe_references, reference_preflight, purpose_prompt
+from .storyboard_visual_guidance import prompt_style_pending, STYLE_UPDATE_MESSAGE
 
 
 class VisualPresetRequest(BaseModel):
@@ -230,7 +231,9 @@ class VisualPresetController:
             preflight = reference_preflight(store, self.dependencies.provider(), snapshot, identity_count, request.size)
             positive = purpose_prompt(positive, identity_count, preflight.get("style_count", 0), preflight.get("composition_count", 0))
             snapshot["positive_prompt"] = positive
-            return {"positive_prompt": positive, "negative_prompt": negative, "visual_preset_snapshot": snapshot, "reference_preflight": preflight}
+            return {"positive_prompt": positive, "negative_prompt": negative, "visual_preset_snapshot": snapshot, "reference_preflight": preflight,
+                    "prompt_style_pending": prompt_style_pending(shot),
+                    "prompt_style_message": STYLE_UPDATE_MESSAGE if prompt_style_pending(shot) else ""}
         except RunNotFoundError as exc:
             raise HTTPException(404, "run 不存在") from exc
         except (ValueError, TypeError) as exc:
@@ -256,6 +259,7 @@ class VisualPresetController:
                 bind_shot(store, shot, payload["visual_presets"], old, refresh=request.refresh)
                 for key in SELECTION_FIELDS:
                     old[key] = to_dict(getattr(shot, key))
+                old["prompt_style_snapshot"] = shot.prompt_style_snapshot
                 return {"shot": old}
         except RunNotFoundError as exc:
             raise HTTPException(404, "run 不存在") from exc

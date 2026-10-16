@@ -46,7 +46,8 @@ class PipelineTests(unittest.TestCase):
                             self.assertEqual(shot["style_preset_mode"], "inherit")
                 store.update(style["id"], {"positive": "NEW STYLE"})
                 positive, _, snapshot = resolve_generation(store, payload, Shot(**payload["shots"][0]))
-                self.assertIn("Style guide: ink lines", positive)
+                self.assertNotIn("Style guide: ink lines", positive)  # image mode delegates drawing to the original
+                self.assertEqual(snapshot["style"]["positive"], "ink lines")
                 self.assertNotIn("NEW STYLE", positive)
                 self.assertNotIn("Style guide:", payload["shots"][0]["positive_prompt"])
                 self.assertEqual(snapshot["style"]["version"], 1)
