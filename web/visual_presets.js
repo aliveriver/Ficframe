@@ -313,6 +313,7 @@
         showReferenceWarning(invalid.check);
         throw new Error(`${invalid.shot.id}：${invalid.check.message} 不会自动丢弃原图；请调整参考模式。`);
       }
+      el.visualReferenceWarning.hidden = true;
     }
     function showReferenceWarning(check) {
       el.visualReferenceWarning.textContent = check.message;

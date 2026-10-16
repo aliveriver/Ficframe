@@ -195,7 +195,7 @@ test("upload-only image mode does not need VLM and does not replace manual text"
   assert.match(f.elements.visualPresetDraftImages.innerHTML, /ref.png/);
 });
 
-test("preflight prevents generation without silently dropping unsupported image mode", async () => {
+test("preflight prevents generation when the adapter cannot deliver images", async () => {
   const f = fixture({ api: async () => ({ reference_preflight: { ok: false, status: "unsupported", message: "多图不支持", total_count: 3 } }) });
   f.state.selected.style_reference_mode = "image";
   await assert.rejects(f.controller.prepareGeneration(["shot"]), /多图不支持/);
@@ -204,12 +204,29 @@ test("preflight prevents generation without silently dropping unsupported image 
   assert.equal(f.persisted(), 1);
 });
 
+test("generation accepts advisory probe results without starting a test or dropping image mode", async () => {
+  for (const status of ["unknown", "supported", "unsupported"]) {
+    const requests = [];
+    const f = fixture({ api: async (path) => {
+      requests.push(path);
+      return { reference_preflight: { ok: true, status, adapter_supported: true, tested_count: 2, total_count: 4 } };
+    } });
+    f.state.selected.style_reference_mode = "image";
+    f.elements.visualReferenceWarning.hidden = false;
+    await f.controller.prepareGeneration(["shot"]);
+    assert.deepEqual(requests, ["/api/runs/run/visual-preview"]);
+    assert.equal(f.state.selected.style_reference_mode, "image");
+    assert.equal(f.elements.visualReferenceWarning.hidden, true);
+    assert.equal(f.persisted(), 1);
+  }
+});
+
 test("live probe only runs after cost confirmation and uses maximum reference count", async () => {
   const requests = [];
   let consent = false;
   global.confirm = () => consent;
   const f = fixture({ taskMonitor: { wait: async () => ({ status: "supported", message: "accepted" }) }, api: async (path, options) => {
-    if (path.includes("visual-preview")) return { reference_preflight: { total_count: 5, ok: false, message: "unverified" } };
+    if (path.includes("visual-preview")) return { reference_preflight: { total_count: 5, ok: true, message: "unverified" } };
     if (path.includes("capability")) return { provider: "openai", model: "test", status: "unknown", adapter_supported: true };
     requests.push(JSON.parse(options.body));
     return { task_id: "probe" };

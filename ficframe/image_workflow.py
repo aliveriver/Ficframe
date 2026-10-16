@@ -167,6 +167,7 @@ class ImageWorkflow:
         retry_count = max(0, retry_count)
         prompt, negative, snapshot, kwargs = self.inputs(provider, run_id, shot, size)
         last_error = ""
+        rejected = False
         for attempt in range(1, retry_count + 2):
             try:
                 purpose = f"image:{mode}:{run_id}:{shot.id}" + (f":attempt{attempt}" if mode == "batch" else "")
@@ -180,13 +181,15 @@ class ImageWorkflow:
                         "image_versions": saved.get("image_versions", []), "visual_preset_snapshot": snapshot,
                         "visual_prompt": prompt, "visual_negative_prompt": negative}
             except ProviderError as exc:
-                last_error = reference_failure(self.store, provider, size, exc) if kwargs.get("reference_roles_embedded") else str(exc)
+                last_error = reference_failure(self.store, provider, size, exc, prompt, negative) if kwargs.get("reference_roles_embedded") else str(exc)
                 logger.warning("image failed run_id=%s shot_id=%s attempt=%s error=%s", run_id, shot.id, attempt, last_error)
                 if kwargs.get("reference_roles_embedded") and reference_rejected(exc):
+                    rejected = True
                     break
                 if attempt <= retry_count:
                     time.sleep(min(2 * attempt, 6))
-        return {"shot_id": shot.id, "ok": False, "attempts": attempt, "error": last_error}
+        return {"shot_id": shot.id, "ok": False, "attempts": attempt, "error": last_error,
+                "reference_rejected": rejected}
 
     def generate_single(self, provider: Any, run_id: str, shot: Shot, *, size: str, overwrite: bool,
                         activate: bool | None) -> dict[str, Any]:

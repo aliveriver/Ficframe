@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from .image_sizes import normalize_image_size
+
 
 class ComfyUIError(RuntimeError):
     pass
@@ -331,10 +333,7 @@ def is_normalized_region(value: object) -> bool:
 
 
 def parse_size(size: str) -> tuple[int, int]:
-    normalized = size.lower().strip().replace(" ", "")
-    aliases = {"1k": (1024, 1024), "2k": (2048, 2048), "4k": (4096, 4096)}
-    if normalized in aliases:
-        return aliases[normalized]
+    normalized = normalize_image_size(size.lower().strip().replace(" ", ""))
     parts = normalized.split("x", 1)
     if len(parts) != 2:
         raise ComfyUIError("ComfyUI 图片尺寸必须使用 宽x高 格式，例如 1024x1024。")

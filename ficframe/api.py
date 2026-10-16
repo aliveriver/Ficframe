@@ -884,6 +884,7 @@ def _generate_all_images(request: dict[str, Any], reporter: TaskReporter | None 
     skip_existing = bool(request.get("skip_existing", True))
     shots = [Shot(**shot) for shot in request.get("shots", [])]
     results = []
+    reference_error = ""
     provider = OpenAICompatibleProvider()
     logger.info("batch image generation started run_id=%s shot_count=%s size=%s retry_count=%s skip_existing=%s", run_id, len(shots), size, retry_count, skip_existing)
     total = max(1, len(shots))
@@ -905,6 +906,10 @@ def _generate_all_images(request: dict[str, Any], reporter: TaskReporter | None 
             )
             logger.info("batch image item skipped existing run_id=%s shot_id=%s", run_id, shot.id)
             continue
+        if reference_error:
+            results.append({"shot_id": shot.id, "ok": False, "attempts": 0,
+                            "error": f"本批次已停止：{reference_error}"})
+            continue
         try:
             target = image_target_for_generation(run_dir, shot.id, bool(current))
             result = generate_batch_image_item(provider, run_id, shot, target, size, retry_count, activate=not bool(current))
@@ -912,6 +917,9 @@ def _generate_all_images(request: dict[str, Any], reporter: TaskReporter | None 
             # A stale selection must not discard successful results of other shots.
             result = {"shot_id": shot.id, "ok": False, "attempts": 0,
                       "error": str(exc.detail if isinstance(exc, HTTPException) else exc)}
+        if result.get("reference_rejected"):
+            # Stop this batch on an explicit rejection; a later request can retry directly.
+            reference_error = result["error"]
         results.append(result)
     logger.info("batch image generation completed run_id=%s ok_count=%s total=%s", run_id, len([item for item in results if item["ok"]]), len(results))
     write_json(run_dir / "image_results.json", {"run_id": run_id, "size": size, "retry_count": retry_count, "skip_existing": skip_existing, "results": results})

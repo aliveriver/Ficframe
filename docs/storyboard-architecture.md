@@ -46,15 +46,17 @@ VLM 分析复用 `TaskManager`，任务独立持久化于 `visual-presets/analys
 
 ### 文本 / 原图双模式及多图能力验证
 
+所有图片供应商和模型统一使用 `image_sizes.normalize_image_size`，将 1K/2K/4K 转换为 1024x1024/2048x2048/2880x2880，自定义尺寸保持不变。`OpenAICompatibleProvider.image` 在供应商分支前执行转换，覆盖 JSON 生图、multipart 参考图编辑与 ComfyUI 工作流；`comfyui.parse_size` 也复用该映射，避免直接渲染工作流时出现不同结果。能力指纹使用同一转换后的实际请求尺寸，使 2K 与 2048x2048 的测试结果一致，也不复用旧版发送符号尺寸的测试记录。通用 `generate failed` 失败保持 `unknown`，不能据此判定多图不支持。
+
 默认画风与参考模式属于生成输入，不依赖已存在的 run。前端在空工作区也允许选择，并将仅包含画风选择的状态保存为草稿；更换小说或人设时保留选择、清除上一 run 的绑定快照。`POST /api/pipeline` 与 `POST /api/pipeline/task` 接受可选表单字段 `style_id`、`style_reference_mode`；在调用模型前校验并固定预设快照，新生成分镜继承该快照。任务完成后以服务端保存的默认值刷新选择框，保持后续生图和显示一致。
 
 预设的 `reference_mode` 为 `text` 或 `image`（旧预设默认为文本），仅作为选择 run 预设时的建议。run 分别记录 `style_reference_mode`、`composition_reference_mode`，单条 `Shot` 同名字段还可取 `inherit`，独立于 `*_preset_mode` 的预设来源选择。绑定快照记录当时有效模式与原始图片路径；仅文本模式不发送视觉图片，即使预设保留参考图。手工原图上传不调用 VLM，分析操作仍只返回待确认草稿。新字段加入保存、修订和浏览器恢复链路，旧 run 继续默认文本。
 
 `image_reference_workflow.py` 负责图片用途 Prompt、原图路径解析、总图数 preflight、能力记录和显式实际测试。单张/批量共用 `image_generation_inputs`。`provider.image` 新增独立 `style_reference_images`、`composition_reference_images` 参数，不写入 `reference_image_groups`。云端最终发送顺序为角色身份、画风、构图，Prompt 使用 1-based 序号逐组说明用途；视觉图片存在时不再套用“所有图片都是角色设计”的旧身份模板。原有仅角色参考行为保持不变。模式、用途排序、数量、能力依据随生成快照保存。
 
-能力测试需 `confirmed: true`，复用全局后台任务机制，发送 2–32 张内置 PNG 色块，实际生成一张图（可能计费），临时输入和输出仅在任务自有临时目录保存，结束自动清理。成功仅表示多图请求得到图片，无法证明每张图被模型使用。浏览器保存测试 task ID，刷新或临时断网后可继续监控原任务，不重复发起收费测试；并发点击也只提交一次。能力缓存 `visual-presets/reference-capabilities.json` 按供应商、地址、模型、凭据散列、尺寸和适配器版本隔离，不保存 API key。preflight 统计人设＋画风＋构图总数；超过测试数量、未验证或已拒绝时阻止原图生成。限流、鉴权、超时等记为 `unknown`，不误判“不支持”，明确拒绝参考图时记为 `unsupported`，可重新测试；不做静默文本降级。
+能力测试为可选诊断，需 `confirmed: true`，复用全局后台任务机制，发送 2–32 张内置 PNG 色块，实际生成一张图（可能计费），临时输入和输出仅在任务自有临时目录保存，结束自动清理。成功仅表示多图请求得到图片，无法证明每张图被模型使用。浏览器保存测试 task ID，刷新或临时断网后可继续监控原任务，不重复发起收费测试；并发点击也只提交一次。能力缓存 `visual-presets/reference-capabilities.json` 按供应商、地址、模型、凭据散列、尺寸和适配器版本隔离，不保存 API key。preflight 统计人设＋画风＋构图总数，仅在缺图、文件无效或适配器未实现原图发送时阻止生成。未测试、缓存为失败、配置或尺寸改变、总数超过测试数量均允许直接生成，不触发额外测试请求。限流、鉴权、超时等记为 `unknown`，明确拒绝参考图时记为 `unsupported`；缓存状态仅供参考。实际生成中明确拒绝参考图时停止当前批次的后续调用，之后的新请求仍可直接重试，不做静默文本降级。
 
-当前 SiliconFlow 适配器没有发送视觉原图的参数，ComfyUI 只有现有身份参考工作流，两者标为适配器不支持，不触发无意义收费测试。通用编辑接口、GRSAI、Ark 沿用已有图片参数形状，通过用户确认测试验证其具体模型；不新增 ControlNet/IP-Adapter 样式或布局工作流。视觉原图调用和测试日志不保存文本预览、图像内容及供应商原始错误响应。
+当前 SiliconFlow 适配器没有发送视觉原图的参数，ComfyUI 只有现有身份参考工作流，两者标为适配器不支持，不触发收费测试。通用编辑接口、GRSAI、Ark 沿用已有图片参数形状，可直接生成或由用户选择测试；不新增 ControlNet/IP-Adapter 样式或布局工作流。视觉原图调用和测试日志不保存文本预览、图像内容及供应商完整错误响应。HTTP 错误仅提取结构化错误描述、错误码与请求 ID；HTTP 200 中的 `status: failed` / `error` 也按失败处理。生成错误经过凭据、已提交文本和图片 data URL 脱敏后显示，不再统一覆盖为无具体原因的提示。`excessive system load` 保留原文并提示供应商负载过高，不更新为能力不支持。
 
 ## 核心不变量
 

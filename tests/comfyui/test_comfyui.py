@@ -418,7 +418,11 @@ class WorkflowTests(unittest.TestCase):
             load_api_workflow('{"nodes": []}')
 
     def test_symbolic_image_size(self) -> None:
-        self.assertEqual(parse_size("2K"), (2048, 2048))
+        for size, expected in (("1K", (1024, 1024)), ("2K", (2048, 2048)), ("4K", (2880, 2880)),
+                               (" 2k ", (2048, 2048)), ("2 K", (2048, 2048)),
+                               ("4096x4096", (4096, 4096)), ("1536x1024", (1536, 1024))):
+            with self.subTest(size=size):
+                self.assertEqual(parse_size(size), expected)
 
     def test_finds_configured_output_node(self) -> None:
         outputs = {

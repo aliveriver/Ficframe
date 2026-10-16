@@ -347,33 +347,35 @@ class VisualPresetIntegrationTests(unittest.TestCase):
         self.assertEqual(self.client.patch(f"/api/visual-presets/{item['id']}", json={"reference_mode": "invalid"}).status_code, 400)
         self.assertEqual(self.store.get(item["id"])["version"], 1)
 
-    def test_live_probe_requires_confirmation_and_blocks_unverified_generation(self):
+    def test_generation_does_not_require_probe_but_optional_probe_requires_confirmation(self):
         style = self.create(reference_mode="image", reference_paths=self.store.save_draft_references([("ref.png", PNG)]))
         self.defaults(style["id"])
         shot = self.repository.load("run")["shots"][0]
         response = self.client.post("/api/image-reference-test-task", json={"confirmed": False})
         self.assertEqual(response.status_code, 400)
-        response = self.client.post("/api/images", json={"run_id": "run", "shot": shot, "overwrite": True})
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("尚未验证", response.json()["detail"])
         self.assertEqual(self.provider.calls, [])
+        response = self.client.post("/api/images", json={"run_id": "run", "shot": shot, "overwrite": True})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(self.provider.calls), 1)
+        self.assertEqual(len(self.provider.calls[0][1]["style_reference_images"]), 1)
+        self.assertFalse((self.store.root / "reference-capabilities.json").exists())
         response = self.client.post("/api/image-reference-test-task", json={"confirmed": True, "reference_count": 2})
         self.assertEqual(response.status_code, 202)
         result = self.wait_task(response.json()["task_id"])
         self.assertEqual(result["status"], "supported")
         self.assertEqual(result["tested_count"], 2)
-        self.assertEqual(len(self.provider.calls), 1)
+        self.assertEqual(len(self.provider.calls), 2)
         self.assertEqual(self.client.get("/api/image-reference-capability").json()["status"], "supported")
         self.provider.config.image.model = "changed-model"
         self.assertEqual(self.client.get("/api/image-reference-capability").json()["status"], "unknown")
+        response = self.client.post("/api/images", json={"run_id": "run", "shot": shot, "overwrite": True})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(self.provider.calls), 3)
 
-    def test_verified_visual_channels_single_batch_and_retry_do_not_mix_identity_groups(self):
-        from ficframe.image_reference_workflow import probe_references
+    def test_unverified_visual_channels_single_batch_and_retry_do_not_mix_identity_groups(self):
         style = self.create(reference_mode="image", reference_paths=self.store.save_draft_references([("style.png", PNG)]))
         composition = self.create("composition", reference_mode="image", reference_paths=self.store.save_draft_references([("layout.png", PNG)]))
         self.defaults(style["id"], composition["id"])
-        self.assertEqual(probe_references(self.store, self.provider, 3, "1024x1024")["status"], "supported")
-        self.provider.calls.clear()
         shot = self.repository.load("run")["shots"][0]
         identity = self.repository.run_dir("run") / "identity.png"
         identity.write_bytes(PNG)
@@ -401,12 +403,19 @@ class VisualPresetIntegrationTests(unittest.TestCase):
         self.assertEqual(self.repository.load("run")["shots"][0]["positive_prompt"], "USER BASE")
 
     def test_known_unsupported_adapter_does_not_call_provider(self):
-        self.provider.config.image.provider = "siliconflow"
-        response = self.client.get("/api/image-reference-capability")
-        self.assertEqual(response.json()["status"], "unsupported")
-        response = self.client.post("/api/image-reference-test-task", json={"confirmed": True})
-        result = self.wait_task(response.json()["task_id"])
-        self.assertEqual(result["status"], "unsupported")
+        style = self.create(reference_mode="image", reference_paths=self.store.save_draft_references([("style.png", PNG)]))
+        self.defaults(style["id"])
+        shot = self.repository.load("run")["shots"][0]
+        for kind in ("siliconflow", "comfyui"):
+            with self.subTest(provider=kind):
+                self.provider.config.image.provider = kind
+                response = self.client.get("/api/image-reference-capability")
+                self.assertEqual(response.json()["status"], "unsupported")
+                response = self.client.post("/api/image-reference-test-task", json={"confirmed": True})
+                result = self.wait_task(response.json()["task_id"])
+                self.assertEqual(result["status"], "unsupported")
+                response = self.client.post("/api/images", json={"run_id": "run", "shot": shot})
+                self.assertEqual(response.status_code, 400, response.text)
         self.assertEqual(self.provider.calls, [])
 
     def test_probe_failure_distinguishes_rejection_from_temporary_errors(self):
@@ -421,7 +430,7 @@ class VisualPresetIntegrationTests(unittest.TestCase):
         self.assertEqual(result["status"], "unknown")
         self.assertEqual(capability(self.store, self.provider, "1024x1024")["status"], "supported")
 
-    def test_total_reference_count_and_size_need_matching_probe(self):
+    def test_changed_reference_count_size_and_credentials_do_not_require_new_probe(self):
         from ficframe.image_reference_workflow import probe_references, reference_preflight
         style = self.create(reference_mode="image", reference_paths=self.store.save_draft_references([("style.png", PNG)]))
         self.defaults(style["id"])
@@ -429,11 +438,40 @@ class VisualPresetIntegrationTests(unittest.TestCase):
         snapshot = resolve_generation(self.store, payload, Shot(**payload["shots"][0]))[2]
         probe_references(self.store, self.provider, 2, "1024x1024")
         check = reference_preflight(self.store, self.provider, snapshot, 2, "1024x1024")
-        self.assertFalse(check["ok"])
+        self.assertTrue(check["ok"])
         self.assertEqual(check["total_count"], 3)
-        self.assertFalse(reference_preflight(self.store, self.provider, snapshot, 0, "2K")["ok"])
+        self.assertEqual(check["tested_count"], 2)
+        self.assertTrue(reference_preflight(self.store, self.provider, snapshot, 0, "2K")["ok"])
         self.provider.config.image.api_key = "changed-key"
-        self.assertFalse(reference_preflight(self.store, self.provider, snapshot, 0, "1024x1024")["ok"])
+        self.assertTrue(reference_preflight(self.store, self.provider, snapshot, 0, "1024x1024")["ok"])
+        self.assertEqual(len(self.provider.calls), 1)
+
+    def test_background_generation_can_ignore_previously_failed_probe(self):
+        from ficframe.image_reference_workflow import probe_references
+        style = self.create(reference_mode="image", reference_paths=self.store.save_draft_references([("style.png", PNG)]))
+        self.defaults(style["id"])
+        with patch.object(self.provider, "image", side_effect=ProviderError("400 reference images not supported")):
+            self.assertEqual(probe_references(self.store, self.provider, 2, "1024x1024")["status"], "unsupported")
+        shot = self.repository.load("run")["shots"][0]
+        with patch.object(api, "get_task_manager", return_value=self.manager):
+            response = self.client.post("/api/images/task", json={"run_id": "run", "shot": shot})
+            self.assertEqual(response.status_code, 202, response.text)
+            result = self.wait_task(response.json()["task_id"])
+        self.assertEqual(len(self.provider.calls), 1)
+        self.assertEqual(len(self.provider.calls[0][1]["style_reference_images"]), 1)
+        self.assertTrue(result["visual_preset_snapshot"]["reference_delivery"]["capability"]["ok"])
+
+    def test_old_cached_messages_no_longer_require_testing(self):
+        from ficframe.image_reference_workflow import save_capability
+        for status in ("unknown", "supported", "unsupported"):
+            with self.subTest(status=status):
+                save_capability(self.store, self.provider, "1024x1024", {"status": status, "tested_count": 2,
+                                "message": "请先运行测试，更多图片需重新测试。"})
+                result = self.client.get("/api/image-reference-capability").json()
+                self.assertEqual(result["status"], status)
+                self.assertEqual(result["tested_count"], 2)
+                self.assertNotIn("请先运行测试", result["message"])
+                self.assertNotIn("需重新测试", result["message"])
 
     def test_text_mode_with_images_never_sends_visual_images(self):
         item = self.create(reference_mode="text", reference_paths=self.store.save_draft_references([("style.png", PNG)]))
@@ -446,10 +484,8 @@ class VisualPresetIntegrationTests(unittest.TestCase):
         self.assertNotIn("composition_reference_images", kwargs)
 
     def test_generation_rejection_updates_capability_and_blocks_remaining_batch_calls(self):
-        from ficframe.image_reference_workflow import probe_references
         style = self.create(reference_mode="image", reference_paths=self.store.save_draft_references([("style.png", PNG)]))
         self.defaults(style["id"])
-        probe_references(self.store, self.provider, 2, "1024x1024")
         shots = self.repository.load("run")["shots"]
         with patch.object(self.provider, "image", side_effect=ProviderError("400 too many reference images private-novel private-key")) as image:
             result = self.client.post("/api/images/batch", json={"run_id": "run", "shots": shots, "skip_existing": False, "retry_count": 2})
@@ -461,3 +497,45 @@ class VisualPresetIntegrationTests(unittest.TestCase):
         self.assertNotIn("private-key", result.text)
         self.assertEqual(self.client.get("/api/image-reference-capability").json()["status"], "unsupported")
         self.assertEqual(self.repository.load("run")["shots"][0]["positive_prompt"], "USER BASE")
+        retried = self.client.post("/api/images/batch", json={"run_id": "run", "shots": shots, "skip_existing": False})
+        self.assertEqual(retried.status_code, 200, retried.text)
+        self.assertTrue(all(item["ok"] for item in retried.json()["results"]))
+        self.assertEqual(len(self.provider.calls), 2)
+
+    def test_generation_preserves_supplier_load_error_and_allows_retry_without_probe(self):
+        style = self.create(reference_mode="image", reference_paths=self.store.save_draft_references([("style.png", PNG)]))
+        self.defaults(style["id"])
+        shot = self.repository.load("run")["shots"][0]
+        with patch.object(self.provider, "image", side_effect=ProviderError("图片 API 返回错误：excessive system load; request_id=task-14")):
+            response = self.client.post("/api/images", json={"run_id": "run", "shot": shot})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("excessive system load", response.json()["detail"])
+        self.assertIn("task-14", response.json()["detail"])
+        self.assertIn("负载过高", response.json()["detail"])
+        self.assertEqual(self.client.get("/api/image-reference-capability").json()["status"], "unknown")
+        response = self.client.post("/api/images", json={"run_id": "run", "shot": shot})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(self.provider.calls), 1)
+
+    def test_batch_retries_supplier_load_error_without_probe(self):
+        style = self.create(reference_mode="image", reference_paths=self.store.save_draft_references([("style.png", PNG)]))
+        self.defaults(style["id"])
+        shots = self.repository.load("run")["shots"]
+        original = self.provider.image
+        calls = []
+
+        def generate(prompt, target, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise ProviderError("图片 API 返回错误：excessive system load")
+            return original(prompt, target, **kwargs)
+
+        with patch.object(self.provider, "image", side_effect=generate), patch("ficframe.image_workflow.time.sleep") as pause:
+            response = self.client.post("/api/images/batch", json={"run_id": "run", "shots": shots, "retry_count": 1})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(all(item["ok"] for item in response.json()["results"]))
+        self.assertEqual([item["attempts"] for item in response.json()["results"]], [2, 1])
+        self.assertEqual(len(calls), 3)
+        pause.assert_called_once_with(2)
+        self.assertTrue(all(len(kwargs["style_reference_images"]) == 1 for kwargs in calls))
+        self.assertFalse((self.store.root / "reference-capabilities.json").exists())

@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from .features import visual_preset_kinds
-from .providers import ProviderError, effective_image_provider
+from .image_sizes import normalize_image_size
+from .providers import ProviderError, effective_image_provider, safe_provider_error
 from .run_repository import RunRepository
 from .visual_presets import VisualPresetStore, validate_reference_bytes
 
@@ -41,8 +42,10 @@ def purpose_prompt(prompt: str, identity_count: int, style_count: int, compositi
 
 def provider_fingerprint(provider: Any, size: str) -> str:
     endpoint = provider.config.image
-    data = {"provider": effective_image_provider(endpoint), "base_url": endpoint.base_url.rstrip("/"),
-            "model": endpoint.model, "size": size, "adapter_revision": ADAPTER_REVISION,
+    runtime = effective_image_provider(endpoint)
+    request_size = normalize_image_size(size)
+    data = {"provider": runtime, "base_url": endpoint.base_url.rstrip("/"),
+            "model": endpoint.model, "size": request_size, "adapter_revision": ADAPTER_REVISION,
             "credential_hash": hashlib.sha256((endpoint.api_key or "").encode()).hexdigest()}
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
@@ -55,7 +58,7 @@ def capability(store: VisualPresetStore, provider: Any, size: str = "1024x1024")
         reason = "当前 SiliconFlow 适配器不发送原图" if runtime == "siliconflow" else "当前 ComfyUI 工作流只有角色身份参考通道，未实现独立画风/构图原图控制"
         return {**common, "status": "unsupported", "message": reason + "；请改用仅文本模式或切换供应商。"}
     if not endpoint.api_key or not endpoint.model:
-        return {**common, "status": "unknown", "message": "请先保存图片供应商的模型与 API key，再测试多图参考。"}
+        return {**common, "status": "unknown", "message": "请先保存图片供应商的模型与 API key；多图能力测试为可选操作。"}
     fingerprint = provider_fingerprint(provider, size)
     path = store.root / "reference-capabilities.json"
     with _CAPABILITY_LOCK:
@@ -64,8 +67,14 @@ def capability(store: VisualPresetStore, provider: Any, size: str = "1024x1024")
         except (OSError, ValueError, AttributeError):
             result = None
     if isinstance(result, dict):
-        return {**common, **result}
-    return {**common, "status": "unknown", "message": "当前模型与尺寸尚未验证多图参考；请先运行测试（可能计费），或使用仅文本模式。"}
+        # Old cache messages described a mandatory probe; normalize that advice too.
+        messages = {
+            "supported": f"此前 {result.get('tested_count', 0)} 张参考图请求已成功；测试结果仅供参考，可直接生成，不限制参考图数量。",
+            "unsupported": "此前供应商曾拒绝多图参考；仍可直接生成重试，也可调整参考图或切换模型。",
+            "unknown": "此前多图测试未成功，无法确认能力；仍可直接生成，测试不是前置条件。",
+        }
+        return {**common, **result, "message": messages.get(result.get("status"), messages["unknown"])}
+    return {**common, "status": "unknown", "message": "当前模型与尺寸尚未测试多图参考，可以直接生成；也可按需运行能力测试（可能计费）。"}
 
 
 def save_capability(store: VisualPresetStore, provider: Any, size: str, result: dict[str, Any]) -> None:
@@ -89,13 +98,16 @@ def reference_rejected(exc: Exception) -> bool:
     return any(word in message for word in ("image", "reference", "图片", "参考")) and any(word in message for word in ("unsupported", "not support", "too many", "maximum", "only one", "at most", "不支持"))
 
 
-def reference_failure(store: VisualPresetStore, provider: Any, size: str, exc: Exception) -> str:
+def reference_failure(store: VisualPresetStore, provider: Any, size: str, exc: Exception,
+                      prompt: str = "", negative_prompt: str = "") -> str:
     if reference_rejected(exc):
         result = {"status": "unsupported", "tested_count": 0, "tested_at": int(time.time()),
-                  "message": "供应商拒绝本次原图参考，已更新能力状态；请重新测试、减少参考图、改用仅文本或切换模型。"}
+                  "message": "供应商拒绝本次原图参考；可减少参考图、改用仅文本或切换模型后直接重试，无需先测试。"}
         save_capability(store, provider, size, result)
         return result["message"]
-    return "原图参考生成失败，请检查模型、权限、额度和网络；未自动丢弃原图，可重试或改用仅文本。"
+    detail = safe_provider_error(str(exc), provider.config.image, [prompt, negative_prompt])
+    hint = "供应商当前负载过高，请稍后重试。" if "excessive system load" in detail.lower() else ""
+    return f"原图参考生成失败：{detail}；{hint}原图参考已保留，可直接重试或改用仅文本。"
 
 
 def synthetic_png(index: int) -> bytes:
@@ -138,7 +150,7 @@ def probe_references(store: VisualPresetStore, provider: Any, count: int, size: 
                     pass
             if not valid_image:
                 raise ProviderError("no valid image output")
-            result.update(status="supported", message=f"{count} 张参考图请求已成功并返回图片；无法确认模型使用了每张图或理解用途，不保证严格复刻，更多图片需重新测试。")
+            result.update(status="supported", message=f"{count} 张参考图请求已成功并返回图片；无法确认模型使用了每张图或理解用途，不保证严格复刻。测试结果仅供参考，不限制生成数量。")
         except Exception as exc:
             # Authentication/rate limits/timeouts are NOT evidence of lack of support.
             reference_rejection = reference_rejected(exc)
@@ -171,9 +183,12 @@ def reference_preflight(store: VisualPresetStore, provider: Any, snapshot: dict[
     if not (style_count or composition_count):
         return {"ok": True, "status": "text", "message": "视觉预设仅发送文本规范，不发送原图。", "total_count": identity_count}
     result = capability(store, provider, size)
-    ok = result["status"] == "supported" and total <= result.get("tested_count", 0)
+    # Probe results are advisory. Only a missing implementation can block delivery.
+    ok = result["adapter_supported"]
     message = result["message"]
-    if result["status"] == "supported" and not ok:
-        message = f"本次共 {total} 张参考图（含人设），超过已验证的 {result['tested_count']} 张；请按本次数量重新测试或改用仅文本。"
+    if ok and result["status"] == "unsupported":
+        message = "此前请求曾被供应商拒绝，仍可直接生成重试；请确认当前模型与参考图数量符合接口要求。"
+    elif ok and result["status"] == "supported" and total > result.get("tested_count", 0):
+        message = f"本次共 {total} 张参考图（含人设），此前测试为 {result['tested_count']} 张；可以直接生成，无需重新测试。"
     return {**result, "ok": ok, "message": message, "total_count": total, "identity_count": identity_count,
             "style_count": style_count, "composition_count": composition_count}

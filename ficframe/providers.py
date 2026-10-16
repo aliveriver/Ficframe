@@ -5,6 +5,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,7 +15,8 @@ from urllib.parse import urlparse
 import httpx
 from dotenv import load_dotenv
 
-from .logging_utils import get_logger
+from .image_sizes import normalize_image_size
+from .logging_utils import get_logger, redact_text
 from .comfyui import ComfyUIClient, ComfyUIError, load_api_workflow, render_api_workflow
 from .runtime_paths import env_file
 
@@ -159,7 +161,8 @@ class OpenAICompatibleProvider:
                 request_summary,
                 "[visual analysis response omitted]" if private_visual_analysis else response.text[:500],
             )
-            raise ProviderError(f"{response.status_code} {url}: {response.text[:1000]}")
+            detail = safe_provider_error(response_error_detail(response), endpoint, collect_texts(payload)) if private_visual_analysis else response.text[:1000]
+            raise ProviderError(f"{response.status_code} {safe_url(url)}: {detail}")
         return response.json()
 
     def _post_multipart(
@@ -225,7 +228,8 @@ class OpenAICompatibleProvider:
         )
         if response.status_code >= 400:
             logger.warning("provider multipart failed label=%s purpose=%s url=%s path=%s status=%s body=%s", label, purpose, safe_url(url), path, response.status_code, "[reference response omitted]" if private_reference else response.text[:500])
-            raise ProviderError(f"{response.status_code} {url}: {response.text[:1000]}")
+            detail = safe_provider_error(response_error_detail(response), endpoint, [data.get("prompt", "")]) if private_reference else response.text[:1000]
+            raise ProviderError(f"{response.status_code} {safe_url(url)}: {detail}")
         return response.json()
 
     def text(self, system: str, user: str, model: str | None = None, purpose: str = "") -> str:
@@ -338,6 +342,7 @@ class OpenAICompatibleProvider:
         reference_roles_embedded: bool = False,
     ) -> Path:
         endpoint = self.config.image
+        size = normalize_image_size(size)
         groups = [group for group in (reference_image_groups or []) if group]
         references = [path for group in groups for path in group] if groups else (reference_images or [])
         provider = effective_image_provider(endpoint)
@@ -458,6 +463,10 @@ class OpenAICompatibleProvider:
             data = self._post(endpoint, "image", "images/generations", payload, purpose=purpose)
 
         item = extract_image_item(data)
+        for result in (data, item):
+            if result.get("error") or result.get("status") in {"failed", "error"}:
+                detail = safe_provider_error(provider_error_detail(result) or "供应商生成失败", endpoint, [cloud_prompt, prompt, negative_prompt])
+                raise ProviderError(f"图片 API 返回错误：{detail}")
         target = Path(out_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         if item.get("b64_json"):
@@ -678,6 +687,35 @@ def to_data_url(path: Path) -> str:
     mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")
     return f"data:{mime_type};base64,{encoded}"
+
+
+def safe_provider_error(message: str, endpoint: EndpointConfig, private_texts: list[str] | None = None) -> str:
+    """Keep actionable errors without echoing credentials or submitted image/text inputs."""
+    for private in [*(private_texts or []), endpoint.api_key]:
+        if private:
+            message = message.replace(private, "[已隐藏]").replace(json.dumps(private, ensure_ascii=True)[1:-1], "[已隐藏]")
+    message = re.sub(r"data:image/[^\s;,]+;base64,[A-Za-z0-9+/=]+", "[图片内容已隐藏]", message)
+    return compact_log_text(redact_text(message), 600)
+
+
+def provider_error_detail(data: dict[str, Any]) -> str:
+    error = data.get("error")
+    if isinstance(error, dict):
+        parts = [str(error[key]) for key in ("message", "code", "type", "param") if error.get(key)]
+    else:
+        parts = [str(error or data.get("message") or "")]
+    request_id = data.get("request_id") or data.get("id")
+    if request_id:
+        parts.append(f"request_id={request_id}")
+    return "; ".join(part for part in parts if part)
+
+
+def response_error_detail(response: httpx.Response) -> str:
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    return (provider_error_detail(data) if isinstance(data, dict) else "") or response.reason_phrase
 
 
 def extract_image_item(data: dict[str, Any]) -> dict[str, Any]:
