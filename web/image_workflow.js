@@ -47,7 +47,8 @@
         if (elements.visualPromptSnapshot) {
           const snapshot = shot?.last_generation_visual_snapshot || {};
           const label = (kind, text) => snapshot[kind]?.id ? `${text}：${snapshot[kind].name || snapshot[kind].id} v${snapshot[kind].version || 1}${snapshot[kind].positive ? ` · ${snapshot[kind].positive}` : ""}` : `${text}：未使用`;
-          elements.visualPromptSnapshot.textContent = `最近生成实际规范（软约束） · ${label("style", "画风")} · ${label("composition", "构图")}`;
+          const kinds = state.visualPresetKinds || ["style"];
+          elements.visualPromptSnapshot.textContent = `最近生成实际规范（软约束） · ${kinds.map((kind) => label(kind, kind === "style" ? "画风" : "构图")).join(" · ")}`;
         }
       }
       renderShots(state.selected?.id);

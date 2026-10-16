@@ -11,6 +11,7 @@ import zlib
 from pathlib import Path
 from typing import Any
 
+from .features import visual_preset_kinds
 from .providers import ProviderError, effective_image_provider
 from .run_repository import RunRepository
 from .visual_presets import VisualPresetStore, validate_reference_bytes
@@ -119,9 +120,11 @@ def probe_references(store: VisualPresetStore, provider: Any, count: int, size: 
             paths.append(path)
         target = Path(directory) / "result.png"
         try:
+            references = {"style_reference_images": paths}
+            if "composition" in visual_preset_kinds():
+                references = {"style_reference_images": paths[:-1], "composition_reference_images": paths[-1:]}
             provider.image("Create a simple abstract illustration using the supplied color samples. No people or text.", target,
-                           size=size, style_reference_images=paths[:-1], composition_reference_images=paths[-1:],
-                           purpose="reference_probe:multi_image")
+                           size=size, **references, purpose="reference_probe:multi_image")
             if not target.is_file() or not target.stat().st_size:
                 raise ProviderError("no generated output")
             content = target.read_bytes()
@@ -147,7 +150,7 @@ def probe_references(store: VisualPresetStore, provider: Any, count: int, size: 
 
 def visual_paths(store: VisualPresetStore, snapshot: dict[str, Any]) -> dict[str, list[Path]]:
     result = {"style": [], "composition": []}
-    for kind in result:
+    for kind in visual_preset_kinds():
         guide = snapshot.get(kind) or {}
         if guide.get("id") and guide.get("reference_mode", "text") == "image":
             paths = guide.get("reference_images") or []
@@ -166,7 +169,7 @@ def reference_preflight(store: VisualPresetStore, provider: Any, snapshot: dict[
     style_count, composition_count = len(paths["style"]), len(paths["composition"])
     total = identity_count + style_count + composition_count
     if not (style_count or composition_count):
-        return {"ok": True, "status": "text", "message": "画风与构图仅发送文本规范，不发送原图。", "total_count": identity_count}
+        return {"ok": True, "status": "text", "message": "视觉预设仅发送文本规范，不发送原图。", "total_count": identity_count}
     result = capability(store, provider, size)
     ok = result["status"] == "supported" and total <= result.get("tested_count", 0)
     message = result["message"]

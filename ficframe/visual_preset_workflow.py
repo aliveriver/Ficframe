@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from .features import visual_preset_kinds
 from .models import Shot, to_dict
 from .visual_presets import VisualPresetStore, build_visual_prompt, preset_snapshot, validate_reference_mode
 
@@ -26,8 +27,9 @@ def select_snapshot(store: VisualPresetStore, kind: str, selected_id: str | None
 def bind_defaults(store: VisualPresetStore, selections: dict[str, Any], previous: dict[str, Any] | None = None,
                   *, refresh: bool = False) -> dict[str, Any]:
     previous = previous or {}
-    result: dict[str, Any] = {}
-    for kind in KINDS:
+    # Preserve dormant bindings without resolving their presets or references.
+    result: dict[str, Any] = deepcopy(previous)
+    for kind in visual_preset_kinds():
         selected_id = selections.get(f"{kind}_id") or None
         result[f"{kind}_id"] = selected_id
         result[f"{kind}_snapshot"] = select_snapshot(store, kind, selected_id, previous.get(f"{kind}_snapshot"), refresh=refresh)
@@ -41,7 +43,14 @@ def bind_defaults(store: VisualPresetStore, selections: dict[str, Any], previous
 def bind_shot(store: VisualPresetStore, shot: Shot, defaults: dict[str, Any], previous: dict[str, Any] | None = None,
               *, refresh: bool = False) -> Shot:
     previous = previous or {}
+    active_kinds = visual_preset_kinds()
     for kind in KINDS:
+        if kind not in active_kinds:
+            # Older or minimal clients may omit hidden controls when saving.
+            for key in SELECTION_FIELDS:
+                if key.startswith(f"{kind}_") and key in previous:
+                    setattr(shot, key, deepcopy(previous[key]))
+            continue
         mode = getattr(shot, f"{kind}_preset_mode") or "inherit"
         if mode not in {"inherit", "none", "preset"}:
             raise ValueError("规范选择必须是继承、指定预设或不使用")
@@ -70,7 +79,7 @@ def bind_run_defaults(store: VisualPresetStore, payload: dict[str, Any], selecti
                       *, refresh: bool = False) -> dict[str, Any]:
     """Preserve bindings from early ID-only runs when a snapshot is available."""
     previous = deepcopy(payload.get("visual_presets") or {})
-    for kind in KINDS:
+    for kind in visual_preset_kinds():
         selected_id = previous.get(f"{kind}_id")
         if not selected_id or previous.get(f"{kind}_snapshot"):
             continue
@@ -93,7 +102,8 @@ def resolve_generation(store: VisualPresetStore, payload: dict[str, Any], shot: 
     defaults = bind_run_defaults(store, payload)
     previous = next((item for item in payload.get("shots", []) if item.get("id") == shot.id), to_dict(shot))
     bind_shot(store, shot, defaults, previous)
-    snapshot = {kind: deepcopy(getattr(shot, f"{kind}_preset_snapshot")) for kind in KINDS}
+    active_kinds = visual_preset_kinds()
+    snapshot = {kind: deepcopy(getattr(shot, f"{kind}_preset_snapshot")) if kind in active_kinds else {} for kind in KINDS}
     positive, negative = build_visual_prompt(shot.positive_prompt, shot.negative_prompt, snapshot["style"], snapshot["composition"])
     snapshot.update({"assembly_version": 2, "positive_prompt": positive, "negative_prompt": negative})
     return positive, negative, snapshot

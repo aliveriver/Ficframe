@@ -27,7 +27,11 @@ if (Test-Path -LiteralPath $BuildRoot) {
 }
 New-Item -ItemType Directory -Force -Path $DistRoot, $WorkRoot, $ArtifactRoot | Out-Null
 
-uv run --extra build pyinstaller --noconfirm --clean `
+$env:UV_PROJECT_ENVIRONMENT = Join-Path $BuildRoot ".venv"
+$env:UV_PYTHON_INSTALL_DIR = Join-Path $BuildRoot "python"
+$env:PYINSTALLER_CONFIG_DIR = Join-Path $BuildRoot "pyinstaller-cache"
+
+uv run --locked --python 3.11 --extra build pyinstaller --noconfirm --clean `
     --distpath $DistRoot `
     --workpath $WorkRoot `
     (Join-Path $RepoRoot "packaging\ficframe.spec")
@@ -45,7 +49,7 @@ $IsccCandidates = @(
 $Iscc = $IsccCandidates | Select-Object -First 1
 
 if ($Iscc) {
-    & $Iscc "/DAppVersion=$Version" "/DSourceDir=$(Join-Path $DistRoot 'FicFrame')" "/DArtifactDir=$ArtifactRoot" (Join-Path $RepoRoot "packaging\windows\FicFrame.iss")
+    & $Iscc "/DAppVersion=$Version" "/DSourceDir=$(Join-Path $DistRoot 'FicFrame')" "/DArtifactDir=$ArtifactRoot" "/DAppIcon=$(Join-Path $RepoRoot 'web\favicon.ico')" (Join-Path $RepoRoot "packaging\windows\FicFrame.iss")
     if ($LASTEXITCODE -ne 0) { throw "Inno Setup 构建失败。" }
 } elseif ($RequireInstaller) {
     throw "未找到 Inno Setup 6（ISCC.exe），无法生成 Windows 安装器。"

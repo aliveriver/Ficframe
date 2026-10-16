@@ -4,20 +4,26 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>FicFrame</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=20261011-visual2" />
+    <link rel="icon" href="/favicon.ico" type="image/vnd.microsoft.icon" />
+    <link rel="stylesheet" href="/assets/styles.css?v=20261016-compact" />
   </head>
   <body>
     <main class="shell">
       <section class="topbar">
         <div>
-          <h1>FicFrame</h1>
+          <h1 class="brand-title"><img src="/favicon.ico" width="32" height="32" alt="" />FicFrame</h1>
           <p id="health">API 状态检查中</p>
         </div>
         <div class="top-actions">
           <button id="configToggle" type="button">API 管理</button>
-          <button id="cleanStartBtn" type="button">清空界面</button>
-          <button id="restoreRunBtn" type="button">恢复最近</button>
-          <button id="logExportBtn" type="button">导出日志</button>
+          <details class="action-menu">
+            <summary>工作区</summary>
+            <div class="action-menu-items">
+              <button id="restoreRunBtn" type="button">恢复最近项目</button>
+              <button id="cleanStartBtn" type="button">清空界面</button>
+              <button id="logExportBtn" type="button">导出日志</button>
+            </div>
+          </details>
           <button id="runBtn" class="primary" type="button">生成分镜</button>
         </div>
       </section>
@@ -144,6 +150,9 @@
 
       <section class="workspace">
         <aside class="panel inputs">
+          <div class="section-heading"><h2>创作设置</h2><span>素材与生成</span></div>
+          <section class="input-section">
+          <h3>导入素材</h3>
           <label>
             <span>小说 Markdown</span>
             <input id="novelFile" type="file" accept=".md,.txt" />
@@ -152,6 +161,10 @@
             <span>人物 Markdown</span>
             <input id="charactersFile" type="file" accept=".md,.txt" />
           </label>
+          </section>
+          <details class="panel-disclosure" id="characterToolsPanel">
+            <summary>人设参考与角色工具</summary>
+            <div class="disclosure-content">
           <label>
             <span>人设参考图</span>
             <input id="referenceImages" type="file" accept="image/*" multiple />
@@ -169,9 +182,9 @@
                     <button id="llmPromptBankBtn" type="button">生成 Prompt Bank</button>
                     <button id="localPromptBankBtn" type="button">本地 Prompt Bank</button>
                     <button id="llmDiffBtn" type="button">LLM 差异分析</button>
+                    <button id="manualCharacterToggleBtn" type="button">手动添加角色</button>
                   </div>
                 </details>
-                <button id="manualCharacterToggleBtn" type="button">手动添加角色</button>
               </div>
             </div>
             <div id="manualCharacterPanel" class="manual-character-panel" hidden>
@@ -196,6 +209,15 @@
             </div>
             <div id="referenceTable" class="reference-table"></div>
           </div>
+          <details class="nested-disclosure"><summary>角色卡与差异分析</summary><div class="disclosure-content">
+            <div id="charactersBox" class="readout"></div>
+            <div id="characterDiffBox" class="readout diff-readout"></div>
+          </div></details>
+            </div>
+          </details>
+          <section class="input-section">
+          <h3>生成设置</h3>
+          <div class="generation-basics">
           <label>
             <span>分镜数量</span>
             <input id="maxShots" type="number" min="1" max="24" value="8" />
@@ -204,6 +226,8 @@
             <input id="useLlm" type="checkbox" />
             <span>LLM 增强</span>
           </label>
+          </div>
+          <details class="nested-disclosure"><summary>LLM 模式与并发</summary><div class="disclosure-content">
           <label>
             <span>LLM 模式</span>
             <select id="llmProfile">
@@ -245,9 +269,61 @@
               </section>
             </div>
           </div>
-          <div class="rules-board">
-            <button id="rulesToggleBtn" type="button">查看本地规则</button>
-            <div id="rulesPanel" class="rules-panel" hidden>
+          </div></details>
+          </section>
+          <section class="input-section">
+          <label>
+            <span>图片尺寸</span>
+            <select id="imageSize">
+              <option value="2K">2K</option>
+              <option value="1024x1024">1024 x 1024</option>
+              <option value="1024x1536">1024 x 1536</option>
+              <option value="1536x1024">1536 x 1024</option>
+              <option value="2048x2048">2048 x 2048</option>
+            </select>
+          </label>
+          <details class="nested-disclosure"><summary>自定义尺寸</summary><div class="disclosure-content">
+            <input id="customImageSize" aria-label="自定义图片尺寸" placeholder="如 2K 或 2048x2048" />
+          </div></details>
+          </section>
+          <details class="panel-disclosure visual-settings">
+            <summary>画风设置</summary>
+            <section class="visual-preset-panel" aria-labelledby="visualPresetHeading">
+              <div class="section-head tight"><h3 id="visualPresetHeading">画风规范</h3>
+                <details class="action-menu"><summary>预设操作</summary><div class="action-menu-items">
+                  <button id="createStylePresetBtn" type="button">新建画风</button>
+                  <button id="createCompositionPresetBtn" data-feature="composition-references" hidden type="button">新建构图</button>
+                  <button id="adoptRunVisualPresetsBtn" type="button">默认预设采用最新版</button>
+                  <button id="refreshVisualPresetsBtn" type="button">刷新预设</button>
+                  <button id="resumeVisualPresetDraftBtn" type="button">继续编辑未保存草稿</button>
+                </div></details>
+              </div>
+              <label><span>默认画风</span><select id="runStylePreset"><option value="">不使用</option></select></label>
+              <label><span>参考模式</span><select id="runStyleReferenceMode"><option value="text">仅文本规范</option><option value="image">原图参考＋文本规范</option></select></label>
+              <label data-feature="composition-references" hidden><span>默认构图</span><select id="runCompositionPreset"><option value="">不使用</option></select></label>
+              <label data-feature="composition-references" hidden><span>构图参考模式</span><select id="runCompositionReferenceMode"><option value="text">仅文本规范</option><option value="image">原图参考＋文本规范</option></select></label>
+              <details class="nested-disclosure"><summary>管理预设与参考图</summary><div class="disclosure-content">
+                <p class="muted">应用时固定预设版本；编辑后可从「预设操作」采用最新版。</p>
+                <div id="visualPresetStatus" class="readout"></div>
+                <label><span>画风参考图（VLM 分析）</span><input id="stylePresetImages" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" multiple /></label>
+                <button id="analyzeStylePresetBtn" type="button">提炼画风文字草稿</button>
+                <div data-feature="composition-references" hidden>
+                  <label><span>构图参考图</span><input id="compositionPresetImages" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" multiple /></label>
+                  <button id="analyzeCompositionPresetBtn" type="button">分析构图参考图</button>
+                </div>
+              </div></details>
+              <p id="visualReferenceWarning" class="reference-warning" role="alert" hidden></p>
+              <details class="nested-disclosure reference-capability-panel"><summary>图片模型多图能力</summary><div class="disclosure-content">
+                <p id="imageReferenceCapability" class="readout" role="status" aria-live="polite">正在检查当前图片模型…</p>
+                <button id="testImageReferencesBtn" type="button">实际测试多图参考（可能计费）</button>
+                <p class="muted">使用内置色块，不上传用户原图或小说。测试当前已保存的图片模型与尺寸；接口接受不代表理解准确。</p>
+              </div></details>
+            </section>
+          </details>
+          <details class="panel-disclosure"><summary>本地规则与使用说明</summary><div class="disclosure-content">
+            <div class="rules-board">
+              <button id="rulesToggleBtn" type="button">查看本地规则</button>
+              <div id="rulesPanel" class="rules-panel" hidden>
               <section>
                 <h3>人物文档</h3>
                 <ul>
@@ -282,101 +358,84 @@
               </section>
             </div>
           </div>
-          <label>
-            <span>图片尺寸</span>
-            <div class="size-row">
-              <select id="imageSize">
-                <option value="2K">2K</option>
-                <option value="1024x1024">1024 x 1024</option>
-                <option value="1024x1536">1024 x 1536</option>
-                <option value="1536x1024">1536 x 1024</option>
-                <option value="2048x2048">2048 x 2048</option>
-              </select>
-              <input id="customImageSize" placeholder="自定义，如 2K 或 2048x2048" />
-            </div>
-          </label>
-          <section class="visual-preset-panel" aria-labelledby="visualPresetHeading">
-            <div class="section-head tight"><h3 id="visualPresetHeading">画风与构图规范</h3><button id="refreshVisualPresetsBtn" type="button">刷新</button></div>
-            <p class="muted">画风与构图独立选择文本或原图参考；原图不进入角色身份分组。效果取决于模型。</p>
-            <label><span>当前 run 默认画风</span><select id="runStylePreset"><option value="">不使用</option></select></label>
-            <label><span>画风参考模式</span><select id="runStyleReferenceMode"><option value="text">仅文本规范</option><option value="image">原图参考＋文本规范</option></select></label>
-            <label><span>当前 run 默认构图</span><select id="runCompositionPreset"><option value="">不使用</option></select></label>
-            <label><span>构图参考模式</span><select id="runCompositionReferenceMode"><option value="text">仅文本规范</option><option value="image">原图参考＋文本规范</option></select></label>
-            <button id="adoptRunVisualPresetsBtn" type="button">run 默认采用最新版</button>
-            <p class="muted">应用时固定预设版本；编辑预设后，可在这里显式更新。</p>
-            <div class="actions compact"><button id="createStylePresetBtn" type="button">新建画风</button><button id="createCompositionPresetBtn" type="button">新建构图</button></div>
-            <details class="visual-preset-quick-analysis"><summary>从参考图提炼文字草稿（VLM）</summary>
-              <div>
-                <label><span>画风参考图</span><input id="stylePresetImages" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" multiple /></label>
-                <button id="analyzeStylePresetBtn" type="button">分析画风参考图</button>
-                <label><span>构图参考图</span><input id="compositionPresetImages" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" multiple /></label>
-                <button id="analyzeCompositionPresetBtn" type="button">分析构图参考图</button>
-              </div>
-            </details>
-            <p id="visualReferenceWarning" class="reference-warning" role="alert" hidden></p>
-            <details class="reference-capability-panel"><summary>图片模型多图能力</summary>
-              <p id="imageReferenceCapability" class="readout" role="status" aria-live="polite">正在检查当前图片模型…</p>
-              <button id="testImageReferencesBtn" type="button">实际测试多图参考（可能计费）</button>
-              <p class="muted">使用内置色块，不上传用户原图或小说。测试当前已保存的图片模型与尺寸；接口接受不代表理解准确。批量时按所需最多图片数测试。</p>
-            </details>
-            <div id="visualPresetStatus" class="readout"></div>
-            <button id="resumeVisualPresetDraftBtn" type="button">继续编辑未保存草稿</button>
-          </section>
-          <div id="charactersBox" class="readout"></div>
-          <div id="characterDiffBox" class="readout diff-readout"></div>
+          </div></details>
         </aside>
 
         <section class="panel shots">
           <div class="section-head">
-            <h2>分镜</h2>
+            <div class="section-heading"><h2>分镜</h2><span id="runId">未运行</span></div>
             <div class="head-actions">
-              <span id="runId">未运行</span>
               <button id="openNovelBtn" type="button">预览小说</button>
-              <button id="addShotBtn" type="button">添加分镜</button>
+              <details class="action-menu">
+                <summary>分镜操作</summary>
+                <div class="action-menu-items">
+                  <button id="addShotBtn" type="button">添加分镜</button>
+                  <button id="regenerateSelectedBtn" type="button">重生成选中</button>
+                  <button id="regenerateAllBtn" type="button">重生成全部</button>
+                </div>
+              </details>
             </div>
-          </div>
-          <div class="storyboard-actions">
-            <button id="regenerateSelectedBtn" type="button">重生成选中</button>
-            <button id="regenerateAllBtn" type="button">重生成全部</button>
           </div>
           <div id="shotList" class="shot-list"></div>
-          <section class="feedback-panel">
-            <div class="section-head tight">
-              <h3>分镜 Agent</h3>
-              <span>自动判断是否重生成 · 历史随 run 保存</span>
-            </div>
+          <details class="panel-disclosure feedback-panel">
+            <summary>分镜 Agent · 反馈与调整</summary>
+            <div class="disclosure-content">
+            <p class="muted">自动判断是否重生成，反馈历史随项目保存。</p>
             <div id="feedbackHistory" class="feedback-history"></div>
             <label>
               <span>告诉 LLM 哪些地方好、哪些需要调整</span>
               <textarea id="feedbackInput" rows="3" placeholder="例如：第 2 镜情绪很好，请保留；第 3、4 镜景别太重复，下一版拉开节奏。"></textarea>
             </label>
             <button id="sendFeedbackBtn" type="button">发送反馈</button>
-          </section>
+            </div>
+          </details>
         </section>
 
         <section class="panel detail">
           <div class="section-head">
             <h2>分镜详情</h2>
             <div class="head-actions">
-              <button id="locateSourceBtn" type="button">查看原文</button>
               <button id="saveShotBtn" type="button">保存修改</button>
-              <button id="deleteShotBtn" class="danger" type="button">删除分镜</button>
               <details class="action-menu">
-                <summary>Prompt 工具</summary>
+                <summary>更多</summary>
                 <div class="action-menu-items">
-                  <button id="restorePromptBtn" type="button">恢复本地版本</button>
-                  <button id="rebuildPromptBtn" type="button">本地重建</button>
-                  <button id="llmPromptBtn" type="button">LLM 重建</button>
-                  <button id="copyBtn" type="button">复制 Prompt</button>
+                  <button id="locateSourceBtn" type="button">查看原文</button>
+                  <button id="deleteShotBtn" class="danger" type="button">删除分镜</button>
                 </div>
               </details>
             </div>
+          </div>
+          <div class="actions detail-toolbar">
+            <button id="imageBtn" class="primary" type="button">生成图片</button>
+            <details class="action-menu">
+              <summary>批量图片</summary>
+              <div class="action-menu-items">
+                <button id="selectedImagesBtn" type="button">生成选中</button>
+                <button id="allImagesBtn" type="button">生成全部</button>
+                <button id="retryFailedBtn" type="button">重试失败</button>
+              </div>
+            </details>
+            <details class="action-menu export-menu">
+              <summary>排版与导出</summary>
+              <div class="action-menu-items">
+                <button id="openHtmlDesignerBtn" type="button">可视化排版</button>
+                <button id="exportBtn" type="button">导出小说 MD</button>
+                <button id="exportHtmlBtn" type="button">导出 HTML</button>
+                <button id="exportZipBtn" type="button">导出 ZIP 成品包</button>
+              </div>
+            </details>
           </div>
           <div class="shot-editor">
             <label class="span-2">
               <span>标题</span>
               <input id="shotTitle" />
             </label>
+            <label class="span-2">
+              <span>画面目标</span>
+              <textarea id="shotVisualGoal" rows="2"></textarea>
+            </label>
+            <details class="panel-disclosure span-2"><summary>分镜设置 · 场景、画风与排版</summary><div class="disclosure-content">
+            <details class="panel-disclosure"><summary>场景与镜头设置</summary><div class="shot-editor disclosure-content">
             <label>
               <span>地点</span>
               <input id="shotLocation" />
@@ -401,19 +460,19 @@
               <span>构图</span>
               <input id="shotComposition" />
             </label>
-            <label class="span-2">
-              <span>画面目标</span>
-              <textarea id="shotVisualGoal" rows="2"></textarea>
-            </label>
-            <label><span>单条画风规范</span><select id="shotStylePreset"><option value="inherit">沿用 run 默认</option><option value="none">不使用</option></select></label>
-            <label><span>单条画风参考模式</span><select id="shotStyleReferenceMode"><option value="inherit">沿用 run 参考模式</option><option value="text">仅文本规范</option><option value="image">原图参考＋文本规范</option></select></label>
-            <label><span>单条构图规范</span><select id="shotCompositionPreset"><option value="inherit">沿用 run 默认</option><option value="none">不使用</option></select></label>
-            <label><span>单条构图参考模式</span><select id="shotCompositionReferenceMode"><option value="inherit">沿用 run 参考模式</option><option value="text">仅文本规范</option><option value="image">原图参考＋文本规范</option></select></label>
-            <div class="span-2"><button id="adoptShotVisualPresetsBtn" type="button">本分镜指定预设采用最新版</button></div>
             <div class="source-basis span-2">
               <span>生成依据</span>
               <p id="shotSourceExcerpt">选择分镜后显示对应小说段落</p>
             </div>
+            </div></details>
+            <details class="panel-disclosure"><summary>本分镜画风设置</summary><div class="shot-editor disclosure-content">
+              <label><span>画风规范</span><select id="shotStylePreset"><option value="inherit">沿用 run 默认</option><option value="none">不使用</option></select></label>
+              <label><span>画风参考模式</span><select id="shotStyleReferenceMode"><option value="inherit">沿用 run 参考模式</option><option value="text">仅文本规范</option><option value="image">原图参考＋文本规范</option></select></label>
+              <label data-feature="composition-references" hidden><span>单条构图规范</span><select id="shotCompositionPreset"><option value="inherit">沿用 run 默认</option><option value="none">不使用</option></select></label>
+              <label data-feature="composition-references" hidden><span>单条构图参考模式</span><select id="shotCompositionReferenceMode"><option value="inherit">沿用 run 参考模式</option><option value="text">仅文本规范</option><option value="image">原图参考＋文本规范</option></select></label>
+              <div class="span-2"><button id="adoptShotVisualPresetsBtn" type="button">采用指定预设的最新版</button></div>
+            </div></details>
+            <details class="panel-disclosure"><summary>本分镜图片排版</summary><div class="disclosure-content">
             <fieldset class="html-layout-panel span-2">
               <legend>HTML 图片布局</legend>
               <div class="inline-fields">
@@ -463,22 +522,42 @@
                 </label>
               </div>
             </fieldset>
-            <section class="storyboard-version-panel span-2">
-              <div class="section-head tight">
-                <h3>分镜版本</h3>
-                <span id="storyboardVersionCount">暂无历史版本</span>
+            </div></details>
+            </div></details>
+          </div>
+          <div class="section-head tight prompt-heading">
+            <h3>生图 Prompt</h3>
+            <details class="action-menu">
+              <summary>Prompt 工具</summary>
+              <div class="action-menu-items">
+                <button id="copyBtn" type="button">复制 Prompt</button>
+                <button id="restorePromptBtn" type="button">恢复本地版本</button>
+                <button id="rebuildPromptBtn" type="button">本地重建</button>
+                <button id="llmPromptBtn" type="button">LLM 重建</button>
               </div>
-              <div id="storyboardVersions" class="storyboard-versions"></div>
-            </section>
+            </details>
           </div>
           <label class="prompt-label">
             <span>正向 Prompt</span>
             <textarea id="promptBox" spellcheck="false"></textarea>
           </label>
+          <details class="panel-disclosure"><summary>负向 Prompt</summary><div class="disclosure-content">
           <label class="prompt-label">
-            <span>负向 Prompt</span>
+            <span class="sr-only">负向 Prompt</span>
             <textarea id="negativePromptBox" rows="4" spellcheck="false"></textarea>
           </label>
+          </div></details>
+          <figure id="preview" class="preview"></figure>
+          <details class="panel-disclosure"><summary>历史版本与检查</summary><div class="disclosure-content">
+            <section class="storyboard-version-panel">
+              <div class="section-head tight"><h3>分镜版本</h3><span id="storyboardVersionCount">暂无历史版本</span></div>
+              <div id="storyboardVersions" class="storyboard-versions"></div>
+            </section>
+            <div id="visualPromptSnapshot" class="readout"></div>
+            <div id="imageVersions" class="image-versions"></div>
+            <pre id="qaBox"></pre>
+          </div></details>
+          <details class="panel-disclosure"><summary>更多设置 · Prompt、文本与批量</summary><div class="disclosure-content">
           <details class="panel-disclosure">
             <summary>实际生图规范与最终 Prompt</summary>
             <p class="muted">规范为软约束，实际效果取决于图片模型；原始 Prompt 保持独立编辑。</p>
@@ -520,21 +599,6 @@
             </div>
             </fieldset>
           </details>
-          <div class="actions">
-            <button id="imageBtn" type="button">生成图片</button>
-            <details class="action-menu">
-              <summary>批量图片</summary>
-              <div class="action-menu-items">
-                <button id="selectedImagesBtn" type="button">生成选中</button>
-                <button id="allImagesBtn" type="button">生成全部</button>
-                <button id="retryFailedBtn" type="button">重试失败</button>
-              </div>
-            </details>
-            <button id="exportBtn" type="button">导出小说 MD</button>
-            <button id="openHtmlDesignerBtn" class="primary" type="button">可视化排版</button>
-            <button id="exportHtmlBtn" type="button">导出 HTML</button>
-            <button id="exportZipBtn" type="button">导出 ZIP 成品包</button>
-          </div>
           <details class="panel-disclosure">
             <summary>HTML 文本设置</summary>
             <div class="batch-options html-text-options">
@@ -601,10 +665,7 @@
               </label>
             </div>
           </details>
-          <figure id="preview" class="preview"></figure>
-          <div id="visualPromptSnapshot" class="readout"></div>
-          <div id="imageVersions" class="image-versions"></div>
-          <pre id="qaBox"></pre>
+          </div></details>
         </section>
       </section>
     </main>
@@ -773,9 +834,11 @@
     <script src="/assets/storyboard_workspace.js?v=20260819-0014"></script>
     <script src="/assets/novel_source.js?v=20260823-0015"></script>
     <script src="/assets/task_monitor.js?v=20261011-visual2"></script>
-    <script src="/assets/image_workflow.js?v=20261011-visual2"></script>
-    <script src="/assets/visual_presets.js?v=20261011-visual2"></script>
-    <script src="/assets/html_visual_editor.js?v=20260927-0002"></script>
-    <script src="/assets/app.js?v=20261011-visual2"></script>
+    <script src="/assets/image_workflow.js?v=20261016-compact"></script>
+    <script src="/assets/visual_presets.js?v=20261016-compact"></script>
+    <script src="/assets/html_visual_editor.js?v=20261016-refactor"></script>
+    <script src="/assets/provider_manager.js?v=20261016-refactor"></script>
+    <script src="/assets/action_menus.js?v=20261016-compact"></script>
+    <script src="/assets/app.js?v=20261016-refactor"></script>
   </body>
 </html>

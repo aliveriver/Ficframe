@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from ficframe import api
+from ficframe import api, features
 from ficframe.models import Shot, to_dict
 from ficframe.run_repository import RunRepository
 from ficframe.visual_presets import (
@@ -17,6 +17,11 @@ from ficframe.visual_presets import (
 
 
 class VisualPresetTests(unittest.TestCase):
+    def setUp(self) -> None:
+        switch = patch.object(features, "COMPOSITION_REFERENCES_ENABLED", True)
+        switch.start()
+        self.addCleanup(switch.stop)
+
     def test_style_and_composition_drafts_keep_separate_fields(self) -> None:
         style = normalize_vlm_draft("style", {"linework": "ink", "shot": "wide", "person_name": "private identity", "positive": "clean lines"})
         composition = normalize_vlm_draft("composition", {"linework": "ignored", "shot": "wide", "positive": "subject left"})

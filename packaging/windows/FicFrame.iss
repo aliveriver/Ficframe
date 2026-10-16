@@ -8,6 +8,10 @@
   #define ArtifactDir "..\..\release"
 #endif
 
+#ifndef AppIcon
+  #define AppIcon "..\..\web\favicon.ico"
+#endif
+
 [Setup]
 AppId={{A2D946AF-2AE1-48EE-89F7-A2B11BB61B29}
 AppName=FicFrame
@@ -25,6 +29,7 @@ OutputBaseFilename=FicFrame-{#AppVersion}-windows-x64-setup
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile={#AppIcon}
 UninstallDisplayIcon={app}\FicFrame.exe
 SetupLogging=yes
 

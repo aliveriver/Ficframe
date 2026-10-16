@@ -27,15 +27,18 @@
     return base + items;
   }
 
-  function snapshotText(snapshot) {
-    return KINDS.map((kind) => {
+  function snapshotText(snapshot, kinds = ["style"]) {
+    return kinds.map((kind) => {
       const item = snapshot?.[kind];
       return item?.id ? `${LABELS[kind]}：${item.name || item.id} v${item.version || 1}\n模式：${item.reference_mode === "image" ? `原图参考＋文本（${item.reference_images?.length || 0} 张）` : "仅文本"}\n正向：${item.positive || "（空）"}\n负向：${item.negative || "（无）"}` : `${LABELS[kind]}：不使用`;
     }).join("\n\n");
   }
 
   function createController({ state, elements: el, api, taskMonitor, escapeHtml, setBusy, storage,
-                              saveWorkspaceDraft, persistStoryboard, selectedImageSize = () => "1024x1024" }) {
+                              saveWorkspaceDraft, persistStoryboard, selectedImageSize = () => "1024x1024",
+                              enabledKinds = ["style"] }) {
+    let activeKinds = KINDS.filter((kind) => enabledKinds.includes(kind));
+    state.visualPresetKinds = activeKinds;
     let pending = null;
     let queue = Promise.resolve();
     let defaultsRevision = 0;
@@ -67,7 +70,8 @@
       }).join("");
     }
     function renderSelectors() {
-      for (const kind of KINDS) {
+      el.compositionFeatures?.forEach((node) => { node.hidden = !activeKinds.includes("composition"); });
+      for (const kind of activeKinds) {
         const selector = kind === "style" ? el.runStylePreset : el.runCompositionPreset;
         const defaults = state.visualPresetDefaults || {};
         const id = defaults[`${kind}_id`] || "";
@@ -79,14 +83,14 @@
         modeSelector.disabled = !state.runId;
       }
       loadShot();
-      const items = state.visualPresets || [];
+      const items = (state.visualPresets || []).filter((item) => activeKinds.includes(item.type));
       el.visualPresetStatus.innerHTML = items.length ? items.map((item) => `<div class="visual-preset-row"><span>${escapeHtml(item.name)} · ${LABELS[item.type]} · v${item.version}</span><span class="visual-preset-actions"><button type="button" data-visual-edit="${escapeHtml(item.id)}">编辑</button><button type="button" data-visual-delete="${escapeHtml(item.id)}">删除</button></span><div class="visual-preset-references">${draftImages(item.reference_images)}</div></div>`).join("") : "尚无预设，可手动创建或上传参考图。";
       el.visualPresetStatus.querySelectorAll("[data-visual-edit]").forEach((button) => button.addEventListener("click", () => openEditor(state.visualPresets.find((item) => item.id === button.dataset.visualEdit))));
       el.visualPresetStatus.querySelectorAll("[data-visual-delete]").forEach((button) => button.addEventListener("click", () => remove(button.dataset.visualDelete).catch(report)));
       renderSnapshot();
     }
     function loadShot() {
-      for (const kind of KINDS) {
+      for (const kind of activeKinds) {
         const selector = kind === "style" ? el.shotStylePreset : el.shotCompositionPreset;
         const shot = state.selected;
         const mode = shot?.[`${kind}_preset_mode`] || "inherit";
@@ -104,7 +108,7 @@
     }
     function saveShot() {
       if (!state.selected) return;
-      for (const kind of KINDS) {
+      for (const kind of activeKinds) {
         const selector = kind === "style" ? el.shotStylePreset : el.shotCompositionPreset;
         const value = selector.value || "inherit";
         state.selected[`${kind}_preset_mode`] = ["inherit", "none"].includes(value) ? value : "preset";
@@ -119,7 +123,7 @@
       const version = versions.find((item) => String(item.image_url || "").split("?")[0] === String(shot?.image_url || "").split("?")[0]);
       const candidate = version?.visual_preset_snapshot || (versions.length ? null : shot?.last_generation_visual_snapshot);
       const snapshot = (shot?.image_url || shot?.image_path) && candidate && Object.keys(candidate).length ? candidate : null;
-      el.visualPromptSnapshot.textContent = snapshot ? `当前图片实际规范（软约束）\n${snapshotText(snapshot)}` : "当前图片暂无规范记录（旧图片或尚未生成）";
+      el.visualPromptSnapshot.textContent = snapshot ? `当前图片实际规范（软约束）\n${snapshotText(snapshot, activeKinds)}` : "当前图片暂无规范记录（旧图片或尚未生成）";
     }
     async function preview() {
       const sequence = ++previewSequence;
@@ -129,7 +133,7 @@
       try {
         const data = await json(`/api/runs/${encodeURIComponent(state.runId)}/visual-preview`, { shot, size: selectedImageSize() });
         if (sequence !== previewSequence || state.selected?.id !== id) return;
-        el.visualPresetEffective.textContent = snapshotText(data.visual_preset_snapshot);
+        el.visualPresetEffective.textContent = snapshotText(data.visual_preset_snapshot, activeKinds);
         el.visualFinalPrompt.value = data.positive_prompt;
         el.visualFinalNegative.value = data.negative_prompt;
         if (data.reference_preflight) showReferenceWarning(data.reference_preflight);
@@ -140,7 +144,9 @@
       el.visualPresetStatus.textContent = "正在加载预设…";
       try {
         const data = await api("/api/visual-presets");
-        state.visualPresets = data.presets || [];
+        if (Array.isArray(data.enabled_types)) activeKinds = KINDS.filter((kind) => data.enabled_types.includes(kind));
+        state.visualPresetKinds = activeKinds;
+        state.visualPresets = (data.presets || []).filter((item) => activeKinds.includes(item.type));
         renderSelectors();
       } catch (error) { el.visualPresetStatus.textContent = `预设加载失败：${error.message}`; throw error; }
     }
@@ -148,7 +154,7 @@
       state.visualPresetDefaults = data.visual_presets;
       for (const saved of data.shots || []) {
         const shot = state.shots.find((item) => item.id === saved.id);
-        if (shot) for (const kind of KINDS) shot[`${kind}_preset_snapshot`] = saved[`${kind}_preset_snapshot`];
+        if (shot) for (const kind of activeKinds) shot[`${kind}_preset_snapshot`] = saved[`${kind}_preset_snapshot`];
       }
       renderSelectors();
       saveWorkspaceDraft();
@@ -159,7 +165,8 @@
       const revision = ++defaultsRevision;
       return enqueue(async () => {
         if (!runId) { saveWorkspaceDraft(); return; }
-        const data = await json(`/api/runs/${encodeURIComponent(runId)}/visual-presets`, { run_id: runId, style_id: selected.style_id, composition_id: selected.composition_id, style_reference_mode: selected.style_reference_mode, composition_reference_mode: selected.composition_reference_mode, refresh: refreshVersion });
+        const selections = Object.fromEntries(activeKinds.flatMap((kind) => [[`${kind}_id`, selected[`${kind}_id`]], [`${kind}_reference_mode`, selected[`${kind}_reference_mode`]]]));
+        const data = await json(`/api/runs/${encodeURIComponent(runId)}/visual-presets`, { run_id: runId, ...selections, refresh: refreshVersion });
         if (state.runId === runId && revision === defaultsRevision) applyDefaults(data);
       });
     }
@@ -171,7 +178,7 @@
       const data = await json(`/api/runs/${encodeURIComponent(runId)}/shots/${encodeURIComponent(shot.id)}/visual-presets`, { shot, refresh: true });
       if (state.runId !== runId) return;
       const current = state.shots.find((item) => item.id === shot.id);
-      if (current) for (const kind of KINDS) {
+      if (current) for (const kind of activeKinds) {
         if (current[`${kind}_preset_mode`] === data.shot[`${kind}_preset_mode`] && current[`${kind}_preset_id`] === data.shot[`${kind}_preset_id`] && (current[`${kind}_reference_mode`] || "inherit") === (data.shot[`${kind}_reference_mode`] || "inherit")) current[`${kind}_preset_snapshot`] = data.shot[`${kind}_preset_snapshot`];
       }
       saveWorkspaceDraft();
@@ -186,13 +193,14 @@
         const data = await json(`/api/runs/${encodeURIComponent(runId)}/shots/${encodeURIComponent(shot.id)}/visual-presets`, { shot });
         if (state.runId !== runId) return;
         const current = state.shots.find((item) => item.id === shot.id);
-        if (current) for (const kind of KINDS) {
+        if (current) for (const kind of activeKinds) {
           if (current[`${kind}_preset_mode`] === shot[`${kind}_preset_mode`] && current[`${kind}_preset_id`] === shot[`${kind}_preset_id`] && (current[`${kind}_reference_mode`] || "inherit") === (shot[`${kind}_reference_mode`] || "inherit")) current[`${kind}_preset_snapshot`] = data.shot[`${kind}_preset_snapshot`];
         }
         saveWorkspaceDraft(); schedulePreview();
       });
     }
     function openEditor(item = null, kind = "style", draft = {}) {
+      if (!activeKinds.includes(item?.type || kind)) return;
       pending = item ? { kind: item.type, mode: "edit", id: item.id, draft: { ...item, reference_paths: item.reference_images || [] } } : { kind, mode: "create", draft: { ...draft } };
       renderEditor();
       persistDraft();
@@ -250,6 +258,7 @@
       openEditor(null, kind, draft);
     }
     async function analyze(kind) {
+      if (!activeKinds.includes(kind)) return;
       if (busy) return;
       const input = kind === "style" ? el.stylePresetImages : el.compositionPresetImages;
       if (!input.files?.length) throw new Error("请选择 1 至 8 张参考图");
@@ -267,7 +276,7 @@
     async function resume() {
       let draft;
       try { draft = JSON.parse(storage?.getItem(DRAFT_KEY) || "null"); } catch (_) { return; }
-      if (!draft || !KINDS.includes(draft.kind)) return;
+      if (!draft || !activeKinds.includes(draft.kind)) return;
       if (busy) return;
       pending = draft;
       if (draft.analysis_task_id && draft.draft) {
@@ -407,6 +416,7 @@
       for (const kind of KINDS) {
         const selector = kind === "style" ? el.runStylePreset : el.runCompositionPreset;
         selector.addEventListener("change", () => {
+          if (!activeKinds.includes(kind)) return;
           state.visualPresetDefaults[`${kind}_id`] = selector.value || null;
           state.visualPresetDefaults[`${kind}_reference_mode`] = state.visualPresets.find((item) => item.id === selector.value)?.reference_mode || "text";
           const modeSelector = kind === "style" ? el.runStyleReferenceMode : el.runCompositionReferenceMode;
@@ -414,7 +424,7 @@
           saveDefaults().catch(report);
         });
         const shotSelector = kind === "style" ? el.shotStylePreset : el.shotCompositionPreset;
-        shotSelector.addEventListener("change", () => { saveShot(); saveWorkspaceDraft(); saveSelection().catch(report); });
+        shotSelector.addEventListener("change", () => { if (!activeKinds.includes(kind)) return; saveShot(); saveWorkspaceDraft(); saveSelection().catch(report); });
       }
       el.adoptRunVisualPresetsBtn.addEventListener("click", () => saveDefaults(true).then(preview).catch(report));
       el.adoptShotVisualPresetsBtn.addEventListener("click", () => adoptShot().catch(report));
@@ -429,9 +439,9 @@
       el.visualPresetReferenceMode.addEventListener("change", readEditor);
       for (const kind of KINDS) {
         const selector = kind === "style" ? el.runStyleReferenceMode : el.runCompositionReferenceMode;
-        selector.addEventListener("change", () => { state.visualPresetDefaults[`${kind}_reference_mode`] = selector.value; saveDefaults().catch(report); });
+        selector.addEventListener("change", () => { if (!activeKinds.includes(kind)) return; state.visualPresetDefaults[`${kind}_reference_mode`] = selector.value; saveDefaults().catch(report); });
         const shotSelector = kind === "style" ? el.shotStyleReferenceMode : el.shotCompositionReferenceMode;
-        shotSelector.addEventListener("change", () => { saveShot(); saveWorkspaceDraft(); saveSelection().catch(report); });
+        shotSelector.addEventListener("change", () => { if (!activeKinds.includes(kind)) return; saveShot(); saveWorkspaceDraft(); saveSelection().catch(report); });
       }
       for (const selector of [el.imageSize, el.customImageSize]) selector?.addEventListener("change", () => { refreshCapability().then(preview).catch(report); });
     }

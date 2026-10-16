@@ -6,7 +6,10 @@
 
 | 模块 | 责任 |
 | --- | --- |
-| `ficframe/api.py` | FastAPI 应用装配、通用路由、任务入口和兼容 API |
+| `ficframe/api.py` | FastAPI 应用装配、HTTP 参数/错误转换、任务入口和兼容 Python API |
+| `ficframe/pipeline.py` | Web / CLI 共用的场景分析、Prompt Bank、分镜构建及有序 LLM 精修 |
+| `ficframe/payloads.py` | 人设、场景、手动角色和参考图绑定的统一输入转换，不依赖 HTTP |
+| `ficframe/image_workflow.py` | 图片输入组装、单张/批量共用生成与重试、版本保存及激活，不依赖 HTTP |
 | `ficframe/provider_probe.py` | provider、ComfyUI 与本地端口的可达性探测 |
 | `ficframe/run_repository.py` | run 路径校验、`pipeline.json` 读写、事务和投影刷新 |
 | `ficframe/visual_presets.py` | 全局画风/构图预设存储、参考图校验、VLM 草稿字段规范化和 Prompt 约束组装 |
@@ -18,11 +21,20 @@
 | `ficframe/storyboard.py` | 不依赖 LLM 的基础分镜构建与场景选择 |
 | `ficframe/render.py` | `storyboard.md`、`prompts.md` 和图文小说正文投影 |
 | `ficframe/export.py` | 生成可携带的 Markdown + `images/` 目录、`manifest.json`、主题说明和 ZIP 成品包 |
-| `web/html_visual_editor.js` | HTML 成品预览中的图片选择、拖动定位、缩放和文本样式实时映射 |
 
 `pipeline.json` 是当前 run 的唯一规范状态。`storyboard.md` 和 `prompts.md` 是可重新生成的阅读投影，不应反向作为数据源。
 
+### 入口与共享工作流
+
+Web 路由负责上传、供应商选择和任务调度，CLI 负责文件路径和输出目录；两者均调用 `build_story_payload`，共用分段、Prompt Bank、差异分析、连续性、分镜与来源引用。快速模式复用现有人设并跳过全流程精修，完整模式和 CLI 的 LLM 模式沿用同一构建流程。`polish_shots_with_llm` 在串行和并发模式下均隔离单条异常，保留本地 Prompt，输出顺序与输入一致。
+
+`ImageWorkflow` 显式接收 repository、视觉预设存储和角色参考图解析回调。同步单张、后台单张和批量生成均使用 `generate_item`：先固定预设版本和最终 Prompt，再调用图片供应商，成功后在同一事务保存图片版本及生成快照。重试复用首次组装的参数，不会因全局预设编辑而改变中途请求。仅固定绑定快照时不重写 Markdown 投影，保存或激活图片时仍更新投影。已有图片的后续候选文件采用唯一名称，避免同一毫秒内的重生成覆盖历史；分镜 ID 不可作为路径逃逸到图片目录外。
+
+领域模块不导入 `api.py`、不调用 FastAPI；HTTP 入口将普通校验错误、供应商异常和版本不存在分别转换为原有响应。`api.py` 中的薄适配函数保留原有 Python 调用名称，现有 HTTP 路径和请求/响应模型保持兼容。
+
 ### 视觉规范预设
+
+发布开关集中在 `ficframe/features.py`，当前 `COMPOSITION_REFERENCES_ENABLED = False`。构图预设、VLM 分析和供应商适配实现保留，但构图 CRUD/上传/分析接口返回 404，列表只返回启用的类型。绑定与生图解析只处理 `visual_preset_kinds()`，旧 run 和分镜中的构图 ID、快照、历史图片保留且不参与新 Prompt 或原图请求；缺失的旧构图文件不会阻断生成。多图实测只使用已启用的画风通道。前端以画风为安全默认值，按列表返回的 `enabled_types` 展示控件；不会恢复构图草稿或轮询旧分析任务。保留功能的回归测试显式打开开关，默认发布行为由 `test_composition_reference_release.py` 和前端停用测试覆盖。以下两类型结构说明描述保留实现。
 
 画风（`style`）和构图（`composition`）是独立的全局预设，存放在用户数据目录的 `visual-presets/`，参考图也不进入 run 的角色参考图目录。run 在 `visual_presets` 中记录两个默认 ID 及 `*_snapshot`；`Shot` 用 `*_preset_mode`（`inherit`、`preset`、`none`）表示继承、覆盖或显式禁用。应用预设时固定版本；更改全局预设不自动改变已有绑定，只有显式选择或 `refresh` 才采用最新版。run 默认更新只改变继承项。旧 pipeline 缺少这些字段时由 `RunRepository` 补默认值；早期仅保存默认 ID 的 run 可从匹配的继承分镜快照补全绑定。
 
@@ -128,7 +140,10 @@ VLM 分析复用 `TaskManager`，任务独立持久化于 `visual-presets/analys
 
 | 文件 | 责任 |
 | --- | --- |
-| `web/app.js` | 页面状态、DOM 事件和工作流编排 |
+| `web/app.js` | DOM 控件索引、共享页面状态、控制器装配和主工作流编排 |
+| `web/provider_manager.js` | 供应商/模型表单、用途切换、配置保存及可达性测试 |
+| `web/html_visual_editor.js` | 图片排版与手势、主页面/排版器共用文本设置、预览及 MD/HTML/ZIP 导出 |
+| `web/action_menus.js` | 同类操作的菜单互斥、外部点击收起、Esc/方向键操作及视口边界定位 |
 | `web/workspace_state.js` | 页面草稿序列化、run 状态重置和选中项恢复 |
 | `web/storyboard_workspace.js` | 分镜 API 客户端、无状态 HTML 模板与展示文案 |
 | `web/prompt_state.js` | Prompt 修改时的布局失效规则 |
@@ -136,15 +151,23 @@ VLM 分析复用 `TaskManager`，任务独立持久化于 `visual-presets/analys
 | `web/task_monitor.js` | 任务创建、轮询、阶段/进度/错误渲染 |
 | `web/image_workflow.js` | 图片生成任务、结果回填和图片版本切换 |
 
-新增分镜接口时，优先把 URL 和 JSON 结构放进 `createClient`；无状态的文本转换或模板放进 `storyboard_workspace.js`；只有确实依赖当前 DOM/选中状态的逻辑才留在 `app.js`。
+各控制器以 `createController` 接收共享 `state`、DOM 元素及 API/保存回调，通过 `bindEvents` 绑定各自操作；供应商和排版事件不再集中在 `app.js`。DOM 控件按现有 ID 一次建立索引。文本设置用同一字段映射同步主页面和排版器，预览按请求序号及 run 校验，只应用当前响应。
+
+MD、HTML、ZIP 及日志下载共用 `downloadResponse`，统一检查 HTTP 错误、解析普通/UTF-8 文件名并释放对象 URL；服务端返回错误时显示原因，不将错误正文当成小说下载。供应商模型表单先过滤空行，再按勾选项确定模型，避免空行导致当前模型错位。
+
+新增分镜接口时，优先把 URL 和 JSON 结构放进 `createClient`；无状态的文本转换或模板放进 `storyboard_workspace.js`；供应商、排版或图片流程分别在对应控制器内维护。主入口只协调跨业务状态与操作，不反向成为控制器的隐式全局依赖。
 
 ## 测试
 
 - `tests/test_storyboard_workflow.py`：API 工作流与持久化回归。
 - `tests/test_storyboard_workflow_unit.py`：领域不变量与错误边界。
+- `tests/test_pipeline.py`：CLI / Web 输出一致性、串行/并发精修的顺序和异常隔离。
+- `tests/test_image_workflow.py`：候选文件隔离、路径校验、重试固定预设与成功版本提交。
 - `tests/test_storyboard_workspace.js`：前端客户端和纯展示函数。
 - `tests/frontend/test_workspace_state.js`：页面草稿和 run 状态重置。
 - `tests/frontend/test_image_workflow.js`：图片任务结果回填和版本区域状态。
+- `tests/frontend/test_provider_manager.js`：空模型行、用途切换、零值参数和水印选项。
+- `tests/frontend/test_html_visual_editor.js`：排版与主页面同步、过期预览隔离、导出错误和下载文件名。
 - `tests/test_run_repository.py`：run 校验、事务写入和规范状态投影。
 - `tests/test_source_reference.py`：引用校验、重定位、描述引用和旧数据迁移。
 - `tests/test_export.py`：Markdown 图片目录、manifest、主题说明和 ZIP 内容。

@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from ficframe import api
+from ficframe import api, features
 from ficframe.models import Shot, to_dict
 from ficframe.providers import EndpointConfig, ProviderError
 from ficframe.run_repository import RunRepository
@@ -58,6 +58,8 @@ class VisualPresetIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
+        # Retained implementation remains covered independently of release defaults.
+        self.stack.enter_context(patch.object(features, "COMPOSITION_REFERENCES_ENABLED", True))
         root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
         self.store = VisualPresetStore(root / "presets")
         self.repository = RunRepository(root / "runs")

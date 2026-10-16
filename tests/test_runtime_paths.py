@@ -24,7 +24,7 @@ class RuntimePathTests(unittest.TestCase):
                 ):
                     root = user_data_root(create=False)
 
-        self.assertEqual(root, executable.parent / "data")
+        self.assertEqual(root, (executable.parent / "data").resolve())
 
     def test_data_directory_override_has_priority(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(
@@ -44,7 +44,7 @@ class RuntimePathTests(unittest.TestCase):
             os.environ.pop("FICFRAME_DATA_DIR", None)
             executable = Path(directory) / "FicFrame.exe"
             with patch("ficframe.runtime_paths.is_frozen", return_value=True), patch.object(sys, "executable", str(executable)):
-                self.assertEqual(visual_presets_root(create=False), executable.parent / "data" / "visual-presets")
+                self.assertEqual(visual_presets_root(create=False), (executable.parent / "data" / "visual-presets").resolve())
 
 
 class DesktopPortTests(unittest.TestCase):

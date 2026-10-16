@@ -4,7 +4,7 @@ global.window = global;
 require("../../web/visual_presets.js");
 require("../../web/task_monitor.js");
 
-function fixture({ api = async () => ({ presets: [] }), taskMonitor, initial = {} } = {}) {
+function fixture({ api = async () => ({ presets: [] }), taskMonitor, initial = {}, enabledKinds = ["style", "composition"] } = {}) {
   const nodes = new Map();
   const elements = new Proxy({}, { get(_, key) {
     if (!nodes.has(key)) nodes.set(key, {
@@ -14,12 +14,13 @@ function fixture({ api = async () => ({ presets: [] }), taskMonitor, initial = {
       showModal() { this.open = true; }, close() { this.open = false; this.listeners.close?.(); },
     });
     return nodes.get(key);
-  } });
+  }, set(_, key, value) { nodes.set(key, value); return true; } });
   const storage = new Map();
+  elements.compositionFeatures = [];
   const selected = { id: "shot", style_preset_mode: "inherit", composition_preset_mode: "inherit" };
   const state = { runId: "run", selected, shots: [selected], visualPresets: [], visualPresetDefaults: {}, ...initial };
   let persisted = 0;
-  const controller = FicFrameVisualPresets.createController({ state, elements, api,
+  const controller = FicFrameVisualPresets.createController({ state, elements, api, enabledKinds,
     taskMonitor: taskMonitor || { wait: async () => ({}) }, escapeHtml: String,
     setBusy: (button, busy) => { button.disabled = busy; },
     storage: { setItem: (key, value) => storage.set(key, value), removeItem: (key) => storage.delete(key), getItem: (key) => storage.get(key) },
@@ -260,4 +261,50 @@ test("older capability responses cannot replace the current size status", async 
   release();
   await first;
   assert.equal(f.elements.imageReferenceCapability.textContent, "test：current");
+});
+
+test("dormant composition presets stay hidden and saved analysis tasks are not resumed", async () => {
+  const calls = [];
+  const f = fixture({ enabledKinds: ["style"],
+    taskMonitor: { wait: async () => { throw new Error("composition task must stay dormant"); } },
+    api: async (path) => {
+      calls.push(path);
+      return { enabled_types: ["style"], presets: [{ id: "style", type: "style", name: "Ink" }, { id: "composition", type: "composition", name: "Hidden layout" }] };
+    },
+  });
+  f.elements.compositionFeatures = [{ hidden: false }];
+  await f.controller.refresh();
+  assert.equal(f.elements.compositionFeatures[0].hidden, true);
+  assert.doesNotMatch(f.elements.visualPresetStatus.innerHTML, /Hidden layout|构图/);
+  f.controller.openEditor(null, "composition");
+  await f.controller.analyze("composition");
+  f.storage.set("ficframe.visual-preset-draft.v1", JSON.stringify({ kind: "composition", task_id: "old-task" }));
+  await f.controller.resume();
+  assert.equal(f.elements.visualPresetDialog.open, false);
+  assert.equal(f.storage.has("ficframe.visual-preset-draft.v1"), true);
+  f.elements.runCompositionPreset.listeners.change();
+  f.elements.shotCompositionPreset.listeners.change();
+  f.elements.runCompositionReferenceMode.listeners.change();
+  f.elements.shotCompositionReferenceMode.listeners.change();
+  await f.controller.flush();
+  assert.deepEqual(calls, ["/api/visual-presets"]);
+});
+
+test("style edits do not overwrite dormant composition bindings", async () => {
+  const requests = [];
+  const f = fixture({ enabledKinds: ["style"], initial: { visualPresetDefaults: { composition_id: "saved-layout" } }, api: async (path, options) => {
+    const body = JSON.parse(options.body);
+    requests.push(body);
+    return { visual_presets: { style_id: body.style_id, composition_id: "saved-layout" }, shots: [] };
+  } });
+  f.state.selected.composition_preset_mode = "preset";
+  f.state.selected.composition_preset_id = "saved-shot-layout";
+  f.elements.runStylePreset.value = "style";
+  f.elements.runStylePreset.listeners.change();
+  await f.controller.flush();
+  assert.equal(Object.hasOwn(requests[0], "composition_id"), false);
+  f.controller.saveShot();
+  assert.equal(f.state.visualPresetDefaults.composition_id, "saved-layout");
+  assert.equal(f.state.selected.composition_preset_id, "saved-shot-layout");
+  assert.doesNotMatch(FicFrameVisualPresets.snapshotText({ composition: { id: "saved", name: "Hidden" } }), /构图|Hidden/);
 });

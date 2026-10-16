@@ -7,6 +7,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from .features import visual_preset_kinds
 from .models import Shot, to_dict
 from .run_repository import RunNotFoundError
 from .visual_presets import MAX_REFERENCE_BYTES, MAX_REFERENCE_COUNT, normalize_vlm_draft, validate_reference_bytes
@@ -91,20 +92,31 @@ class VisualPresetController:
 
     def list_presets(self, preset_type: str | None = None) -> dict[str, Any]:
         try:
-            return {"presets": self.dependencies.store().list(preset_type)}
+            kinds = visual_preset_kinds()
+            if preset_type:
+                self._require_enabled(preset_type)
+            return {"presets": [item for item in self.dependencies.store().list(preset_type) if item["type"] in kinds],
+                    "enabled_types": kinds}
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+
+    @staticmethod
+    def _require_enabled(kind: str) -> None:
+        if kind.strip().lower() == "composition" and "composition" not in visual_preset_kinds():
+            raise HTTPException(404, "该功能暂未开放")
 
     def get_preset(self, preset_id: str) -> dict[str, Any]:
         try:
             item = self.dependencies.store().get(preset_id)
             if not item:
                 raise HTTPException(404, "预设不存在")
+            self._require_enabled(item["type"])
             return item
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
     def create_preset(self, request: VisualPresetRequest) -> dict[str, Any]:
+        self._require_enabled(request.type)
         try:
             store = self.dependencies.store()
             result = store.create(name=request.name, preset_type=request.type, positive=request.positive,
@@ -117,6 +129,7 @@ class VisualPresetController:
             raise HTTPException(400, str(exc)) from exc
 
     def update_preset(self, preset_id: str, request: VisualPresetUpdateRequest) -> dict[str, Any]:
+        self.get_preset(preset_id)
         try:
             return self.dependencies.store().update(preset_id, request.model_dump(exclude_unset=True, exclude_none=True))
         except KeyError as exc:
@@ -125,6 +138,7 @@ class VisualPresetController:
             raise HTTPException(400, str(exc)) from exc
 
     def delete_preset(self, preset_id: str) -> dict[str, Any]:
+        self.get_preset(preset_id)
         try:
             self.dependencies.store().delete(preset_id)
             return {"ok": True, "id": preset_id}
@@ -140,6 +154,7 @@ class VisualPresetController:
             raise HTTPException(404, "参考图不存在") from exc
 
     async def _uploads(self, kind: str, uploads: list[UploadFile]) -> list[tuple[str, bytes, str | None]]:
+        self._require_enabled(kind)
         try:
             normalize_vlm_draft(kind, {})
             if not 1 <= len(uploads) <= MAX_REFERENCE_COUNT:
@@ -228,7 +243,7 @@ class VisualPresetController:
                 if old is None:
                     raise HTTPException(404, "分镜不存在")
                 shot = Shot(**old)
-                for kind in ("style", "composition"):
+                for kind in visual_preset_kinds():
                     for field in ("mode", "id"):
                         key = f"{kind}_preset_{field}"
                         if key in request.shot:

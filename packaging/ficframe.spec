@@ -1,4 +1,5 @@
 from pathlib import Path
+import sys
 
 from PyInstaller.utils.hooks import collect_submodules, copy_metadata
 
@@ -9,6 +10,7 @@ data_files = [
     (str(project_root / "web"), "web"),
     (str(project_root / "docs"), "docs"),
     (str(project_root / "README.md"), "."),
+    (str(project_root / "CHANGELOG.md"), "."),
     (str(project_root / "LICENSE"), "."),
 ]
 data_files += copy_metadata("fastapi")
@@ -40,6 +42,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=True,
+    icon=str(project_root / "web" / "favicon.ico") if sys.platform == "win32" else None,
     disable_windowed_traceback=False,
 )
 
