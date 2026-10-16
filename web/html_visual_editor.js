@@ -36,6 +36,35 @@
     return Math.round(clamp((Number(startWidth) + Number(deltaX)) / containerWidth * 100, 15, 100));
   }
 
+  function dropTargetFromPointer(blocks, clientY) {
+    let best = null;
+    let distance = Infinity;
+    for (const block of blocks) {
+      const rect = block.getBoundingClientRect();
+      if (!rect.height) continue;
+      const position = clientY < rect.top + rect.height / 2 ? "before" : "after";
+      const edge = position === "before" ? rect.top : rect.bottom;
+      const nextDistance = Math.abs(clientY - edge);
+      if (nextDistance < distance) {
+        best = { block, position, edge };
+        distance = nextDistance;
+      }
+    }
+    return best;
+  }
+
+  function layoutFromDrop(clientX, mainRect, target, layout = {}, figureWidth = 0) {
+    if (!target?.block?.dataset.layoutBlock) return null;
+    const side = positionFromPointer(clientX, mainRect);
+    const alignment = side === "before" ? "center" : side;
+    const changes = { anchor_block: target.block.dataset.layoutBlock, position: target.position,
+      alignment, wrap: alignment === "center" ? "none" : alignment };
+    if (alignment !== "center" && (["auto", "100%"].includes(layout.width || "100%") || figureWidth > mainRect.width * .8)) {
+      changes.width = "50%";
+    }
+    return changes;
+  }
+
   function applyFigureLayout(figure, layout = {}) {
     if (!figure) return;
     const rawPosition = positions.includes(layout.position) ? layout.position : "before";
@@ -44,7 +73,6 @@
     const wrap = ["none", "left", "right"].includes(layout.wrap)
       ? layout.wrap
       : (["left", "right"].includes(rawPosition) ? rawPosition : "none");
-    const previousPosition = figure.dataset.position;
     for (const name of positions) figure.classList.remove(`image-${name}`);
     for (const name of ["left", "center", "right"]) figure.classList.remove(`image-align-${name}`);
     for (const name of ["left", "right"]) figure.classList.remove(`image-wrap-${name}`);
@@ -55,10 +83,14 @@
     figure.dataset.alignment = alignment;
     figure.dataset.wrap = wrap;
     figure.style.width = String(layout.width || "100%");
-    const anchor = figure.ficframeTextAnchor;
-    if (previousPosition !== position && anchor?.isConnected) {
+    const anchor = layout.anchor_block
+      ? [...figure.ownerDocument.querySelectorAll("[data-layout-block]")].find((item) => item.dataset.layoutBlock === layout.anchor_block)
+      : figure.ficframeTextAnchor;
+    if (anchor?.isConnected && (figure.ficframeAppliedAnchor !== anchor || figure.ficframeAppliedPosition !== position)) {
       if (position === "after") anchor.after(figure);
       else anchor.before(figure);
+      figure.ficframeAppliedAnchor = anchor;
+      figure.ficframeAppliedPosition = position;
     }
     let caption = figure.querySelector("figcaption");
     const captionText = String(layout.caption || "");
@@ -265,11 +297,19 @@
         const shot = state.shots.find((item) => item.id === figure.dataset.shotId);
         if (!shot) return;
         const initialPosition = figure.dataset.position;
-        let anchor = initialPosition === "after" ? figure.previousElementSibling : figure.nextElementSibling;
+        let anchor = [...documentRef.querySelectorAll("[data-layout-block]")]
+          .find((item) => item.dataset.layoutBlock === figure.dataset.sourceBlock);
+        anchor ||= initialPosition === "after" ? figure.previousElementSibling : figure.nextElementSibling;
         while (anchor?.matches?.("figure[data-shot-id]")) {
           anchor = initialPosition === "after" ? anchor.previousElementSibling : anchor.nextElementSibling;
         }
         figure.ficframeTextAnchor = anchor;
+        // Export already placed these images. Re-inserting every image after
+        // the same paragraph on load would reverse their saved order.
+        figure.ficframeAppliedAnchor = shot.html_layout?.anchor_block
+          ? [...documentRef.querySelectorAll("[data-layout-block]")].find((item) => item.dataset.layoutBlock === shot.html_layout.anchor_block) || anchor
+          : anchor;
+        figure.ficframeAppliedPosition = initialPosition;
         applyFigureLayout(figure, shot.html_layout || {});
         figure.addEventListener("click", (event) => {
           event.preventDefault();
@@ -297,31 +337,67 @@
     function installDesignerMoveGesture(target, figure) {
       target.addEventListener("pointerdown", (event) => {
         if (event.button !== 0) return;
+        event.preventDefault();
         selectDesignerShot(figure.dataset.shotId);
         const startX = event.clientX;
+        const startY = event.clientY;
+        const documentRef = figure.ownerDocument;
+        const view = documentRef.defaultView;
+        const main = documentRef.querySelector("main");
+        const blocks = [...(main?.querySelectorAll("[data-layout-block]") || [])];
+        const originalRect = figure.getBoundingClientRect();
+        let latestX = startX, latestY = startY;
+        let ghost = null, indicator = null, animation = null;
         let moved = false;
+        const showTarget = () => {
+          const drop = dropTargetFromPointer(blocks, latestY);
+          if (!drop || !indicator) return;
+          const rect = main.getBoundingClientRect();
+          const changes = layoutFromDrop(latestX, rect, drop);
+          Object.assign(indicator.style, { left: `${rect.left + 8}px`, top: `${drop.edge}px`, width: `${rect.width - 16}px` });
+          indicator.textContent = `${drop.position === "before" ? "段前" : "段后"} · ${changes.wrap === "none" ? "独占一行" : changes.wrap === "left" ? "图片左侧，文字右绕" : "图片右侧，文字左绕"}`;
+        };
+        const autoScroll = () => {
+          const speed = latestY < 56 ? -Math.min(24, 56 - latestY)
+            : latestY > view.innerHeight - 56 ? Math.min(24, latestY - view.innerHeight + 56) : 0;
+          if (speed) { view.scrollBy(0, speed); showTarget(); }
+          animation = view.requestAnimationFrame(autoScroll);
+        };
         target.setPointerCapture(event.pointerId);
         const onMove = (moveEvent) => {
-          const delta = moveEvent.clientX - startX;
-          if (Math.abs(delta) < 6) return;
-          moved = true;
-          figure.classList.add("ficframe-editor-dragging");
-          figure.style.transform = `translateX(${Math.max(-80, Math.min(80, delta))}px)`;
+          latestX = moveEvent.clientX; latestY = moveEvent.clientY;
+          if (!moved && Math.hypot(latestX - startX, latestY - startY) < 6) return;
+          if (!moved) {
+            moved = true;
+            figure.classList.add("ficframe-editor-dragging");
+            ghost = documentRef.createElement("img");
+            ghost.src = target.currentSrc || target.src;
+            ghost.alt = "";
+            Object.assign(ghost.style, { position: "fixed", left: `${originalRect.left}px`, top: `${originalRect.top}px`,
+              width: `${originalRect.width}px`, pointerEvents: "none", opacity: ".8", zIndex: "10000" });
+            indicator = documentRef.createElement("div");
+            Object.assign(indicator.style, { position: "fixed", borderTop: "3px solid #267b7c", pointerEvents: "none",
+              color: "#fff", background: "#267b7c", fontSize: "13px", lineHeight: "24px", zIndex: "10001" });
+            documentRef.body.append(ghost, indicator);
+            animation = view.requestAnimationFrame(autoScroll);
+          }
+          ghost.style.transform = `translate(${latestX - startX}px, ${latestY - startY}px)`;
+          showTarget();
         };
         const onEnd = (endEvent) => {
           target.removeEventListener("pointermove", onMove);
           target.removeEventListener("pointerup", onEnd);
           target.removeEventListener("pointercancel", onEnd);
+          if (animation !== null) view.cancelAnimationFrame(animation);
+          ghost?.remove(); indicator?.remove();
           figure.classList.remove("ficframe-editor-dragging");
-          figure.style.transform = "";
-          if (!moved) return;
-          const main = figure.ownerDocument.querySelector("main");
-          const pointerPosition = positionFromPointer(endEvent.clientX, main?.getBoundingClientRect());
-          const alignment = pointerPosition === "before" ? "center" : pointerPosition;
-          const currentWidth = designerShot()?.html_layout?.width || "100%";
-          const changes = { alignment };
-          if (alignment !== "center" && ["auto", "100%"].includes(currentWidth)) changes.width = "80%";
+          if (target.hasPointerCapture(endEvent.pointerId)) target.releasePointerCapture(endEvent.pointerId);
+          if (!moved || endEvent.type === "pointercancel") return;
+          const drop = dropTargetFromPointer(blocks, endEvent.clientY);
+          const changes = layoutFromDrop(endEvent.clientX, main?.getBoundingClientRect(), drop, designerShot()?.html_layout, originalRect.width);
+          if (!changes) return;
           updateDesignerImageLayout(changes);
+          el.htmlDesignerStatus.textContent = "图片位置与环绕已调整，点击「保存排版」保存";
         };
         target.addEventListener("pointermove", onMove);
         target.addEventListener("pointerup", onEnd);
@@ -457,6 +533,7 @@
       }));
       el.htmlDesignerExportBtn.addEventListener("click", () => exportHtml());
       el.htmlDesignerCloseBtn.addEventListener("click", () => el.htmlDesignerDialog.close());
+      el.htmlDesignerResetPositionBtn?.addEventListener("click", () => updateDesignerImageLayout({ anchor_block: null, position: "before" }));
       document.querySelectorAll("[data-preview-width]").forEach((button) => {
         button.addEventListener("click", () => {
           el.htmlDesignerFrame.style.width = button.dataset.previewWidth;
@@ -521,6 +598,8 @@
     clamp,
     fontStack,
     positionFromPointer,
+    dropTargetFromPointer,
+    layoutFromDrop,
     resizeWidthPercent,
     widthPercent,
   };

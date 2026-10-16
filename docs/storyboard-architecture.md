@@ -166,6 +166,8 @@ VLM 分析复用 `TaskManager`，任务独立持久化于 `visual-presets/analys
 | `web/task_monitor.js` | 任务创建、轮询、阶段/进度/错误渲染 |
 | `web/image_workflow.js` | 图片生成任务、结果回填和图片版本切换 |
 
+HTML 图片排版在 `Shot.html_layout.anchor_block` 保存目标正文块的内容散列与重复序号，`position` 指定该块前后，`wrap` 和 `width` 控制环绕与宽度。`render.markdown_to_html` 给段落、标题、列表和引用分配稳定的 `data-layout-block`，统一移动自定义图片；`data-source-block` 保留原文落点，编辑器可一键恢复。无效或找不到的锚点回退到原文落点，不删除正文和图片。Markdown 不应用 HTML 自定义落点。拖拽使用二维指针坐标、落点提示和预览视口自动滚动；取消手势不提交变更。HTML 文件、编辑预览和 ZIP 使用同一渲染逻辑，不依赖运行时脚本才能保留位置和环绕。
+
 各控制器以 `createController` 接收共享 `state`、DOM 元素及 API/保存回调，通过 `bindEvents` 绑定各自操作；供应商和排版事件不再集中在 `app.js`。DOM 控件按现有 ID 一次建立索引。文本设置用同一字段映射同步主页面和排版器，预览按请求序号及 run 校验，只应用当前响应。
 
 MD、HTML、ZIP 及日志下载共用 `downloadResponse`，统一检查 HTTP 错误、解析普通/UTF-8 文件名并释放对象 URL；服务端返回错误时显示原因，不将错误正文当成小说下载。供应商模型表单先过滤空行，再按勾选项确定模型，避免空行导致当前模型错位。

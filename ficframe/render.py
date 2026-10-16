@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import re
 from typing import Any
@@ -25,6 +26,7 @@ HTML_IMAGE_ALIGNMENTS = {"left", "center", "right"}
 HTML_IMAGE_WRAPS = {"none", "left", "right"}
 HTML_IMAGE_WIDTHS = {"auto", "35%", "50%", "65%", "80%", "100%"}
 HTML_IMAGE_CUSTOM_WIDTH = re.compile(r"^(?:\d{1,4}(?:\.\d+)?)(?:%|px|rem|em|vw)$")
+HTML_BLOCK_ID = re.compile(r"^b_[a-f0-9]{16}_[1-9][0-9]{0,6}$")
 
 
 def render_storyboard(shots: list[Shot]) -> str:
@@ -201,7 +203,7 @@ def render_html_document(
       line-height: {settings["line_height"]};
       margin: 0;
     }}
-    main {{ margin: 0 auto; max-width: {settings["content_width"]}px; padding: 48px 24px 72px; }}
+    main {{ display: flow-root; margin: 0 auto; max-width: {settings["content_width"]}px; padding: 48px 24px 72px; }}
     h1, h2, h3, h4, h5, h6 {{
       color: var(--ink);
       font-family: {heading_font_family};
@@ -285,7 +287,11 @@ def normalize_html_layout(layout: dict[str, Any] | None = None) -> dict[str, Any
     if width not in HTML_IMAGE_WIDTHS and not HTML_IMAGE_CUSTOM_WIDTH.fullmatch(width):
         width = "100%"
     caption = str(source.get("caption") or "").strip()[:200]
-    return {"position": position, "alignment": alignment, "wrap": wrap, "width": width, "caption": caption}
+    result = {"position": position, "alignment": alignment, "wrap": wrap, "width": width, "caption": caption}
+    anchor = source.get("anchor_block")
+    if isinstance(anchor, str) and HTML_BLOCK_ID.fullmatch(anchor):
+        result["anchor_block"] = anchor
+    return result
 
 
 def _bounded_number(value: Any, minimum: float, maximum: float, fallback: float, integer: bool = False) -> int | float:
@@ -305,6 +311,7 @@ def markdown_to_html(markdown: str, image_layouts: dict[str, dict[str, Any]] | N
     list_items: list[str] = []
     pending_after: list[str] = []
     layouts = image_layouts or {}
+    figure_layouts: dict[str, dict[str, Any]] = {}
     image_pattern = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)$")
     heading_pattern = re.compile(r"^(#{1,6})\s+(.+)$")
     list_pattern = re.compile(r"^[-*+]\s+(.+)$")
@@ -360,6 +367,7 @@ def markdown_to_html(markdown: str, image_layouts: dict[str, dict[str, Any]] | N
                 shot_id=html.escape(alt, quote=True),
                 caption_html=caption_html,
             )
+            figure_layouts[figure] = layout
             if layout["position"] == "after":
                 pending_after.append(figure)
             else:
@@ -390,7 +398,56 @@ def markdown_to_html(markdown: str, image_layouts: dict[str, dict[str, Any]] | N
     flush_paragraph()
     flush_list()
     flush_pending_after()
-    return "\n".join(output)
+    return _position_html_images(output, figure_layouts)
+
+
+def _position_html_images(output: list[str], figure_layouts: dict[str, dict[str, Any]]) -> str:
+    """Anchor HTML images to text content, independently of Markdown placement.
+
+    Content hashes survive unrelated paragraph insertions, image movement and
+    typography changes. Missing/edited anchors fall back to the source position.
+    """
+    occurrences: dict[str, int] = {}
+    blocks: dict[int, str] = {}
+    for index, item in enumerate(output):
+        match = re.match(r"^<(p|h[1-6]|ul|blockquote)>", item)
+        if not match:
+            continue
+        digest = hashlib.sha256(item.encode("utf-8")).hexdigest()[:16]
+        occurrences[digest] = occurrences.get(digest, 0) + 1
+        key = f"b_{digest}_{occurrences[digest]}"
+        blocks[index] = key
+        output[index] = item.replace(match.group(), f'<{match[1]} data-layout-block="{key}">', 1)
+
+    before: dict[str, list[str]] = {}
+    after: dict[str, list[str]] = {}
+    moved: set[int] = set()
+    known_blocks = set(blocks.values())
+    for index, item in enumerate(output):
+        layout = figure_layouts.get(item)
+        if layout is None:
+            continue
+        is_after = layout["position"] == "after"
+        candidates = [i for i in blocks if i < index] if is_after else [i for i in blocks if i > index]
+        source_index = (max(candidates) if is_after else min(candidates)) if candidates else None
+        source_key = blocks.get(source_index, "")
+        figure = item.replace("<figure ", f'<figure data-source-block="{source_key}" ', 1)
+        output[index] = figure
+        anchor = layout.get("anchor_block")
+        if anchor not in known_blocks:
+            continue
+        (after if is_after else before).setdefault(anchor, []).append(figure)
+        moved.add(index)
+
+    result = []
+    for index, item in enumerate(output):
+        if index in moved:
+            continue
+        key = blocks.get(index, "")
+        result.extend(before.get(key, []))
+        result.append(item)
+        result.extend(after.get(key, []))
+    return "\n".join(result)
 
 
 def insert_images_into_original_text(

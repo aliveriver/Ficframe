@@ -713,6 +713,7 @@
         <div>
           <h2>HTML 可视化排版</h2>
           <p id="htmlDesignerStatus">选择预览中的图片开始编辑</p>
+          <p class="muted">拖动图片到任意段落前后；放在左、右侧自动文字环绕，中间独占一行。拖到预览边缘可滚动，拖右下角调整大小。</p>
         </div>
         <div class="html-designer-actions">
           <button id="htmlDesignerRefreshBtn" type="button">刷新预览</button>
@@ -744,6 +745,7 @@
               <button type="button" data-html-position="after">正文后</button>
               <button type="button" data-html-position="inline">行内</button>
             </div>
+            <button id="htmlDesignerResetPositionBtn" type="button">恢复到对应原文位置</button>
             <label>
               <span>图片对齐</span>
               <select id="htmlDesignerAlignment">
@@ -837,7 +839,7 @@
     <script src="/assets/task_monitor.js?v=20261011-visual2"></script>
     <script src="/assets/image_workflow.js?v=20261016-compact"></script>
     <script src="/assets/visual_presets.js?v=20261016-direct-reference"></script>
-    <script src="/assets/html_visual_editor.js?v=20261016-refactor"></script>
+    <script src="/assets/html_visual_editor.js?v=20261017-drag-wrap"></script>
     <script src="/assets/provider_manager.js?v=20261016-refactor"></script>
     <script src="/assets/action_menus.js?v=20261016-compact"></script>
     <script src="/assets/app.js?v=20261016-style-selection"></script>

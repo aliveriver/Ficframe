@@ -7,6 +7,53 @@ require("../../web/workspace_state.js");
 
 const editor = global.FicFrameHtmlVisualEditor;
 
+test("vertical drops choose text block boundaries even when only Y changes", () => {
+  const blocks = [100, 240, 380].map((top, i) => ({ dataset: { layoutBlock: `block-${i}` },
+    getBoundingClientRect: () => ({ top, bottom: top + 100, height: 100 }) }));
+  assert.equal(editor.dropTargetFromPointer(blocks, 101).block, blocks[0]);
+  assert.equal(editor.dropTargetFromPointer(blocks, 250).block, blocks[1]);
+  assert.equal(editor.dropTargetFromPointer(blocks, 250).position, "before");
+  assert.equal(editor.dropTargetFromPointer(blocks, 460).block, blocks[2]);
+  assert.equal(editor.dropTargetFromPointer(blocks, 460).position, "after");
+  assert.equal(editor.dropTargetFromPointer([], 100), null);
+});
+
+test("left and right drops enable wrapping while center drops keep a single line", () => {
+  const rect = { left: 100, width: 600 };
+  const target = { block: { dataset: { layoutBlock: "paragraph" } }, position: "before" };
+  assert.deepEqual(editor.layoutFromDrop(130, rect, target, { width: "100%" }), {
+    anchor_block: "paragraph", position: "before", alignment: "left", wrap: "left", width: "50%",
+  });
+  assert.deepEqual(editor.layoutFromDrop(670, rect, target, { width: "35%" }, 210), {
+    anchor_block: "paragraph", position: "before", alignment: "right", wrap: "right",
+  });
+  assert.equal(editor.layoutFromDrop(400, rect, target).wrap, "none");
+  assert.equal(editor.layoutFromDrop(130, rect, null), null);
+});
+
+test("float drops shrink an oversized custom image to leave text room", () => {
+  const target = { block: { dataset: { layoutBlock: "p" } }, position: "after" };
+  const result = editor.layoutFromDrop(110, { left: 100, width: 600 }, target, { width: "1200px" }, 600);
+  assert.equal(result.width, "50%");
+  assert.equal(result.position, "after");
+});
+
+test("an already placed image is not reinserted and reordered when controls refresh", () => {
+  const calls = [];
+  const original = { isConnected: true, before: () => calls.push("source-before"), after: () => calls.push("source-after") };
+  const target = { isConnected: true, dataset: { layoutBlock: "target" }, before: () => calls.push("target-before"), after: () => calls.push("target-after") };
+  const figure = { dataset: {}, style: {}, classList: { add() {}, remove() {} },
+    querySelector: () => null, ownerDocument: { querySelectorAll: () => [target] },
+    ficframeTextAnchor: original, ficframeAppliedAnchor: target, ficframeAppliedPosition: "after" };
+  editor.applyFigureLayout(figure, { anchor_block: "target", position: "after", width: "42%", wrap: "left" });
+  assert.deepEqual(calls, []);
+  assert.equal(figure.style.width, "42%");
+  editor.applyFigureLayout(figure, { anchor_block: "target", position: "before" });
+  assert.deepEqual(calls, ["target-before"]);
+  editor.applyFigureLayout(figure, { anchor_block: null, position: "before" });
+  assert.deepEqual(calls, ["target-before", "source-before"]);
+});
+
 test("visual editor derives responsive placement from horizontal drag", () => {
   const rect = { left: 100, width: 600 };
   assert.equal(editor.positionFromPointer(150, rect), "left");
