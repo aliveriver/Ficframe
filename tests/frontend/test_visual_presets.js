@@ -20,15 +20,51 @@ function fixture({ api = async () => ({ presets: [] }), taskMonitor, initial = {
   const selected = { id: "shot", style_preset_mode: "inherit", composition_preset_mode: "inherit" };
   const state = { runId: "run", selected, shots: [selected], visualPresets: [], visualPresetDefaults: {}, ...initial };
   let persisted = 0;
+  let draftSaves = 0;
   const controller = FicFrameVisualPresets.createController({ state, elements, api, enabledKinds,
     taskMonitor: taskMonitor || { wait: async () => ({}) }, escapeHtml: String,
     setBusy: (button, busy) => { button.disabled = busy; },
     storage: { setItem: (key, value) => storage.set(key, value), removeItem: (key) => storage.delete(key), getItem: (key) => storage.get(key) },
-    saveWorkspaceDraft() {}, persistStoryboard: async () => { persisted++; },
+    saveWorkspaceDraft() { draftSaves++; }, persistStoryboard: async () => { persisted++; },
   });
   controller.bindEvents();
-  return { controller, state, elements, storage, persisted: () => persisted };
+  return { controller, state, elements, storage, persisted: () => persisted, draftSaves: () => draftSaves };
 }
+
+test("a newly created style and reference mode can be selected before a run exists", async () => {
+  const presets = [];
+  const writes = [];
+  const f = fixture({ initial: { runId: null, shots: [], selected: null }, enabledKinds: ["style"], api: async (path, options) => {
+    if (options?.method === "POST") {
+      writes.push(path);
+      presets.push({ ...JSON.parse(options.body), id: "style_new", version: 1, reference_mode: "image" });
+    }
+    return { enabled_types: ["style"], presets };
+  } });
+  await f.controller.refresh();
+  f.controller.openEditor();
+  f.elements.visualPresetName.value = "Ink";
+  f.elements.visualPresetPositive.value = "ink lines";
+  await f.elements.visualPresetForm.listeners.submit({ preventDefault() {} });
+
+  assert.match(f.elements.runStylePreset.innerHTML, /style_new/);
+  assert.equal(f.elements.runStylePreset.disabled, false);
+  assert.equal(f.elements.runStyleReferenceMode.disabled, false);
+  assert.equal(f.elements.shotStylePreset.disabled, true);
+  f.elements.runStylePreset.value = "style_new";
+  f.elements.runStylePreset.listeners.change();
+  await f.controller.flush();
+  assert.equal(f.state.visualPresetDefaults.style_id, "style_new");
+  assert.equal(f.elements.runStyleReferenceMode.value, "image");
+  f.elements.runStyleReferenceMode.value = "text";
+  f.elements.runStyleReferenceMode.listeners.change();
+  await f.controller.flush();
+  await f.controller.refresh();
+  assert.equal(f.elements.runStylePreset.value, "style_new");
+  assert.equal(f.elements.runStyleReferenceMode.value, "text");
+  assert.equal(f.draftSaves(), 2);
+  assert.deepEqual(writes, ["/api/visual-presets"]);
+});
 
 test("analysis consumes task monitor result directly and requires explicit confirmation", async () => {
   const draft = { status: "analyzed", positive: "dry brush", negative: "glossy", structured: { linework: "ink" }, reference_paths: ["drafts/id/ref.png"] };

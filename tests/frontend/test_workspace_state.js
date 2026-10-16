@@ -52,6 +52,26 @@ test("empty workspace removes stale draft", () => {
   assert.equal(storage.getItem("workspace"), null);
 });
 
+test("a style selection is saved and restored before importing input files", () => {
+  const storage = memoryStorage();
+  const state = FicFrameWorkspaceState.createInitialState();
+  state.visualPresetDefaults = { style_id: "style-1", style_reference_mode: "image" };
+  assert.equal(FicFrameWorkspaceState.saveDraft(storage, "workspace", state), true);
+  assert.deepEqual(FicFrameWorkspaceState.loadDraft(storage, "workspace").visualPresetDefaults, state.visualPresetDefaults);
+
+  state.visualPresetDefaults = { style_id: null, style_reference_mode: "text" };
+  assert.equal(FicFrameWorkspaceState.saveDraft(storage, "workspace", state), false);
+});
+
+test("changing input files retains style choices and releases the previous run snapshot", () => {
+  const state = FicFrameWorkspaceState.createInitialState();
+  state.runId = "old-run";
+  state.visualPresetDefaults = { style_id: "style-1", style_reference_mode: "image", style_snapshot: { id: "style-1", version: 1 } };
+  FicFrameWorkspaceState.resetRun(state);
+  assert.deepEqual(state.visualPresetDefaults, { style_id: "style-1", style_reference_mode: "image" });
+  assert.equal(state.runId, null);
+});
+
 test("reset run preserves prepared characters and provider config", () => {
   const state = FicFrameWorkspaceState.createInitialState();
   state.runId = "run-1";

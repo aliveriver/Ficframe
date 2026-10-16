@@ -1069,6 +1069,7 @@ async function runPipeline() {
   }
   setBusy(el.runBtn, true);
   try {
+    await visualPresets.flush();
     const form = new FormData();
     form.append("novel", el.novelFile.files[0]);
     form.append("characters", el.charactersFile.files[0]);
@@ -1082,6 +1083,8 @@ async function runPipeline() {
     form.append("use_llm", el.useLlm.checked ? "true" : "false");
     form.append("llm_profile", el.llmProfile?.value || "fast");
     form.append("llm_concurrency", el.llmConcurrency?.value || "3");
+    form.append("style_id", state.visualPresetDefaults.style_id || "");
+    form.append("style_reference_mode", state.visualPresetDefaults.style_reference_mode || "text");
     const { created } = await taskMonitor.submit("/api/pipeline/task", { method: "POST", body: form });
     const data = await api(`/api/runs/${encodeURIComponent(created.run_id)}`);
     state.runId = data.run_id;
@@ -1091,6 +1094,7 @@ async function runPipeline() {
     state.storyboardMessages = data.storyboard_messages || [];
     state.promptFeedbackMessages = data.prompt_feedback_messages || [];
     state.storyboardVersions = data.storyboard_versions || {};
+    state.visualPresetDefaults = data.visual_presets || { style_id: null, composition_id: null };
     state.htmlSettings = workspaceState.createHtmlSettings(data.html_settings);
     const partitioned = partitionCharacters(data.characters || []);
     state.autoCharacters = partitioned.auto;
@@ -1105,6 +1109,7 @@ async function runPipeline() {
     renderPromptFeedbackHistory();
     renderHtmlSettings();
     renderShots(state.selected?.id);
+    visualPresets.renderSelectors();
     saveWorkspaceDraft();
     el.health.textContent = `已生成 ${state.shots.length} 张分镜`;
   } catch (error) {

@@ -46,6 +46,8 @@ VLM 分析复用 `TaskManager`，任务独立持久化于 `visual-presets/analys
 
 ### 文本 / 原图双模式及多图能力验证
 
+默认画风与参考模式属于生成输入，不依赖已存在的 run。前端在空工作区也允许选择，并将仅包含画风选择的状态保存为草稿；更换小说或人设时保留选择、清除上一 run 的绑定快照。`POST /api/pipeline` 与 `POST /api/pipeline/task` 接受可选表单字段 `style_id`、`style_reference_mode`；在调用模型前校验并固定预设快照，新生成分镜继承该快照。任务完成后以服务端保存的默认值刷新选择框，保持后续生图和显示一致。
+
 预设的 `reference_mode` 为 `text` 或 `image`（旧预设默认为文本），仅作为选择 run 预设时的建议。run 分别记录 `style_reference_mode`、`composition_reference_mode`，单条 `Shot` 同名字段还可取 `inherit`，独立于 `*_preset_mode` 的预设来源选择。绑定快照记录当时有效模式与原始图片路径；仅文本模式不发送视觉图片，即使预设保留参考图。手工原图上传不调用 VLM，分析操作仍只返回待确认草稿。新字段加入保存、修订和浏览器恢复链路，旧 run 继续默认文本。
 
 `image_reference_workflow.py` 负责图片用途 Prompt、原图路径解析、总图数 preflight、能力记录和显式实际测试。单张/批量共用 `image_generation_inputs`。`provider.image` 新增独立 `style_reference_images`、`composition_reference_images` 参数，不写入 `reference_image_groups`。云端最终发送顺序为角色身份、画风、构图，Prompt 使用 1-based 序号逐组说明用途；视觉图片存在时不再套用“所有图片都是角色设计”的旧身份模板。原有仅角色参考行为保持不变。模式、用途排序、数量、能力依据随生成快照保存。

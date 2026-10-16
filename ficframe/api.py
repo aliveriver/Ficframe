@@ -36,7 +36,7 @@ from .prompt_bank import analyze_reference_visuals, build_character_prompt_bank
 from .render import normalize_html_settings
 from .runtime_paths import env_file, outputs_root, providers_file, resource_root, user_data_root, visual_presets_root, web_root
 from .visual_presets import VisualPresetStore
-from .visual_preset_workflow import bind_storyboard_shot
+from .visual_preset_workflow import bind_defaults, bind_shot, bind_storyboard_shot
 from .visual_preset_routes import VisualPresetController, VisualPresetDependencies
 from .image_workflow import (
     ImageSelectionError, ImageWorkflow, image_target_for_generation, image_url_for_path,
@@ -589,6 +589,8 @@ async def pipeline(
     llm_profile: Annotated[str, Form()] = "fast",
     llm_concurrency: Annotated[int, Form()] = 3,
     run_id: Annotated[str | None, Form()] = None,
+    style_id: Annotated[str | None, Form()] = None,
+    style_reference_mode: Annotated[str | None, Form()] = None,
 ) -> dict[str, Any]:
     run_id = run_id or str(int(time.time()))
     repository = get_run_repository()
@@ -602,6 +604,12 @@ async def pipeline(
     if not character_text.strip():
         logger.warning("pipeline rejected empty characters filename=%s", characters.filename)
         raise HTTPException(status_code=400, detail="人设文件为空，请重新选择包含角色设定的 Markdown")
+    store = get_visual_preset_store()
+    try:
+        visual_defaults = bind_defaults(store, {"style_id": style_id, "style_reference_mode": style_reference_mode},
+                                       {"composition_id": None})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     logger.info(
         "pipeline started run_id=%s novel=%s characters=%s reference_images=%s max_shots=%s use_llm=%s llm_profile=%s llm_concurrency=%s",
         run_id,
@@ -656,9 +664,10 @@ async def pipeline(
                               run_id=run_id, llm_concurrency=llm_concurrency, fast_llm=fast_llm),
         "run_id": run_id,
         "storyboard_messages": [], "prompt_feedback_messages": [], "storyboard_versions": {},
-        "visual_presets": {"style_id": None, "composition_id": None},
+        "visual_presets": visual_defaults,
         "html_settings": normalize_html_settings(),
     }
+    payload["shots"] = [to_dict(bind_shot(store, Shot(**item), visual_defaults)) for item in payload["shots"]]
     payload["next_shot_number"] = len(payload["shots"]) + 1
     repository.save(run_id, payload)
     logger.info("pipeline completed run_id=%s character_count=%s scene_count=%s shot_count=%s", run_id, len(cards), len(payload["scenes"]), len(payload["shots"]))
@@ -677,6 +686,8 @@ async def create_pipeline_task(
     use_llm: Annotated[bool, Form()] = False,
     llm_profile: Annotated[str, Form()] = "fast",
     llm_concurrency: Annotated[int, Form()] = 3,
+    style_id: Annotated[str | None, Form()] = None,
+    style_reference_mode: Annotated[str | None, Form()] = None,
 ) -> dict[str, Any]:
     """读取上传内容后立即返回，后台任务不再依赖请求生命周期。"""
     run_id = f"{int(time.time())}_{time.time_ns() % 1_000_000}"
@@ -696,6 +707,7 @@ async def create_pipeline_task(
         result = asyncio.run(pipeline(
             novel_upload, character_upload, refs, reference_bindings, manual_characters,
             prepared_characters, max_shots, use_llm, llm_profile, llm_concurrency, run_id,
+            style_id=style_id, style_reference_mode=style_reference_mode,
         ))
         reporter.update("保存 run", 95, "分镜已生成，正在刷新持久化投影")
         return {"run_id": result["run_id"], "shot_count": len(result.get("shots", []))}

@@ -75,12 +75,12 @@
         const selector = kind === "style" ? el.runStylePreset : el.runCompositionPreset;
         const defaults = state.visualPresetDefaults || {};
         const id = defaults[`${kind}_id`] || "";
-        selector.innerHTML = options(state.visualPresets || [], kind, id, defaults[`${kind}_snapshot`], false, escapeHtml);
+        selector.innerHTML = options(state.visualPresets || [], kind, id, state.runId ? defaults[`${kind}_snapshot`] : null, false, escapeHtml);
         selector.value = id;
-        selector.disabled = !state.runId;
+        selector.disabled = false;
         const modeSelector = kind === "style" ? el.runStyleReferenceMode : el.runCompositionReferenceMode;
         modeSelector.value = defaults[`${kind}_reference_mode`] || "text";
-        modeSelector.disabled = !state.runId;
+        modeSelector.disabled = false;
       }
       loadShot();
       const items = (state.visualPresets || []).filter((item) => activeKinds.includes(item.type));

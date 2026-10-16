@@ -44,7 +44,11 @@
   }
 
   function saveDraft(storage, key, state) {
-    if (!state.runId && !state.shots.length && !state.characters.length && !state.manualCharacters.length) {
+    const defaults = state.visualPresetDefaults || {};
+    const hasVisualDefaults = (state.visualPresetKinds || ["style"]).some(
+      (kind) => defaults[`${kind}_id`] || defaults[`${kind}_reference_mode`] === "image",
+    );
+    if (!state.runId && !state.shots.length && !state.characters.length && !state.manualCharacters.length && !hasVisualDefaults) {
       storage.removeItem(key);
       return false;
     }
@@ -64,10 +68,11 @@
   }
 
   function resetRun(state) {
+    const selections = Object.fromEntries(Object.entries(state.visualPresetDefaults || {}).filter(([key]) => !key.endsWith("_snapshot")));
     Object.assign(state, {
       runId: null, shots: [], scenes: [], originalShots: [], selected: null,
       storyboardMessages: [], promptFeedbackMessages: [], storyboardVersions: {}, novelText: "",
-      visualPresetDefaults: { style_id: null, composition_id: null },
+      visualPresetDefaults: selections,
       htmlSettings: createHtmlSettings(),
     });
     state.selectedShotIds.clear();
