@@ -66,6 +66,17 @@ Windows 仍会为快捷方式、卸载登记和安装期间的临时解压使用
 
 `data/.env` 与 `data/.ficframe/providers.json` 可能包含 API key，不要把完整数据目录公开上传。
 
+## 图标占位与替换
+
+统一图标文件位于 `web/favicon.ico`，当前是包含 16、24、32、48、64、128、256 像素尺寸的有效 FF ICO 占位图，可直接替换为自己的 ICO：
+
+- Windows 主程序、安装器、开始菜单和桌面快捷方式使用该图标。
+- 浏览器标签页和页面左上角通过 `/favicon.ico` 使用同一文件；Windows / Linux 发布包都会携带它。
+- 自定义图标需要是真正的 ICO 格式，不能只修改 PNG/JPG 的扩展名。
+- 替换后重新构建发布包；源码运行时刷新页面即可，浏览器仍显示旧图标时可强制刷新。
+
+PyInstaller 的 EXE 图标和 Inno Setup 的安装器图标均已接入这一路径，无需再修改打包配置。相关配置见 [PyInstaller 图标参数](https://pyinstaller.org/en/stable/usage.html#cmdoption-i) 和 [Inno Setup SetupIconFile](https://jrsoftware.org/ishelp/topic_setup_setupiconfile.htm)。
+
 ## 构建 Windows 包
 
 要求：
@@ -84,6 +95,8 @@ Windows 仍会为快捷方式、卸载登记和安装期间的临时解压使用
 
 - `FicFrame-<版本>-windows-x64-setup.exe`
 - `FicFrame-<版本>-windows-x64-portable.zip`
+
+构建依赖独立安装在 `build/package/windows/.venv/`，不会同步或修改源码运行用的根目录 `.venv/`。Windows 与 Linux 构建固定使用与 CI 一致的 Python 3.11（缺少时由 uv 下载），并通过 `--locked` 保持仓库锁定的依赖版本，避免自动选择过新的 Python 后退回本地编译依赖。
 
 ## 构建 Linux 包
 
@@ -125,7 +138,7 @@ file FicFrame
 
 `.github/workflows/release.yml` 按事件执行不同操作：
 
-- PR：构建 Windows/Linux artifacts，验证两个平台能打包，但不发布。
+- PR：校验版本与更新简介，构建 Windows/Linux artifacts，并运行后端、前端与打包程序检查，不发布。
 - 合并或直接推送到 `main`：不自动发布。
 - Actions 页面手动运行：必须选择 `main` 并输入版本号；两个平台构建成功后创建标签和 Release。
 
@@ -134,10 +147,12 @@ file FicFrame
 正式发布的版本来自 `pyproject.toml`。以下三个位置必须一致：
 
 ```text
-pyproject.toml          version = "0.1.1"
-ficframe/__init__.py    __version__ = "0.1.1"
-uv.lock                 version = "0.1.1"（运行 uv lock 自动更新）
+pyproject.toml          version = "1.3.1"
+ficframe/__init__.py    __version__ = "1.3.1"
+uv.lock                 version = "1.3.1"（运行 uv lock 自动更新）
 ```
+
+同时在根目录 [CHANGELOG.md](../CHANGELOG.md) 中维护对应小节。例如准备发布 `1.3.1` 时，将 `[Unreleased]` 下的已完成改动移入 `## [1.3.1] - 2026-10-16`；可以用三级标题区分“新增 / 优化 / 修复”。历史版本保持原样，后续开发继续写入 `[Unreleased]`。发布脚本按版本精确匹配，不会把未发布内容或旧版本说明带入本次 Release；缺失、重复或空白的小节会使检查失败。
 
 推荐步骤：
 
@@ -146,22 +161,30 @@ uv.lock                 version = "0.1.1"（运行 uv lock 自动更新）
 $env:UV_CACHE_DIR=".uv-cache"
 uv lock
 
-# 2. 提交版本修改并创建 PR
-git add pyproject.toml ficframe/__init__.py uv.lock
-git commit -m "chore: bump version to 0.1.1"
+# 2. 编辑 CHANGELOG.md，为 1.3.1 填写实际更新简介
+# 3. 本地预览 Release 正文（不会发布到 GitHub）
+uv run python scripts/release_notes.py --version 1.3.1 --output outputs/release-notes.md
+
+# 4. 提交版本和更新简介并创建 PR
+git add pyproject.toml ficframe/__init__.py uv.lock CHANGELOG.md
+git commit -m "chore: prepare release 1.3.1"
 ```
 
-PR 检查会验证三个版本号一致。普通功能 PR 可以继续沿用当前版本号，不需要每次合并都升级版本。
+PR 检查会验证三个版本号及对应的 changelog 小节。普通功能 PR 可以沿用当前版本号，将新改动写进 `[Unreleased]`，不需要每次合并都升级版本。
 
 版本 PR 合并后，在仓库的 `Actions` 页面执行：
 
 1. 选择 `Build release packages`。
 2. 点击 `Run workflow`。
 3. Branch 选择 `main`。
-4. 输入与 `pyproject.toml` 完全一致的版本号，例如 `0.1.1`，不要加 `v`。
+4. 输入与 `pyproject.toml` 完全一致的版本号，例如 `1.3.1`，不要加 `v`。
 5. 再次点击 `Run workflow`。
 
-工作流会确认当前分支是 `main`、三个版本号一致且远端不存在同名 `v<版本>` 标签。Windows 或 Linux 任一构建失败时都不会创建 Release；全部成功后，Release job 会自动创建标签并发布四个文件，不需要手动执行 `git tag`。
+工作流会确认当前分支是 `main`、三个版本号一致、changelog 包含本次更新简介，且不存在同名 `v<版本>` 标签。Windows 或 Linux 任一构建或测试失败时都不会创建 Release；全部成功后，Release job 会自动创建标签并上传四个发布包与 `SHA256SUMS`，无需手动执行 `git tag`。带版本后缀的版本会标记为预发布，不会替换最新正式版。
+
+Release 正文依次包含 changelog 中的更新简介、Windows / Linux 下载和升级说明，以及 GitHub 自动生成的提交记录；Actions 运行摘要也能预览该正文。`SHA256SUMS` 为四个发布包生成 SHA-256，可与 Windows 的 `Get-FileHash <文件名> -Algorithm SHA256` 对照，或在 Linux 下载目录运行 `sha256sum --check --ignore-missing SHA256SUMS`。
+
+两个平台共用一个矩阵构建定义，只有最终 Release job 拥有仓库写权限。新的 PR 检查会取消同一 PR 的旧构建，手动发布不会被后续运行中断。
 
 ### CI 依赖源
 

@@ -25,6 +25,7 @@ FicFrame 是一套本地运行的小说配图工作台，用来把小说正文�
 - Prompt 编辑：分镜 Prompt、角色 identity prompt、外貌状态计划都可以在 Web 里修改并保留。
 - 部分重生成：可勾选任意分镜生成图片，不必只生成当前一张或全部。
 - 图片版本：重新生成不会覆盖旧图，新图先作为候选版本保存，可手动设为当前图。
+- 画风规范：维护全局可复用预设，选择仅文本或原图参考＋文本模式；可选 VLM 提炼草稿，支持供应商多图实测、项目默认与单条覆盖，并保存生成快照。
 - 稳定原文引用：每条分镜保存原文区间、引用快照和上下文锚点；正文坐标变化时会尝试可靠重定位，无法定位时不会错误高亮。
 - 分镜 Agent：反馈和对话随 run 保存，Agent 可根据反馈决定是否重生成对应分镜；Prompt 重建意见使用独立历史。
 - 可观察任务：完整工作流、分镜重生成、Prompt 重建和图片生成都会显示阶段、进度、最近消息与失败原因。
@@ -40,9 +41,11 @@ FicFrame 是一套本地运行的小说配图工作台，用来把小说正文�
 
 ## 文档
 
+- [更新日志](CHANGELOG.md)：已发布版本的更新简介，以及尚未发布的改动。
 - [Windows 与 Linux 发布包](docs/distribution.md)：免 Python 安装、目标目录、升级迁移和自动构建。
 - [ComfyUI 使用指南](docs/comfyui.md)：Desktop 接入、基础 SDXL、Illustrious XL、IP-Adapter、多参考图、LLM 布局和自定义工作流。
 - [常见问题](docs/faq.md)：启动、端口、图片 API、ComfyUI 节点、显存、参考图和导出排障。
+- [工作流架构](docs/storyboard-architecture.md)：模块职责、数据边界、任务和版本保存约定。
 - [安全与隐私](SECURITY.md)：本地文件、第三方 API 和日志包注意事项。
 
 ## 快速开始
@@ -97,7 +100,7 @@ http://127.0.0.1:8787
 .\start.ps1 -Port 8788
 ```
 
-#### macOS / Linux 源码环境
+#### Linux 源码环境
 
 ```bash
 chmod +x ./start.sh
@@ -141,22 +144,49 @@ default = true
 ## Web 使用流程
 
 1. 打开 `http://127.0.0.1:8787`。
-2. 点击顶部 `API 管理`，分别配置 LLM、VLM 和图片供应商。
+2. 点击顶部 `API 管理`，分别配置 LLM、VLM 和图片供应商；恢复最近项目、清空界面和导出日志归入 `工作区` 菜单。
 3. 上传小说 Markdown / TXT。
 4. 上传人物 Markdown / TXT。
 5. 可选：上传角色参考图。
-6. 在 `参考图绑定` 表里确认每张图对应的角色。
+6. 展开 `人设参考与角色工具`，在 `参考图绑定` 表里确认每张图对应的角色；角色相关操作归入 `角色工具` 菜单。
 7. 点击 `识别角色` 使用本地规则，或点击 `LLM拆分人设` 让 LLM 辅助解析。
 8. 可选：点击 `LLM增强人设`、`生成Prompt Bank`、`LLM差异分析`。
 9. 设置分镜数量和图片尺寸。
 10. 点击 `生成分镜`，在顶部任务面板查看阶段、进度和失败原因。
-11. 通过 `预览小说` 查看引用高亮，或选中原文/填写描述新增分镜。
+11. 通过 `预览小说` 查看引用高亮；`分镜操作` 菜单中可添加分镜或批量重生成。
 12. 检查并修改分镜与 Prompt；需要时向分镜 Agent 提交反馈，或单独保存 Prompt 重建意见。
 13. 点击 `生成图片`、`生成选中`、`生成全部` 或 `重试失败`，任务面板会持续显示进度。
-14. 在分镜历史和图片版本列表中恢复需要的版本。
-15. 点击 `导出小说 MD`，得到插入配图后的完整小说 Markdown；同目录下的 `images/` 保存当前图片。
-16. 点击 `导出 ZIP 成品包`，下载包含 Markdown、图片目录、`manifest.json` 和字体/主题说明的完整成品包。
-17. 遇到问题时点击 `导出日志`，把 zip 日志包附到 issue。
+14. 展开 `历史版本与检查`，在分镜历史和图片版本列表中恢复需要的版本。场景、镜头和单条画风位于 `分镜设置`，Prompt、文本排版和批量参数位于 `更多设置`。
+15. 在 `排版与导出` 菜单中点击 `导出小说 MD`，得到插入配图后的完整小说 Markdown；同目录下的 `images/` 保存当前图片。
+
+HTML「可视化排版」中可以按住图片拖到任意段落前后，提示线标明落点；放到左、右侧会自动文字环绕，放到中间则独占一行。拖到预览上下边缘可滚动，右下角手柄可缩放。点击「保存排版」后，位置与环绕会保留在 HTML 和 ZIP 中；「恢复到对应原文位置」可撤回自定义落点。位置随段落内容绑定，其他地方增删段落或调整字号不影响落点；目标段落被修改、删除时回到对应原文位置。窄屏手机沿用单栏自适应布局，Markdown 插图位置沿用原文引用。
+16. 在同一菜单中打开 `可视化排版` 或点击 `导出 ZIP 成品包`，下载包含 Markdown、图片目录、`manifest.json` 和字体/主题说明的完整成品包。
+17. 遇到问题时点击 `工作区 → 导出日志`，把 zip 日志包附到 issue。
+
+### 画风规范
+
+展开左侧“画风设置”，从“预设操作”中新建画风。预设关注线条、上色、色彩与材质，支持两种模式：
+
+- **仅文本规范**：直接填写正负描述，不必上传图片；已上传图片也不会作为原图发送，只使用确认过的文字。
+- **原图参考＋文本规范**：至少上传一张参考图，原图只发送给生图模型；分镜 LLM 始终只接收文本，文字可选；可点击“上传参考图，不分析”跳过手动分析，也可用 VLM 提炼待确认草稿。替换已有手工描述前会再次询问。
+
+原图模式下，分镜 LLM 不定义画风，正向与负向 Prompt 都避免绘画风格、渲染和艺术比例约束；物理光源、时间、人物身份和动作照常保留。已有画风摘要仅用于避免冲突，不作为模仿目标，也不会自动调用 VLM。仅文本模式由 LLM 按文字规范描述画风；未选画风预设沿用原有流程。
+
+切换单条分镜或继承的默认画风、参考模式、绑定版本后，界面会提醒使用「LLM 重建」更新旧 Prompt。选择本身不删除或改写手工文本；重建将当前完整 Prompt、上次生成文本和旧画风一起交给 LLM，要求保留用户修改并更新旧画风，更新前版本可从历史恢复。原图模式检查到 Style 段或常见画风负向词时，最多追加一次 LLM 修正；仍不合要求则报告失败并保留原稿。
+
+创建时可选择预设建议模式；选择项目默认预设时会带入此建议，之后仍可切换。分镜详情可继承、指定预设或“不使用”，参考模式也可单独覆盖为文本或原图。原图不会进入角色身份/IP-Adapter 分组；云端共享多图接口按“人设、画风”顺序发送，并在 Prompt 中标明每组用途，仍不保证模型准确分离用途或严格复刻。
+
+启用原图模式后即可直接生成，无需先测试多图能力。更换模型、尺寸、凭据或增加参考图数量后也可直接生成，过去的测试失败记录不会阻止重试。程序仍会检查参考图文件和适配器是否实现原图发送；当前 SiliconFlow 适配器、现有 ComfyUI 身份参考工作流尚不支持独立视觉原图模式，需用文本或切换图片接口。实际请求失败时显示供应商错误，不会自动丢弃原图；例如 `excessive system load` 表示供应商负载过高，可稍后直接重试。
+
+“图片模型多图能力（可选测试）”保留为诊断工具，生成操作不会自动触发测试。测试需先保存图片供应商，并确认可能计费；仅发送内置色块，不上传用户小说或参考图。测试结果只表明当时请求是否成功，无法证明供应商没有忽略某张图，也不限制后续生成的参考图数量。
+
+预设保存在 `<数据目录>/visual-presets/`，可跨项目复用。生成项目之前即可选择默认画风和参考模式，单条分镜的选择会独立保存。分镜生成与重建从一开始使用绑定画风，生图时画风预设优先决定画法、简化程度和人物比例，并清除冲突的系统默认绘画描述。应用时固定版本，编辑或删除全局预设不会改变已绑定分镜，需点击“采用最新版”显式更新；更新项目默认只影响继承项，不改变单条覆盖和禁用项。内容未变时保留预设版本和更新时间，重复上传相同图片也不会创建新版本。每次生图在图片版本中保存预设 ID、版本、规范及最终 Prompt 快照，不改写手工 Prompt。
+
+分镜详情“更多设置”中的“实际生图规范与最终 Prompt”可预览本次组装结果，“历史版本与检查”中显示当前图片实际使用的规范。分析支持 1–8 张 PNG/JPG/WEBP/GIF/BMP，单张上限 20 MB；分析状态在任务面板显示。画风草稿与待完成分析任务可在刷新后恢复，取消编辑不会自动保存为预设，可从“预设操作”中点击“继续编辑未保存草稿”。VLM 未配置或分析失败时，仍能手动确认保存。
+
+每条分镜对应一张连续画面的插图。LLM 生成与重建 Prompt 时，从连续剧情中选择一个能定格的瞬间，每人只写一组同时成立的动作；完整原文仍保留作背景，避免把动作流程与对白画成漫画。最终生图请求统一加上单幅画面要求与九宫格、分栏、拼贴、画中画、对话框的负向限制，已有 Prompt 也适用；通过「LLM 重建」可进一步收敛旧 Prompt 中的多段剧情。
+
+参考图使用独立、安全的图片预览接口。删除预设仅移除全局列表条目，原始参考图、草稿参考图和全局分析任务结果暂不自动清理，避免破坏 run 快照和待确认草稿；可能累积磁盘占用。本版不实现 ControlNet、IP-Adapter 风格控制或 ComfyUI 专用布局工作流。
 
 安装版的 `<数据目录>` 是 `<安装目录>/data/`；源码运行时则是仓库根目录。输出目录：
 
@@ -257,12 +287,14 @@ FICFRAME_LLM_MODEL=deepseek-v4-flash
 
 ### 支持的图片供应商类型
 
+所有图片供应商与模型统一将 `1K / 2K / 4K` 转换为 `1024x1024 / 2048x2048 / 2880x2880` 后再发送请求，包括下面的云端接口与 ComfyUI。自定义像素值保持不变，例如填写 `4096x4096` 就使用该尺寸；模型支持的具体尺寸仍以对应接口为准。
+
 | 类型 | 用途 | 说明 |
 | --- | --- | --- |
 | `openai` | OpenAI 兼容图片接口 | 适合兼容 `/images/generations` 或 `/images/edits` 的网关 |
-| `ark` | 火山 Ark / 豆包图片接口 | 使用 `/images/generations`，支持 `size=2K` 等参数 |
+| `ark` | 火山 Ark / 豆包图片接口 | 使用 `/images/generations`，`size` 发送转换后的像素尺寸 |
 | `siliconflow` | SiliconFlow 图片接口 | 使用 `image_size`、`num_inference_steps`、`guidance_scale` |
-| `grsai` | Grsai 图片接口 | 参考图会作为 data URL 放入 `images` 字段 |
+| `grsai` | Grsai 图片接口 | 参考图作为 data URL 放入 `images`；`aspectRatio` 使用统一转换后的尺寸 |
 | `comfyui` | 本地 ComfyUI | 提交 API 工作流、轮询队列并下载 `SaveImage` 输出；不要求 API key |
 
 ### 本地 ComfyUI
@@ -470,16 +502,18 @@ examples/minimal/
 ```text
 .
 ├── ficframe/                  # Python 后端与核心流水线
-│   ├── api.py                  # FastAPI Web API
+│   ├── api.py                  # FastAPI 装配、路由和兼容入口
 │   ├── desktop.py              # 安装版桌面启动入口
 │   ├── characters.py           # 人物 Markdown 解析
 │   ├── character_diff.py       # 角色差异分析
 │   ├── cli.py                  # 命令行入口
 │   ├── config_store.py         # .env 与供应商配置读写
 │   ├── continuity.py           # 连续性状态
+│   ├── image_workflow.py       # 单张/批量图片生成、重试与版本保存
 │   ├── llm_pipeline.py         # LLM 增强
 │   ├── models.py               # 数据模型
-│   ├── pipeline.py             # CLI 完整流水线
+│   ├── pipeline.py             # Web / CLI 共用分镜流水线与 LLM 并发精修
+│   ├── payloads.py             # 人设、场景和参考图绑定的输入转换
 │   ├── prompt_bank.py          # Prompt Bank 与 VLM 参考图分析
 │   ├── providers.py            # LLM / VLM / 图片 API 适配
 │   ├── render.py               # Markdown 与 HTML 导出正文渲染
@@ -489,13 +523,20 @@ examples/minimal/
 │   └── storyboard.py           # 分镜生成
 ├── web/                        # Web 前端
 │   ├── index.html
-│   ├── app.js
+│   ├── favicon.ico             # 程序、安装器与网页共用的图标占位文件
+│   ├── app.js                  # 主工作区状态与流程装配
+│   ├── provider_manager.js     # API 供应商与模型表单控制器
+│   ├── html_visual_editor.js   # 可视化排版、文本设置与导出控制器
+│   ├── image_workflow.js       # 图片任务提交与结果回填
+│   ├── visual_presets.js       # 画风预设、参考分析与草稿
+│   ├── workspace_state.js      # 页面草稿和状态重置
 │   ├── styles.css
 │   └── tokens.css
 ├── docs/                       # 使用指南与常见问题
 │   ├── comfyui.md
 │   ├── distribution.md
-│   └── faq.md
+│   ├── faq.md
+│   └── storyboard-architecture.md
 ├── packaging/                  # PyInstaller、Windows 与 Linux 安装器配置
 ├── scripts/                    # Windows / Linux 发布包构建脚本
 ├── examples/minimal/           # 最小公开示例
@@ -504,10 +545,11 @@ examples/minimal/
 ├── .env.example                # 环境变量示例
 ├── requirements.txt            # pip 依赖
 ├── pyproject.toml              # 项目配置与 uv 配置
+├── CHANGELOG.md                # 版本更新简介与 Release 说明来源
 ├── uv.lock                     # uv 锁定文件
 ├── start.bat                   # Windows 启动脚本
 ├── start.ps1                   # PowerShell 启动脚本
-├── start.sh                    # macOS / Linux 启动脚本
+├── start.sh                    # Linux 启动脚本
 ├── SECURITY.md                 # 安全、隐私与内容边界
 └── LICENSE                     # MIT License
 ```
@@ -529,19 +571,24 @@ uv sync
 
 ```powershell
 uv run python -m compileall ficframe
+uv run python -m unittest discover -s tests
 node --check web/app.js
-node --test tests/frontend/test_prompt_state.js
+node --test tests/frontend/*.js tests/test_storyboard_workspace.js
 ```
+
+Web 与 CLI 共用 `pipeline.py` 的场景分析和分镜构建；图片生成统一经过 `image_workflow.py`，HTTP 层只负责参数、任务和错误响应。前端沿用原生 JavaScript，各业务控制器通过显式参数共享工作区状态，不引入额外构建工具或运行时依赖。修改业务行为时，优先在对应模块中完成，避免继续扩大 `api.py` 和 `app.js`。接口与持久化约定见 [工作流架构](docs/storyboard-architecture.md)。
 
 ## 发布新版本
 
 PR 会构建 Windows 和 Linux 安装包用于验证，但不会创建 Release；合并到 `main` 也不会自动发布。需要发布时，由维护者在 GitHub Actions 手动输入版本号启动 `Build release packages`。工作流会：
 
-1. 从 `pyproject.toml` 读取版本，并校验 `ficframe/__init__.py` 与 `uv.lock` 一致。
-2. 并行构建 Windows 安装器、Windows 便携 ZIP、Linux `.run` 和 Linux `.tar.gz`。
-3. 两个平台全部成功后创建 `v<版本>` 标签和 GitHub Release，并上传四个产物。
+1. 校验 `pyproject.toml`、`ficframe/__init__.py` 和 `uv.lock` 中的版本一致，并从 [CHANGELOG.md](CHANGELOG.md) 提取对应版本的更新简介。
+2. 并行构建 Windows 安装器、Windows 便携 ZIP、Linux `.run` 和 Linux `.tar.gz`，运行后端、前端和打包程序检查。
+3. 两个平台全部成功后创建 `v<版本>` 标签和 GitHub Release，附上更新简介、下载说明、提交记录、四个产物及 `SHA256SUMS` 校验文件。
 
-每个正式 Release 必须使用新版本号。先通过 PR 同时修改 `pyproject.toml` 和 `ficframe/__init__.py`，运行 `uv lock` 更新锁文件并合并到 `main`。随后在 Actions 页面选择 `main`，输入同一版本号手动运行工作流。版本不一致、从非 `main` 分支运行或 `v<版本>` 已存在时，发布会停止。
+每个正式 Release 必须使用新版本号。先通过 PR 修改 `pyproject.toml` 和 `ficframe/__init__.py`，运行 `uv lock` 更新锁文件，并将 `CHANGELOG.md` 中的待发布内容移入 `## [版本号]` 小节，然后合并到 `main`。随后在 Actions 页面选择 `main`，输入同一版本号手动运行工作流。版本不一致、缺少对应更新简介、从非 `main` 分支运行或 `v<版本>` 已存在时，发布会停止。
+
+程序与网页的图标共用 `web/favicon.ico`，当前提供有效的 FF 占位图。替换后重新打包即可；格式与尺寸建议见 [图标占位与替换](docs/distribution.md#图标占位与替换)。
 
 完整流程见 [Windows 与 Linux 发布包](docs/distribution.md#自动发布)。
 

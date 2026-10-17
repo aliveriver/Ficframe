@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 import json
 
-from ficframe.llm_pipeline import polish_shot_prompt
+from ficframe.llm_pipeline import generate_or_revise_shot_with_llm, polish_shot_prompt, repair_prompt_with_llm
 from ficframe.models import Shot, to_dict
 from ficframe.storyboard_workflow import (
     MAX_STORYBOARD_VERSIONS,
@@ -38,6 +38,41 @@ def workflow_shot() -> Shot:
 
 
 class StoryboardWorkflowUnitTests(unittest.TestCase):
+    def test_all_prompt_writers_select_one_moment_without_losing_source_or_feedback(self):
+        class CaptureProvider:
+            def text(self, system, user, **kwargs):
+                self.system, self.payload, self.kwargs = system, json.loads(user), kwargs
+                return json.dumps({"positive_prompt": "Scene: apartment bedroom, late at night with lights out. Composition: one continuous close view of two adults. Characters: they lie side by side, foreheads touching, hands clasped between them. Lighting: no lamps or screen light.",
+                                   "negative_prompt": "extra fingers, panel grid, collage"})
+
+        source = "She smooths the sheet. He warms her foot. They laugh about the dog. Later their foreheads touch."
+        for mode in ("none", "text", "image"):
+            for action in ("polish", "revise", "repair"):
+                with self.subTest(mode=mode, action=action):
+                    shot = workflow_shot()
+                    shot.source_text = source
+                    shot.positive_prompt = "Scene: " + source + "\nUser detail: Keep the room dark."
+                    shot.style_preset_mode = "none" if mode == "none" else "preset"
+                    shot.style_preset_snapshot = {} if mode == "none" else {"id": "style", "reference_mode": mode, "positive": "ink"}
+                    provider = CaptureProvider()
+                    feedback = [{"role": "user", "content": "保留牵手，只画额头相碰的瞬间"}]
+                    if action == "polish":
+                        polish_shot_prompt(shot, [], provider, feedback_history=feedback)
+                    elif action == "revise":
+                        generate_or_revise_shot_with_llm(shot, [], provider, feedback_history=feedback)
+                    else:
+                        repair_prompt_with_llm(shot, [], provider, shot.positive_prompt, shot.negative_prompt, feedback_history=feedback)
+                    self.assertIn("ONE visually meaningful frozen moment", provider.system)
+                    self.assertIn("Do not transcribe the whole story, dialogue or successive actions", provider.system)
+                    self.assertIn("ONE illustration, not a sequence of panels", provider.system)
+                    self.assertIn("not drawing-style definitions", provider.system)
+                    self.assertIn("no chronological action lists", provider.payload["required_schema"]["positive_prompt"])
+                    self.assertIn("collages", provider.payload["required_schema"]["negative_prompt"])
+                    self.assertIn("Keep the room dark", json.dumps(provider.payload))
+                    self.assertIn("保留牵手", json.dumps(provider.payload, ensure_ascii=False))
+                    self.assertNotIn("image_paths", provider.kwargs)
+                    self.assertEqual(shot.source_text, source)
+
     def test_novel_coordinates_use_lf_line_endings(self) -> None:
         self.assertEqual(normalize_novel_text("第一行\r\n第二行\r第三行"), "第一行\n第二行\n第三行")
 
@@ -83,11 +118,18 @@ class StoryboardWorkflowUnitTests(unittest.TestCase):
 
     def test_revision_boundary_restores_images_even_if_reviser_changes_them(self) -> None:
         original = workflow_shot()
+        original.style_preset_id = "style_bound"
+        original.style_preset_mode = "preset"
+        original.style_preset_snapshot = {"id": "style_bound", "version": 1, "positive": "ink"}
+        original.composition_preset_mode = "none"
 
         def malicious_reviser(shot, *_args, **_kwargs):
             shot.title = "新版本"
             shot.image_url = "/wrong.png"
             shot.image_versions = []
+            shot.style_preset_id = None
+            shot.style_preset_snapshot = {}
+            shot.composition_preset_mode = "inherit"
             return shot
 
         revised = revise_storyboard_items(
@@ -102,6 +144,9 @@ class StoryboardWorkflowUnitTests(unittest.TestCase):
         self.assertEqual(revised["title"], "新版本")
         self.assertEqual(revised["image_url"], original.image_url)
         self.assertEqual(revised["image_versions"], original.image_versions)
+        self.assertEqual(revised["style_preset_snapshot"], original.style_preset_snapshot)
+        self.assertEqual(revised["style_preset_id"], original.style_preset_id)
+        self.assertEqual(revised["composition_preset_mode"], "none")
 
     def test_revision_error_identifies_failed_shot(self) -> None:
         original = workflow_shot()

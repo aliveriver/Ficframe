@@ -4,185 +4,9 @@ const state = workspaceState.createInitialState();
 
 const WORKSPACE_KEY = "ficframe.workspace.v1";
 let draftTimer = null;
-let designerSelectedShotId = null;
 
-const el = {
-  health: document.querySelector("#health"),
-  taskPanel: document.querySelector("#taskPanel"),
-  taskKind: document.querySelector("#taskKind"),
-  taskStage: document.querySelector("#taskStage"),
-  taskMessage: document.querySelector("#taskMessage"),
-  taskError: document.querySelector("#taskError"),
-  taskProgress: document.querySelector("#taskProgress"),
-  taskProgressText: document.querySelector("#taskProgressText"),
-  taskLogs: document.querySelector("#taskLogs"),
-  runBtn: document.querySelector("#runBtn"),
-  configToggle: document.querySelector("#configToggle"),
-  cleanStartBtn: document.querySelector("#cleanStartBtn"),
-  restoreRunBtn: document.querySelector("#restoreRunBtn"),
-  logExportBtn: document.querySelector("#logExportBtn"),
-  configPanel: document.querySelector("#configPanel"),
-  novelFile: document.querySelector("#novelFile"),
-  charactersFile: document.querySelector("#charactersFile"),
-  referenceImages: document.querySelector("#referenceImages"),
-  referenceTable: document.querySelector("#referenceTable"),
-  previewCharactersBtn: document.querySelector("#previewCharactersBtn"),
-  llmExtractCharactersBtn: document.querySelector("#llmExtractCharactersBtn"),
-  llmEnhanceCharactersBtn: document.querySelector("#llmEnhanceCharactersBtn"),
-  llmPromptBankBtn: document.querySelector("#llmPromptBankBtn"),
-  localPromptBankBtn: document.querySelector("#localPromptBankBtn"),
-  llmDiffBtn: document.querySelector("#llmDiffBtn"),
-  manualCharacterToggleBtn: document.querySelector("#manualCharacterToggleBtn"),
-  manualCharacterPanel: document.querySelector("#manualCharacterPanel"),
-  manualCharacterName: document.querySelector("#manualCharacterName"),
-  manualCharacterRole: document.querySelector("#manualCharacterRole"),
-  manualCharacterNote: document.querySelector("#manualCharacterNote"),
-  addManualCharacterBtn: document.querySelector("#addManualCharacterBtn"),
-  maxShots: document.querySelector("#maxShots"),
-  useLlm: document.querySelector("#useLlm"),
-  llmProfile: document.querySelector("#llmProfile"),
-  llmConcurrency: document.querySelector("#llmConcurrency"),
-  llmModeHelpToggleBtn: document.querySelector("#llmModeHelpToggleBtn"),
-  llmModeHelpPanel: document.querySelector("#llmModeHelpPanel"),
-  rulesToggleBtn: document.querySelector("#rulesToggleBtn"),
-  rulesPanel: document.querySelector("#rulesPanel"),
-  imageSize: document.querySelector("#imageSize"),
-  customImageSize: document.querySelector("#customImageSize"),
-  charactersBox: document.querySelector("#charactersBox"),
-  characterDiffBox: document.querySelector("#characterDiffBox"),
-  shotList: document.querySelector("#shotList"),
-  runId: document.querySelector("#runId"),
-  openNovelBtn: document.querySelector("#openNovelBtn"),
-  addShotBtn: document.querySelector("#addShotBtn"),
-  regenerateSelectedBtn: document.querySelector("#regenerateSelectedBtn"),
-  regenerateAllBtn: document.querySelector("#regenerateAllBtn"),
-  feedbackHistory: document.querySelector("#feedbackHistory"),
-  feedbackInput: document.querySelector("#feedbackInput"),
-  sendFeedbackBtn: document.querySelector("#sendFeedbackBtn"),
-  promptFeedbackHistory: document.querySelector("#promptFeedbackHistory"),
-  promptFeedbackInput: document.querySelector("#promptFeedbackInput"),
-  savePromptFeedbackBtn: document.querySelector("#savePromptFeedbackBtn"),
-  locateSourceBtn: document.querySelector("#locateSourceBtn"),
-  saveShotBtn: document.querySelector("#saveShotBtn"),
-  deleteShotBtn: document.querySelector("#deleteShotBtn"),
-  shotTitle: document.querySelector("#shotTitle"),
-  shotLocation: document.querySelector("#shotLocation"),
-  shotTime: document.querySelector("#shotTime"),
-  shotCharacters: document.querySelector("#shotCharacters"),
-  shotMood: document.querySelector("#shotMood"),
-  shotCamera: document.querySelector("#shotCamera"),
-  shotComposition: document.querySelector("#shotComposition"),
-  shotVisualGoal: document.querySelector("#shotVisualGoal"),
-  htmlImagePosition: document.querySelector("#htmlImagePosition"),
-  htmlImageWidth: document.querySelector("#htmlImageWidth"),
-  htmlImageCustomWidth: document.querySelector("#htmlImageCustomWidth"),
-  htmlImageCaption: document.querySelector("#htmlImageCaption"),
-  htmlImageAlignment: document.querySelector("#htmlImageAlignment"),
-  htmlImageWrap: document.querySelector("#htmlImageWrap"),
-  shotSourceExcerpt: document.querySelector("#shotSourceExcerpt"),
-  storyboardVersionCount: document.querySelector("#storyboardVersionCount"),
-  storyboardVersions: document.querySelector("#storyboardVersions"),
-  promptBox: document.querySelector("#promptBox"),
-  negativePromptBox: document.querySelector("#negativePromptBox"),
-  copyBtn: document.querySelector("#copyBtn"),
-  restorePromptBtn: document.querySelector("#restorePromptBtn"),
-  rebuildPromptBtn: document.querySelector("#rebuildPromptBtn"),
-  llmPromptBtn: document.querySelector("#llmPromptBtn"),
-  characterEditorSelect: document.querySelector("#characterEditorSelect"),
-  identityPromptBox: document.querySelector("#identityPromptBox"),
-  appearanceStatesBox: document.querySelector("#appearanceStatesBox"),
-  negativeIdentityPromptBox: document.querySelector("#negativeIdentityPromptBox"),
-  restoreCharacterBtn: document.querySelector("#restoreCharacterBtn"),
-  rebuildAllPromptsBtn: document.querySelector("#rebuildAllPromptsBtn"),
-  imageBtn: document.querySelector("#imageBtn"),
-  selectedImagesBtn: document.querySelector("#selectedImagesBtn"),
-  allImagesBtn: document.querySelector("#allImagesBtn"),
-  retryFailedBtn: document.querySelector("#retryFailedBtn"),
-  exportBtn: document.querySelector("#exportBtn"),
-  openHtmlDesignerBtn: document.querySelector("#openHtmlDesignerBtn"),
-  exportHtmlBtn: document.querySelector("#exportHtmlBtn"),
-  exportZipBtn: document.querySelector("#exportZipBtn"),
-  skipExistingImages: document.querySelector("#skipExistingImages"),
-  imageRetryCount: document.querySelector("#imageRetryCount"),
-  preview: document.querySelector("#preview"),
-  imageVersions: document.querySelector("#imageVersions"),
-  qaBox: document.querySelector("#qaBox"),
-  htmlFontFamily: document.querySelector("#htmlFontFamily"),
-  htmlHeadingFontFamily: document.querySelector("#htmlHeadingFontFamily"),
-  htmlBodyFontName: document.querySelector("#htmlBodyFontName"),
-  htmlHeadingFontName: document.querySelector("#htmlHeadingFontName"),
-  htmlFontSize: document.querySelector("#htmlFontSize"),
-  htmlLineHeight: document.querySelector("#htmlLineHeight"),
-  htmlContentWidth: document.querySelector("#htmlContentWidth"),
-  htmlTextAlign: document.querySelector("#htmlTextAlign"),
-  htmlParagraphSpacing: document.querySelector("#htmlParagraphSpacing"),
-  providerList: document.querySelector("#providerList"),
-  addProviderBtn: document.querySelector("#addProviderBtn"),
-  deleteProviderBtn: document.querySelector("#deleteProviderBtn"),
-  saveConfigBtn: document.querySelector("#saveConfigBtn"),
-  refreshConfigBtn: document.querySelector("#refreshConfigBtn"),
-  testProviderBtn: document.querySelector("#testProviderBtn"),
-  providerTestResult: document.querySelector("#providerTestResult"),
-  providerKind: document.querySelector("#providerKind"),
-  providerType: document.querySelector("#providerType"),
-  providerActive: document.querySelector("#providerActive"),
-  providerLabel: document.querySelector("#providerLabel"),
-  providerBaseUrlLabel: document.querySelector("#providerBaseUrlLabel"),
-  providerBaseUrl: document.querySelector("#providerBaseUrl"),
-  providerKey: document.querySelector("#providerKey"),
-  addModelBtn: document.querySelector("#addModelBtn"),
-  modelTable: document.querySelector("#modelTable"),
-  imageOptions: document.querySelector("#imageOptions"),
-  imageSteps: document.querySelector("#imageSteps"),
-  imageGuidance: document.querySelector("#imageGuidance"),
-  imageBatch: document.querySelector("#imageBatch"),
-  imageSequential: document.querySelector("#imageSequential"),
-  imageResponseFormat: document.querySelector("#imageResponseFormat"),
-  imageWatermark: document.querySelector("#imageWatermark"),
-  comfyOptions: document.querySelector("#comfyOptions"),
-  comfyWorkflowFile: document.querySelector("#comfyWorkflowFile"),
-  comfyWorkflow: document.querySelector("#comfyWorkflow"),
-  comfyNegativePrompt: document.querySelector("#comfyNegativePrompt"),
-  comfyOutputNode: document.querySelector("#comfyOutputNode"),
-  comfyPollInterval: document.querySelector("#comfyPollInterval"),
-  novelDialog: document.querySelector("#novelDialog"),
-  novelDialogTitle: document.querySelector("#novelDialogTitle"),
-  novelSelectionStatus: document.querySelector("#novelSelectionStatus"),
-  novelText: document.querySelector("#novelText"),
-  novelHighlightPreview: document.querySelector("#novelHighlightPreview"),
-  newShotDescription: document.querySelector("#newShotDescription"),
-  closeNovelBtn: document.querySelector("#closeNovelBtn"),
-  clearNovelSelectionBtn: document.querySelector("#clearNovelSelectionBtn"),
-  generateShotBtn: document.querySelector("#generateShotBtn"),
-  htmlDesignerDialog: document.querySelector("#htmlDesignerDialog"),
-  htmlDesignerStatus: document.querySelector("#htmlDesignerStatus"),
-  htmlDesignerRefreshBtn: document.querySelector("#htmlDesignerRefreshBtn"),
-  htmlDesignerSaveBtn: document.querySelector("#htmlDesignerSaveBtn"),
-  htmlDesignerExportBtn: document.querySelector("#htmlDesignerExportBtn"),
-  htmlDesignerCloseBtn: document.querySelector("#htmlDesignerCloseBtn"),
-  htmlDesignerFrame: document.querySelector("#htmlDesignerFrame"),
-  htmlDesignerEmpty: document.querySelector("#htmlDesignerEmpty"),
-  htmlDesignerShotName: document.querySelector("#htmlDesignerShotName"),
-  htmlDesignerAlignment: document.querySelector("#htmlDesignerAlignment"),
-  htmlDesignerWrap: document.querySelector("#htmlDesignerWrap"),
-  htmlDesignerWidthRange: document.querySelector("#htmlDesignerWidthRange"),
-  htmlDesignerWidthValue: document.querySelector("#htmlDesignerWidthValue"),
-  htmlDesignerWidthInput: document.querySelector("#htmlDesignerWidthInput"),
-  htmlDesignerCaption: document.querySelector("#htmlDesignerCaption"),
-  htmlDesignerFontFamily: document.querySelector("#htmlDesignerFontFamily"),
-  htmlDesignerHeadingFontFamily: document.querySelector("#htmlDesignerHeadingFontFamily"),
-  htmlDesignerBodyFontName: document.querySelector("#htmlDesignerBodyFontName"),
-  htmlDesignerHeadingFontName: document.querySelector("#htmlDesignerHeadingFontName"),
-  htmlDesignerFontSize: document.querySelector("#htmlDesignerFontSize"),
-  htmlDesignerFontSizeValue: document.querySelector("#htmlDesignerFontSizeValue"),
-  htmlDesignerLineHeight: document.querySelector("#htmlDesignerLineHeight"),
-  htmlDesignerLineHeightValue: document.querySelector("#htmlDesignerLineHeightValue"),
-  htmlDesignerContentWidth: document.querySelector("#htmlDesignerContentWidth"),
-  htmlDesignerContentWidthValue: document.querySelector("#htmlDesignerContentWidthValue"),
-  htmlDesignerParagraphSpacing: document.querySelector("#htmlDesignerParagraphSpacing"),
-  htmlDesignerParagraphSpacingValue: document.querySelector("#htmlDesignerParagraphSpacingValue"),
-  htmlDesignerTextAlign: document.querySelector("#htmlDesignerTextAlign"),
-};
+const el = Object.fromEntries([...document.querySelectorAll("[id]")].map((node) => [node.id, node]));
+el.compositionFeatures = document.querySelectorAll('[data-feature="composition-references"]');
 
 async function api(path, options = {}) {
   const response = await fetch(path, options);
@@ -229,6 +53,11 @@ const novelSource = window.FicFrameNovelSource.createController({
   escapeHtml,
   loadNovel: loadNovelForRun,
 });
+const visualPresets = window.FicFrameVisualPresets.createController({
+  state, elements: el, api, taskMonitor, escapeHtml, setBusy,
+  storage: localStorage, saveWorkspaceDraft, persistStoryboard,
+  selectedImageSize,
+});
 const imageWorkflow = window.FicFrameImageWorkflow.createController({
   state,
   elements: el,
@@ -239,10 +68,23 @@ const imageWorkflow = window.FicFrameImageWorkflow.createController({
   setBusy,
   saveSelectedPrompt,
   saveCharacterEditor,
+  saveShotEditor,
   saveWorkspaceDraft,
   renderShots,
   selectedImageSize,
+  prepareGeneration: visualPresets.prepareGeneration,
 });
+
+const providerManager = window.FicFrameProviderManager.createController({
+  state, elements: el, api, escapeHtml, setBusy, checkHealth,
+  onSaved: async () => { await visualPresets.refreshCapability(); await visualPresets.preview(); },
+});
+const { loadConfig } = providerManager;
+const htmlWorkspace = htmlVisualEditor.createController({
+  state, elements: el, api, setBusy, persistStoryboard, saveSelectedPrompt, saveShotEditor,
+  saveCharacterEditor, selectShot, scheduleWorkspaceDraftSave,
+});
+const { renderHtmlSettings, saveHtmlSettings, loadHtmlLayoutEditor, saveHtmlLayoutEditor } = htmlWorkspace;
 
 function saveWorkspaceDraft() {
   saveSelectedPrompt();
@@ -269,6 +111,7 @@ function hydrateWorkspace(payload, preferredShotId = null) {
   const previousRunId = state.runId;
   state.runId = payload.runId || payload.run_id;
   state.shots = payload.shots || [];
+  state.selected = null;
   state.scenes = payload.scenes || [];
   const allCharacters = payload.characters || [];
   const partitioned = partitionCharacters(allCharacters);
@@ -284,6 +127,8 @@ function hydrateWorkspace(payload, preferredShotId = null) {
   state.storyboardMessages = payload.storyboardMessages || payload.storyboard_messages || [];
   state.promptFeedbackMessages = payload.promptFeedbackMessages || payload.prompt_feedback_messages || [];
   state.storyboardVersions = payload.storyboardVersions || payload.storyboard_versions || {};
+  state.visualPresetDefaults = payload.visualPresetDefaults || (Array.isArray(payload.visual_presets) ? { style_id: null, composition_id: null } : payload.visual_presets) || { style_id: null, composition_id: null };
+  visualPresets.renderSelectors();
   state.htmlSettings = workspaceState.createHtmlSettings(payload.htmlSettings || payload.html_settings || state.htmlSettings);
   state.selectedShotIds = new Set(payload.selectedShotIds || []);
   state.selectedCharacterIndex = Math.min(payload.selectedCharacterIndex || 0, Math.max(0, state.characters.length - 1));
@@ -308,6 +153,7 @@ async function refreshRunAfterTask(runId, preferredShotId = null) {
 
 function clearRunArtifacts(message = "新输入已选择，请重新生成分镜") {
   workspaceState.resetRun(state);
+  visualPresets.renderSelectors();
   el.runId.textContent = "新输入未运行";
   el.shotList.innerHTML = "";
   el.promptBox.value = "";
@@ -327,6 +173,7 @@ function clearRunArtifacts(message = "新输入已选择，请重新生成分镜
 function clearWorkspaceForRecording(message = "") {
   localStorage.removeItem(WORKSPACE_KEY);
   workspaceState.resetAll(state);
+  visualPresets.renderSelectors();
   el.runId.textContent = "未运行";
   el.shotList.innerHTML = "";
   el.promptBox.value = "";
@@ -439,235 +286,6 @@ async function checkHealth() {
   }
 }
 
-async function loadConfig() {
-  const data = await api("/api/providers");
-  state.providerConfig = data.config || { active: {}, sources: [] };
-  if (!state.selectedProviderId || !findProvider(state.selectedProviderId)) {
-    state.selectedProviderId = state.providerConfig.sources[0]?.id || null;
-  }
-  renderProviderList();
-  renderProviderDetail();
-}
-
-function findProvider(id = state.selectedProviderId) {
-  return state.providerConfig.sources.find((source) => source.id === id);
-}
-
-function selectedProvider() {
-  syncProviderForm();
-  return findProvider();
-}
-
-function providerTemplate(kind = "image") {
-  const id = `${kind}-${Date.now()}`;
-  const defaults = {
-    llm: { label: "新 LLM", model: "gpt-5-mini", base_url: "https://api.openai.com/v1" },
-    vlm: { label: "新 VLM", model: "gpt-5-mini", base_url: "https://api.openai.com/v1" },
-    image: { label: "新图片供应商", model: "doubao-seedream-5-0-260128", base_url: "https://ark.cn-beijing.volces.com/api/v3" },
-  }[kind] || { label: "新供应商", model: "", base_url: "" };
-  return {
-    id,
-    label: defaults.label,
-    kind,
-    provider: kind === "image" ? "ark" : "openai",
-    base_url: defaults.base_url,
-    api_key: "",
-    models: [{ nickname: "默认模型", model: defaults.model }],
-    active_model: defaults.model,
-    options: kind === "image" ? {
-      steps: "20",
-      guidance_scale: "7.5",
-      batch_size: "1",
-      sequential: "disabled",
-      response_format: "url",
-      watermark: "true",
-      workflow_json: "",
-      negative_prompt: "",
-      output_node_id: "",
-      poll_interval: "1",
-    } : {},
-    created_at: Math.floor(Date.now() / 1000),
-  };
-}
-
-function renderProviderList() {
-  const active = state.providerConfig.active || {};
-  if (!state.providerConfig.sources.length) {
-    el.providerList.innerHTML = `<p class="muted">暂无供应商</p>`;
-    return;
-  }
-  el.providerList.innerHTML = state.providerConfig.sources.map((source) => {
-    const isActive = active[source.kind] === source.id;
-    const activeText = isActive ? "当前使用" : source.provider;
-    return `
-      <button class="provider-item ${source.id === state.selectedProviderId ? "active" : ""}" type="button" data-id="${escapeHtml(source.id)}">
-        <strong>${escapeHtml(source.label || source.id)}</strong>
-        <small>${kindLabel(source.kind)} · ${escapeHtml(activeText)}</small>
-      </button>
-    `;
-  }).join("");
-  el.providerList.querySelectorAll(".provider-item").forEach((button) => {
-    button.addEventListener("click", () => {
-      syncProviderForm();
-      state.selectedProviderId = button.dataset.id;
-      renderProviderList();
-      renderProviderDetail();
-    });
-  });
-}
-
-function renderProviderDetail() {
-  const source = findProvider();
-  const disabled = !source;
-  for (const node of [el.providerKind, el.providerType, el.providerActive, el.providerLabel, el.providerBaseUrl, el.providerKey, el.addModelBtn, el.deleteProviderBtn, el.testProviderBtn]) {
-    node.disabled = disabled;
-  }
-  if (!source) {
-    el.providerLabel.value = "";
-    el.providerBaseUrl.value = "";
-    el.providerKey.value = "";
-    el.modelTable.innerHTML = "";
-    return;
-  }
-  el.providerKind.value = source.kind || "image";
-  el.providerType.value = source.provider || "openai";
-  renderProviderBaseUrlField(source.provider);
-  el.providerActive.value = state.providerConfig.active?.[source.kind] === source.id ? "true" : "false";
-  el.providerLabel.value = source.label || "";
-  el.providerBaseUrl.value = source.base_url || "";
-  el.providerKey.value = source.api_key || "";
-  const options = source.options || {};
-  el.imageSteps.value = options.steps || "";
-  el.imageGuidance.value = options.guidance_scale || "";
-  el.imageBatch.value = options.batch_size || "";
-  el.imageSequential.value = options.sequential || "";
-  el.imageResponseFormat.value = options.response_format || "";
-  el.imageWatermark.value = options.watermark || "true";
-  el.comfyWorkflow.value = options.workflow_json || "";
-  el.comfyNegativePrompt.value = options.negative_prompt || "";
-  el.comfyOutputNode.value = options.output_node_id || "";
-  el.comfyPollInterval.value = options.poll_interval || "1";
-  el.imageOptions.hidden = source.kind !== "image";
-  el.comfyOptions.hidden = source.kind !== "image" || source.provider !== "comfyui";
-  renderModelTable(source);
-}
-
-function renderProviderBaseUrlField(provider) {
-  const isComfyUI = provider === "comfyui";
-  el.providerBaseUrlLabel.textContent = isComfyUI ? "服务地址（HTTP）" : "请求地址";
-  el.providerBaseUrl.placeholder = isComfyUI
-    ? "CLI 默认 127.0.0.1:8188；Desktop 从 8000 起自动选端口"
-    : "https://api.example.com/v1";
-}
-
-function renderModelTable(source) {
-  if (!source.models?.length) {
-    source.models = [{ nickname: "默认模型", model: source.active_model || "" }];
-  }
-  el.modelTable.innerHTML = source.models.map((model, index) => `
-    <div class="model-row" data-index="${index}">
-      <input data-field="nickname" value="${escapeHtml(model.nickname || "")}" placeholder="昵称，如 豆包 5.0" />
-      <input data-field="model" value="${escapeHtml(model.model || "")}" placeholder="模型 ID" />
-      <label class="mini-toggle">
-        <input data-field="active" type="radio" name="activeModel" ${source.active_model === model.model ? "checked" : ""} />
-        <span>使用</span>
-      </label>
-      <button data-action="remove-model" type="button">删除</button>
-    </div>
-  `).join("");
-  el.modelTable.querySelectorAll(".model-row").forEach((row) => {
-    row.addEventListener("input", () => syncProviderForm());
-    row.addEventListener("change", () => syncProviderForm());
-    row.querySelector('[data-action="remove-model"]').addEventListener("click", () => {
-      const item = findProvider();
-      if (!item || item.models.length <= 1) return;
-      item.models.splice(Number(row.dataset.index), 1);
-      item.active_model = item.models[0]?.model || "";
-      renderModelTable(item);
-    });
-  });
-}
-
-function syncProviderForm() {
-  const source = findProvider();
-  if (!source) return;
-  const previousKind = source.kind;
-  source.kind = el.providerKind.value;
-  source.provider = el.providerType.value;
-  source.label = el.providerLabel.value.trim() || source.id;
-  source.base_url = el.providerBaseUrl.value.trim();
-  source.api_key = el.providerKey.value;
-  source.models = Array.from(el.modelTable.querySelectorAll(".model-row")).map((row) => ({
-    nickname: row.querySelector('[data-field="nickname"]').value.trim(),
-    model: row.querySelector('[data-field="model"]').value.trim(),
-    active: row.querySelector('[data-field="active"]').checked,
-  })).filter((model) => model.model).map(({ nickname, model }) => ({ nickname: nickname || model, model }));
-  const activeIndex = Array.from(el.modelTable.querySelectorAll(".model-row")).findIndex((row) => row.querySelector('[data-field="active"]').checked);
-  source.active_model = source.models[Math.max(0, activeIndex)]?.model || source.models[0]?.model || "";
-  source.options = source.kind === "image" ? {
-    steps: el.imageSteps.value,
-    guidance_scale: el.imageGuidance.value,
-    batch_size: el.imageBatch.value,
-    sequential: el.imageSequential.value,
-    response_format: el.imageResponseFormat.value,
-    watermark: el.imageWatermark.value,
-    workflow_json: el.comfyWorkflow.value,
-    negative_prompt: el.comfyNegativePrompt.value,
-    output_node_id: el.comfyOutputNode.value.trim(),
-    poll_interval: el.comfyPollInterval.value || "1",
-  } : {};
-  if (previousKind !== source.kind && state.providerConfig.active?.[previousKind] === source.id) {
-    state.providerConfig.active[previousKind] = "";
-  }
-  if (el.providerActive.value === "true") {
-    state.providerConfig.active[source.kind] = source.id;
-  } else if (state.providerConfig.active?.[source.kind] === source.id) {
-    state.providerConfig.active[source.kind] = "";
-  }
-}
-
-async function saveProviders() {
-  syncProviderForm();
-  try {
-    const data = await api("/api/providers", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ config: state.providerConfig }),
-    });
-    state.providerConfig = data.config;
-    renderProviderList();
-    renderProviderDetail();
-    await checkHealth();
-    el.health.textContent = "供应商配置已保存";
-  } catch (error) {
-    el.providerTestResult.textContent = error.message;
-    el.health.textContent = error.message;
-  }
-}
-
-async function testProvider() {
-  const source = selectedProvider();
-  if (!source) return;
-  setBusy(el.testProviderBtn, true);
-  el.providerTestResult.textContent = "测试中";
-  try {
-    const data = await api("/api/providers/test", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source }),
-    });
-    if (data.resolved_base_url) {
-      el.providerBaseUrl.value = data.resolved_base_url;
-      syncProviderForm();
-    }
-    el.providerTestResult.textContent = JSON.stringify(data, null, 2);
-  } catch (error) {
-    el.providerTestResult.textContent = error.message;
-  } finally {
-    setBusy(el.testProviderBtn, false);
-  }
-}
-
 function renderCharacters() {
   if (!state.characters.length) {
     el.charactersBox.textContent = "";
@@ -766,6 +384,7 @@ function selectShot(index) {
   renderStoryboardVersions();
   el.qaBox.textContent = (state.selected?.qa_notes || []).join("\n");
   el.preview.innerHTML = state.selected?.image_url ? `<img alt="${state.selected.id}" src="${state.selected.image_url}" />` : "";
+  renderVisualPromptSnapshot();
   imageWorkflow.renderVersions();
   document.querySelectorAll(".shot").forEach((node, nodeIndex) => {
     node.classList.toggle("active", nodeIndex === index);
@@ -795,6 +414,7 @@ function loadShotEditor() {
   el.shotSourceExcerpt.textContent = shot
     ? sourceReferenceSummary(shot)
     : "选择分镜后显示对应小说段落";
+  visualPresets.loadShot();
   loadHtmlLayoutEditor();
 }
 
@@ -816,318 +436,12 @@ function saveShotEditor() {
   state.selected.camera = el.shotCamera.value.trim();
   state.selected.composition = el.shotComposition.value.trim();
   state.selected.visual_goal = el.shotVisualGoal.value.trim();
+  visualPresets.saveShot();
   saveHtmlLayoutEditor();
 }
 
-function loadHtmlLayoutEditor() {
-  const layout = state.selected?.html_layout || {};
-  el.htmlImagePosition.value = ["before", "after", "inline"].includes(layout.position) ? layout.position : "before";
-  const presetWidths = new Set(["auto", "35%", "50%", "65%", "80%", "100%"]);
-  el.htmlImageWidth.value = presetWidths.has(layout.width) ? layout.width : "custom";
-  el.htmlImageCustomWidth.value = presetWidths.has(layout.width) ? "" : (layout.width || "");
-  el.htmlImageCaption.value = layout.caption || "";
-  el.htmlImageAlignment.value = layout.alignment || "center";
-  el.htmlImageWrap.value = layout.wrap || (["left", "right"].includes(layout.position) ? layout.position : "none");
-}
-
-function saveHtmlLayoutEditor() {
-  if (!state.selected) return;
-  state.selected.html_layout = {
-    ...(state.selected.html_layout || {}),
-    position: el.htmlImagePosition.value || "before",
-    width: el.htmlImageWidth.value === "custom"
-      ? el.htmlImageCustomWidth.value.trim()
-      : (el.htmlImageWidth.value || "100%"),
-    caption: el.htmlImageCaption.value.trim(),
-    alignment: el.htmlImageAlignment.value || "center",
-    wrap: el.htmlImageWrap.value || "none",
-  };
-}
-
-function renderHtmlSettings() {
-  const settings = workspaceState.createHtmlSettings(state.htmlSettings);
-  state.htmlSettings = settings;
-  el.htmlFontFamily.value = settings.font_family;
-  el.htmlHeadingFontFamily.value = settings.heading_font_family;
-  el.htmlBodyFontName.value = settings.body_font_name || "";
-  el.htmlHeadingFontName.value = settings.heading_font_name || "";
-  el.htmlFontSize.value = settings.font_size;
-  el.htmlLineHeight.value = settings.line_height;
-  el.htmlContentWidth.value = settings.content_width;
-  el.htmlTextAlign.value = settings.text_align;
-  el.htmlParagraphSpacing.value = settings.paragraph_spacing;
-}
-
-function saveHtmlSettings() {
-  state.htmlSettings = workspaceState.createHtmlSettings({
-    font_family: el.htmlFontFamily.value,
-    heading_font_family: el.htmlHeadingFontFamily.value,
-    body_font_name: el.htmlBodyFontName.value.trim(),
-    heading_font_name: el.htmlHeadingFontName.value.trim(),
-    font_size: Number(el.htmlFontSize.value),
-    line_height: Number(el.htmlLineHeight.value),
-    content_width: Number(el.htmlContentWidth.value),
-    text_align: el.htmlTextAlign.value,
-    paragraph_spacing: Number(el.htmlParagraphSpacing.value),
-  });
-}
-
-function designerShot() {
-  return state.shots.find((shot) => shot.id === designerSelectedShotId) || null;
-}
-
-function renderDesignerSettings() {
-  const settings = workspaceState.createHtmlSettings(state.htmlSettings);
-  el.htmlDesignerFontFamily.value = settings.font_family;
-  el.htmlDesignerHeadingFontFamily.value = settings.heading_font_family;
-  el.htmlDesignerBodyFontName.value = settings.body_font_name || "";
-  el.htmlDesignerHeadingFontName.value = settings.heading_font_name || "";
-  el.htmlDesignerFontSize.value = settings.font_size;
-  el.htmlDesignerFontSizeValue.value = `${settings.font_size}px`;
-  el.htmlDesignerLineHeight.value = settings.line_height;
-  el.htmlDesignerLineHeightValue.value = settings.line_height;
-  el.htmlDesignerContentWidth.value = settings.content_width;
-  el.htmlDesignerContentWidthValue.value = `${settings.content_width}px`;
-  el.htmlDesignerParagraphSpacing.value = settings.paragraph_spacing;
-  el.htmlDesignerParagraphSpacingValue.value = `${settings.paragraph_spacing}em`;
-  el.htmlDesignerTextAlign.value = settings.text_align;
-}
-
-function readDesignerSettings() {
-  state.htmlSettings = workspaceState.createHtmlSettings({
-    font_family: el.htmlDesignerFontFamily.value,
-    heading_font_family: el.htmlDesignerHeadingFontFamily.value,
-    body_font_name: el.htmlDesignerBodyFontName.value.trim(),
-    heading_font_name: el.htmlDesignerHeadingFontName.value.trim(),
-    font_size: Number(el.htmlDesignerFontSize.value),
-    line_height: Number(el.htmlDesignerLineHeight.value),
-    content_width: Number(el.htmlDesignerContentWidth.value),
-    paragraph_spacing: Number(el.htmlDesignerParagraphSpacing.value),
-    text_align: el.htmlDesignerTextAlign.value,
-  });
-  renderDesignerSettings();
-  renderHtmlSettings();
-  const documentRef = el.htmlDesignerFrame.contentDocument;
-  if (documentRef) htmlVisualEditor.applyDocumentSettings(documentRef, state.htmlSettings);
-  scheduleWorkspaceDraftSave();
-}
-
-function selectDesignerShot(shotId) {
-  const shot = state.shots.find((item) => item.id === shotId);
-  if (!shot) return;
-  designerSelectedShotId = shot.id;
-  const index = state.shots.indexOf(shot);
-  if (state.selected !== shot) selectShot(index);
-  const layout = shot.html_layout || {};
-  const width = layout.width || "100%";
-  el.htmlDesignerShotName.textContent = `${shot.id} · ${shot.title}`;
-  el.htmlDesignerWidthInput.value = width;
-  const percent = htmlVisualEditor.widthPercent(width, 50);
-  el.htmlDesignerWidthRange.value = percent;
-  el.htmlDesignerWidthValue.value = `${percent}%`;
-  el.htmlDesignerCaption.value = layout.caption || "";
-  el.htmlDesignerAlignment.value = layout.alignment || "center";
-  el.htmlDesignerWrap.value = layout.wrap || (["left", "right"].includes(layout.position) ? layout.position : "none");
-  const visualPosition = ["before", "after", "inline"].includes(layout.position) ? layout.position : "before";
-  document.querySelectorAll("[data-html-position]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.htmlPosition === visualPosition);
-  });
-  const frameDocument = el.htmlDesignerFrame.contentDocument;
-  frameDocument?.querySelectorAll("figure[data-shot-id]").forEach((figure) => {
-    figure.classList.toggle("ficframe-editor-selected", figure.dataset.shotId === shot.id);
-  });
-  el.htmlDesignerStatus.textContent = `${shot.id} 已选中`;
-}
-
-function syncDesignerLayoutToMainEditor(shot) {
-  if (state.selected !== shot) return;
-  loadHtmlLayoutEditor();
-}
-
-function updateDesignerImageLayout(changes) {
-  const shot = designerShot();
-  if (!shot) return;
-  shot.html_layout = {
-    position: "before",
-    alignment: "center",
-    wrap: "none",
-    width: "100%",
-    caption: "",
-    ...(shot.html_layout || {}),
-    ...changes,
-  };
-  const figure = [...(el.htmlDesignerFrame.contentDocument?.querySelectorAll("figure[data-shot-id]") || [])]
-    .find((item) => item.dataset.shotId === shot.id);
-  htmlVisualEditor.applyFigureLayout(figure, shot.html_layout);
-  syncDesignerLayoutToMainEditor(shot);
-  selectDesignerShot(shot.id);
-  scheduleWorkspaceDraftSave();
-}
-
-function installDesignerDocument() {
-  const documentRef = el.htmlDesignerFrame.contentDocument;
-  if (!documentRef) return;
-  const figures = [...documentRef.querySelectorAll("figure[data-shot-id]")];
-  el.htmlDesignerEmpty.hidden = figures.length > 0;
-  let editorStyle = documentRef.querySelector("#ficframe-editor-style");
-  if (!editorStyle) {
-    editorStyle = documentRef.createElement("style");
-    editorStyle.id = "ficframe-editor-style";
-    editorStyle.textContent = `
-      figure[data-shot-id] { cursor: grab; position: relative; transition: outline-color .15s ease, opacity .15s ease; }
-      figure[data-shot-id] > img { touch-action: none; user-select: none; -webkit-user-drag: none; }
-      figure[data-shot-id]:hover { outline: 2px solid #267b7c66; outline-offset: 5px; }
-      figure.ficframe-editor-selected { outline: 3px solid #267b7c; outline-offset: 6px; }
-      figure.ficframe-editor-dragging { cursor: grabbing; opacity: .72; }
-      .ficframe-resize-handle { background: #267b7c; border: 3px solid #fff; border-radius: 50%; bottom: -13px; cursor: nwse-resize; display: none; height: 26px; position: absolute; right: -13px; touch-action: none; user-select: none; width: 26px; z-index: 10; }
-      figure.ficframe-editor-selected > .ficframe-resize-handle { display: block; }
-    `;
-    documentRef.head.append(editorStyle);
-  }
-  htmlVisualEditor.applyDocumentSettings(documentRef, state.htmlSettings);
-  figures.forEach((figure) => {
-    const shot = state.shots.find((item) => item.id === figure.dataset.shotId);
-    if (!shot) return;
-    const initialPosition = figure.dataset.position;
-    let anchor = initialPosition === "after" ? figure.previousElementSibling : figure.nextElementSibling;
-    while (anchor?.matches?.("figure[data-shot-id]")) {
-      anchor = initialPosition === "after" ? anchor.previousElementSibling : anchor.nextElementSibling;
-    }
-    figure.ficframeTextAnchor = anchor;
-    htmlVisualEditor.applyFigureLayout(figure, shot.html_layout || {});
-    figure.addEventListener("click", (event) => {
-      event.preventDefault();
-      selectDesignerShot(figure.dataset.shotId);
-    });
-    const image = figure.querySelector("img");
-    if (image) {
-      image.draggable = false;
-      installDesignerMoveGesture(image, figure);
-    }
-    const handle = documentRef.createElement("span");
-    handle.className = "ficframe-resize-handle";
-    handle.setAttribute("role", "slider");
-    handle.setAttribute("aria-label", "调整图片宽度");
-    handle.tabIndex = 0;
-    figure.append(handle);
-    installDesignerResizeGesture(handle, figure);
-  });
-  const preferred = designerSelectedShotId && figures.some((figure) => figure.dataset.shotId === designerSelectedShotId)
-    ? designerSelectedShotId
-    : figures[0]?.dataset.shotId;
-  if (preferred) selectDesignerShot(preferred);
-}
-
-function installDesignerMoveGesture(target, figure) {
-  target.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0) return;
-    selectDesignerShot(figure.dataset.shotId);
-    const startX = event.clientX;
-    let moved = false;
-    target.setPointerCapture(event.pointerId);
-    const onMove = (moveEvent) => {
-      const delta = moveEvent.clientX - startX;
-      if (Math.abs(delta) < 6) return;
-      moved = true;
-      figure.classList.add("ficframe-editor-dragging");
-      figure.style.transform = `translateX(${Math.max(-80, Math.min(80, delta))}px)`;
-    };
-    const onEnd = (endEvent) => {
-      target.removeEventListener("pointermove", onMove);
-      target.removeEventListener("pointerup", onEnd);
-      target.removeEventListener("pointercancel", onEnd);
-      figure.classList.remove("ficframe-editor-dragging");
-      figure.style.transform = "";
-      if (!moved) return;
-      const main = figure.ownerDocument.querySelector("main");
-      const pointerPosition = htmlVisualEditor.positionFromPointer(endEvent.clientX, main?.getBoundingClientRect());
-      const alignment = pointerPosition === "before" ? "center" : pointerPosition;
-      const currentWidth = designerShot()?.html_layout?.width || "100%";
-      const changes = { alignment };
-      if (alignment !== "center" && ["auto", "100%"].includes(currentWidth)) changes.width = "80%";
-      updateDesignerImageLayout(changes);
-    };
-    target.addEventListener("pointermove", onMove);
-    target.addEventListener("pointerup", onEnd);
-    target.addEventListener("pointercancel", onEnd);
-  });
-}
-
-function installDesignerResizeGesture(handle, figure) {
-  handle.addEventListener("pointerdown", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    selectDesignerShot(figure.dataset.shotId);
-    const main = figure.ownerDocument.querySelector("main");
-    const mainWidth = main?.getBoundingClientRect().width || 1;
-    const startX = event.clientX;
-    const startWidth = figure.getBoundingClientRect().width;
-    let nextWidth = designerShot()?.html_layout?.width || `${Math.round(startWidth / mainWidth * 100)}%`;
-    handle.setPointerCapture(event.pointerId);
-    const onMove = (moveEvent) => {
-      moveEvent.preventDefault();
-      const percentage = htmlVisualEditor.resizeWidthPercent(startWidth, moveEvent.clientX - startX, mainWidth);
-      nextWidth = `${percentage}%`;
-      figure.style.width = nextWidth;
-      el.htmlDesignerWidthRange.value = percentage;
-      el.htmlDesignerWidthValue.value = nextWidth;
-      el.htmlDesignerWidthInput.value = nextWidth;
-    };
-    const onEnd = (endEvent) => {
-      endEvent.preventDefault();
-      handle.removeEventListener("pointermove", onMove);
-      handle.removeEventListener("pointerup", onEnd);
-      handle.removeEventListener("pointercancel", onEnd);
-      if (handle.hasPointerCapture(endEvent.pointerId)) handle.releasePointerCapture(endEvent.pointerId);
-      updateDesignerImageLayout({ width: nextWidth });
-    };
-    handle.addEventListener("pointermove", onMove);
-    handle.addEventListener("pointerup", onEnd);
-    handle.addEventListener("pointercancel", onEnd);
-  });
-}
-
-async function refreshHtmlDesignerPreview({ persist = true } = {}) {
-  if (!state.runId) return;
-  setBusy(el.htmlDesignerRefreshBtn, true);
-  try {
-    if (persist) await persistStoryboard({ quiet: true });
-    const data = await api(`/api/export/${encodeURIComponent(state.runId)}`);
-    el.htmlDesignerFrame.onload = installDesignerDocument;
-    el.htmlDesignerFrame.src = `${data.export_html_url || data.html_url}?preview=${Date.now()}`;
-    el.htmlDesignerStatus.textContent = "预览已更新";
-  } catch (error) {
-    el.htmlDesignerStatus.textContent = `预览失败：${error.message}`;
-  } finally {
-    setBusy(el.htmlDesignerRefreshBtn, false);
-  }
-}
-
-async function openHtmlDesigner() {
-  if (!state.runId) {
-    el.health.textContent = "请先生成或恢复一个分镜 run";
-    return;
-  }
-  saveSelectedPrompt();
-  saveShotEditor();
-  saveHtmlSettings();
-  designerSelectedShotId = state.selected?.id || state.shots.find((shot) => shot.image_url || shot.image_path)?.id || null;
-  renderDesignerSettings();
-  el.htmlDesignerDialog.showModal();
-  await refreshHtmlDesignerPreview();
-}
-
-async function saveHtmlDesigner() {
-  setBusy(el.htmlDesignerSaveBtn, true);
-  try {
-    readDesignerSettings();
-    await persistStoryboard({ quiet: true });
-    await refreshHtmlDesignerPreview({ persist: false });
-    el.htmlDesignerStatus.textContent = "排版已保存";
-    el.health.textContent = "HTML 可视化排版已保存到当前 run";
-  } finally {
-    setBusy(el.htmlDesignerSaveBtn, false);
-  }
+function renderVisualPromptSnapshot() {
+  visualPresets.renderSnapshot();
 }
 
 function renderStoryboardVersions() {
@@ -1284,7 +598,7 @@ function currentAppearanceState(character, shot) {
 }
 
 function renderShots(preferredId = null) {
-  el.shotList.innerHTML = "";
+  el.shotList.innerHTML = state.shots.length ? "" : '<div class="empty-state"><strong>还没有分镜</strong><p>导入小说与人物资料，点击「生成分镜」开始创作。</p></div>';
   state.shots.forEach((shot, index) => {
     const row = document.createElement("div");
     row.className = "shot-row";
@@ -1308,8 +622,8 @@ function renderShots(preferredId = null) {
       <strong>${escapeHtml(shot.id)} · ${escapeHtml(shot.title)}</strong>
       <small>${escapeHtml((shot.characters || []).join("、") || "无明确角色")} · ${escapeHtml(shot.location)} · ${escapeHtml(shot.time)}</small>
       <small>${shot.image_url ? "已生成图片" : "未生成图片"}</small>
-      <small>${escapeHtml(shot.visual_goal)}</small>
-      <small>原文：${escapeHtml(shot.source_excerpt || shot.generation_description || "未绑定")}</small>
+      <small class="shot-goal">${escapeHtml(shot.visual_goal)}</small>
+      <small class="shot-source">原文：${escapeHtml(shot.source_excerpt || shot.generation_description || "未绑定")}</small>
     `;
     button.addEventListener("click", () => selectShot(index));
     row.append(checkbox, button);
@@ -1337,6 +651,9 @@ function applyCharacterResponse(data, message) {
   if (data.difference_analysis) {
     state.differenceAnalysis = data.difference_analysis;
     renderCharacters();
+  }
+  for (let panel = el.charactersBox.parentElement; panel; panel = panel.parentElement) {
+    if (panel.matches("details")) panel.open = true;
   }
   saveWorkspaceDraft();
   el.health.textContent = message;
@@ -1584,6 +901,7 @@ function renderPromptFeedbackHistory() {
 
 async function persistStoryboard({ quiet = false } = {}) {
   if (!state.runId) return;
+  await visualPresets.flush();
   saveSelectedPrompt();
   saveShotEditor();
   saveHtmlSettings();
@@ -1594,6 +912,8 @@ async function persistStoryboard({ quiet = false } = {}) {
   state.promptFeedbackMessages = data.prompt_feedback_messages || state.promptFeedbackMessages;
   state.storyboardVersions = data.storyboard_versions || state.storyboardVersions;
   state.htmlSettings = workspaceState.createHtmlSettings(data.html_settings || state.htmlSettings);
+  state.visualPresetDefaults = data.visual_presets || state.visualPresetDefaults;
+  state.selected = null;
   renderHtmlSettings();
   renderShots(preferredId);
   renderFeedbackHistory();
@@ -1749,6 +1069,7 @@ async function runPipeline() {
   }
   setBusy(el.runBtn, true);
   try {
+    await visualPresets.flush();
     const form = new FormData();
     form.append("novel", el.novelFile.files[0]);
     form.append("characters", el.charactersFile.files[0]);
@@ -1762,6 +1083,8 @@ async function runPipeline() {
     form.append("use_llm", el.useLlm.checked ? "true" : "false");
     form.append("llm_profile", el.llmProfile?.value || "fast");
     form.append("llm_concurrency", el.llmConcurrency?.value || "3");
+    form.append("style_id", state.visualPresetDefaults.style_id || "");
+    form.append("style_reference_mode", state.visualPresetDefaults.style_reference_mode || "text");
     const { created } = await taskMonitor.submit("/api/pipeline/task", { method: "POST", body: form });
     const data = await api(`/api/runs/${encodeURIComponent(created.run_id)}`);
     state.runId = data.run_id;
@@ -1771,6 +1094,7 @@ async function runPipeline() {
     state.storyboardMessages = data.storyboard_messages || [];
     state.promptFeedbackMessages = data.prompt_feedback_messages || [];
     state.storyboardVersions = data.storyboard_versions || {};
+    state.visualPresetDefaults = data.visual_presets || { style_id: null, composition_id: null };
     state.htmlSettings = workspaceState.createHtmlSettings(data.html_settings);
     const partitioned = partitionCharacters(data.characters || []);
     state.autoCharacters = partitioned.auto;
@@ -1785,94 +1109,13 @@ async function runPipeline() {
     renderPromptFeedbackHistory();
     renderHtmlSettings();
     renderShots(state.selected?.id);
+    visualPresets.renderSelectors();
     saveWorkspaceDraft();
     el.health.textContent = `已生成 ${state.shots.length} 张分镜`;
   } catch (error) {
     el.health.textContent = error.message;
   } finally {
     setBusy(el.runBtn, false);
-  }
-}
-
-async function exportMarkdown() {
-  if (!state.runId) return;
-  saveSelectedPrompt();
-  saveCharacterEditor();
-  try {
-    await persistStoryboard({ quiet: true });
-    const data = await api(`/api/export/${state.runId}`);
-    const response = await fetch(data.export_markdown_url || data.markdown_url);
-    const markdown = await response.text();
-    const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `illustrated_novel-${state.runId}.md`;
-    link.click();
-    URL.revokeObjectURL(url);
-    el.health.textContent = "配图小说 MD 已导出";
-    el.qaBox.textContent = `已生成目录：${data.export_dir}\n图片目录：${data.images_dir}\n图片路径相对于该 Markdown 所在目录。`;
-  } catch (error) {
-    el.health.textContent = `导出失败：${error.message}`;
-  }
-}
-
-async function exportZip() {
-  if (!state.runId) return;
-  saveSelectedPrompt();
-  saveCharacterEditor();
-  setBusy(el.exportZipBtn, true);
-  try {
-    await persistStoryboard({ quiet: true });
-    const response = await fetch(`/api/export/${encodeURIComponent(state.runId)}.zip`);
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new Error(body.detail || response.statusText);
-    }
-    const blob = await response.blob();
-    const disposition = response.headers.get("content-disposition") || "";
-    const match = disposition.match(/filename="?([^";]+)"?/);
-    const filename = match?.[1] || `illustrated_novel-${state.runId}.zip`;
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = filename;
-    link.click();
-    URL.revokeObjectURL(url);
-    el.health.textContent = "ZIP 成品包已导出";
-    el.qaBox.textContent = "ZIP 包包含 illustrated_novel.md、images/、manifest.json 和字体/主题说明。";
-  } catch (error) {
-    el.health.textContent = `ZIP 导出失败：${error.message}`;
-  } finally {
-    setBusy(el.exportZipBtn, false);
-  }
-}
-
-async function exportHtml() {
-  if (!state.runId) return;
-  saveSelectedPrompt();
-  saveShotEditor();
-  saveHtmlSettings();
-  setBusy(el.exportHtmlBtn, true);
-  try {
-    await persistStoryboard({ quiet: true });
-    const data = await api(`/api/export/${state.runId}`);
-    const response = await fetch(data.export_html_url || data.html_url);
-    if (!response.ok) throw new Error(response.statusText);
-    const htmlDocument = await response.text();
-    const blob = new Blob([htmlDocument], { type: "text/html;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `illustrated_novel-${state.runId}.html`;
-    link.click();
-    URL.revokeObjectURL(url);
-    el.health.textContent = "配图小说 HTML 已导出";
-    el.qaBox.textContent = `HTML 已生成：${data.export_dir}\nHTML 使用相对 images/ 路径；建议移动整个 export/ 目录。`;
-  } catch (error) {
-    el.health.textContent = `HTML 导出失败：${error.message}`;
-  } finally {
-    setBusy(el.exportHtmlBtn, false);
   }
 }
 
@@ -1884,20 +1127,7 @@ async function exportLogs() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ run_id: state.runId }),
     });
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new Error(body.detail || response.statusText);
-    }
-    const blob = await response.blob();
-    const disposition = response.headers.get("content-disposition") || "";
-    const match = disposition.match(/filename="?([^"]+)"?/);
-    const filename = match?.[1] || `ficframe-logs-${Date.now()}.zip`;
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = filename;
-    link.click();
-    URL.revokeObjectURL(url);
+    const filename = await htmlVisualEditor.downloadResponse(response, `ficframe-logs-${Date.now()}.zip`);
     el.health.textContent = "日志包已导出";
     el.qaBox.textContent = `已导出日志包：${filename}\n反馈 bug 时可以附带这个 zip。`;
   } catch (error) {
@@ -1921,9 +1151,6 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value ?? null));
 }
 
-function kindLabel(kind) {
-  return { llm: "LLM", image: "图片", vlm: "VLM" }[kind] || kind;
-}
 
 function togglePanel(panel, button, openText, closedText) {
   panel.hidden = !panel.hidden;
@@ -2002,84 +1229,15 @@ el.restoreRunBtn.addEventListener("click", () => restoreLatestRun().catch((error
   el.health.textContent = `恢复失败：${error.message}`;
 }));
 el.logExportBtn.addEventListener("click", exportLogs);
-el.addProviderBtn.addEventListener("click", () => {
-  syncProviderForm();
-  const source = providerTemplate(el.providerKind.value || "image");
-  state.providerConfig.sources.push(source);
-  state.selectedProviderId = source.id;
-  renderProviderList();
-  renderProviderDetail();
-});
-el.deleteProviderBtn.addEventListener("click", () => {
-  const source = findProvider();
-  if (!source) return;
-  state.providerConfig.sources = state.providerConfig.sources.filter((item) => item.id !== source.id);
-  if (state.providerConfig.active?.[source.kind] === source.id) {
-    state.providerConfig.active[source.kind] = "";
-  }
-  state.selectedProviderId = state.providerConfig.sources[0]?.id || null;
-  renderProviderList();
-  renderProviderDetail();
-});
-el.addModelBtn.addEventListener("click", () => {
-  const source = selectedProvider();
-  if (!source) return;
-  source.models.push({ nickname: "新模型", model: "" });
-  renderModelTable(source);
-});
-el.providerType.addEventListener("change", () => {
-  const source = findProvider();
-  const knownCloudDefaults = [
-    "https://api.openai.com/v1",
-    "https://api.siliconflow.cn/v1",
-    "https://ark.cn-beijing.volces.com/api/v3",
-  ];
-  if (el.providerType.value === "comfyui" && source?.provider !== "comfyui" && (!el.providerBaseUrl.value || knownCloudDefaults.includes(el.providerBaseUrl.value))) {
-    el.providerBaseUrl.value = "http://127.0.0.1:8188";
-    el.providerKey.value = "";
-  }
-  renderProviderBaseUrlField(el.providerType.value);
-});
-for (const node of [el.providerKind, el.providerType, el.providerActive, el.providerLabel, el.providerBaseUrl, el.providerKey, el.imageSteps, el.imageGuidance, el.imageBatch, el.imageSequential, el.imageResponseFormat, el.imageWatermark, el.comfyWorkflow, el.comfyNegativePrompt, el.comfyOutputNode, el.comfyPollInterval]) {
-  node.addEventListener("input", () => {
-    syncProviderForm();
-    renderProviderList();
-    el.imageOptions.hidden = findProvider()?.kind !== "image";
-    el.comfyOptions.hidden = findProvider()?.kind !== "image" || findProvider()?.provider !== "comfyui";
-  });
-  node.addEventListener("change", () => {
-    syncProviderForm();
-    renderProviderList();
-    el.imageOptions.hidden = findProvider()?.kind !== "image";
-    el.comfyOptions.hidden = findProvider()?.kind !== "image" || findProvider()?.provider !== "comfyui";
-  });
-}
-el.comfyWorkflowFile.addEventListener("change", async () => {
-  const file = el.comfyWorkflowFile.files[0];
-  if (!file) return;
-  try {
-    const data = JSON.parse(await file.text());
-    const workflow = data?.prompt && typeof data.prompt === "object" ? data.prompt : data;
-    el.comfyWorkflow.value = JSON.stringify(workflow, null, 2);
-    syncProviderForm();
-    el.providerTestResult.textContent = `已导入 ${file.name}`;
-  } catch (error) {
-    el.providerTestResult.textContent = `工作流 JSON 无效：${error.message}`;
-  }
-});
-el.saveConfigBtn.addEventListener("click", saveProviders);
-el.refreshConfigBtn.addEventListener("click", async () => {
-  await loadConfig();
-  await checkHealth();
-});
-el.testProviderBtn.addEventListener("click", testProvider);
 el.promptBox.addEventListener("input", () => {
   saveSelectedPrompt();
   scheduleWorkspaceDraftSave();
+  visualPresets.schedulePreview();
 });
 el.negativePromptBox.addEventListener("input", () => {
   saveSelectedPrompt();
   scheduleWorkspaceDraftSave();
+  visualPresets.schedulePreview();
 });
 for (const node of [el.shotTitle, el.shotLocation, el.shotTime, el.shotCharacters, el.shotMood, el.shotCamera, el.shotComposition, el.shotVisualGoal]) {
   node.addEventListener("input", () => {
@@ -2087,27 +1245,9 @@ for (const node of [el.shotTitle, el.shotLocation, el.shotTime, el.shotCharacter
     scheduleWorkspaceDraftSave();
   });
 }
-for (const node of [el.htmlImagePosition, el.htmlImageWidth, el.htmlImageCustomWidth, el.htmlImageCaption, el.htmlImageAlignment, el.htmlImageWrap]) {
-  node.addEventListener("input", () => {
-    saveHtmlLayoutEditor();
-    scheduleWorkspaceDraftSave();
-  });
-  node.addEventListener("change", () => {
-    saveHtmlLayoutEditor();
-    scheduleWorkspaceDraftSave();
-  });
-}
-for (const node of [el.htmlFontFamily, el.htmlHeadingFontFamily, el.htmlBodyFontName, el.htmlHeadingFontName, el.htmlFontSize, el.htmlLineHeight, el.htmlContentWidth, el.htmlTextAlign, el.htmlParagraphSpacing]) {
-  node.addEventListener("input", () => {
-    saveHtmlSettings();
-    scheduleWorkspaceDraftSave();
-  });
-  node.addEventListener("change", () => {
-    saveHtmlSettings();
-    scheduleWorkspaceDraftSave();
-  });
-}
-
+visualPresets.bindEvents();
+providerManager.bindEvents();
+htmlWorkspace.bindEvents();
 el.characterEditorSelect.addEventListener("change", () => {
   saveCharacterEditor();
   state.selectedCharacterIndex = Number(el.characterEditorSelect.value || 0);
@@ -2139,79 +1279,6 @@ el.imageBtn.addEventListener("click", imageWorkflow.generateCurrent);
 el.selectedImagesBtn.addEventListener("click", imageWorkflow.generateSelected);
 el.allImagesBtn.addEventListener("click", imageWorkflow.generateAll);
 el.retryFailedBtn.addEventListener("click", imageWorkflow.retryFailed);
-el.exportBtn.addEventListener("click", exportMarkdown);
-el.openHtmlDesignerBtn.addEventListener("click", () => openHtmlDesigner().catch((error) => {
-  el.health.textContent = `打开排版工作台失败：${error.message}`;
-}));
-el.exportHtmlBtn.addEventListener("click", exportHtml);
-el.exportZipBtn.addEventListener("click", exportZip);
-el.htmlDesignerRefreshBtn.addEventListener("click", () => refreshHtmlDesignerPreview());
-el.htmlDesignerSaveBtn.addEventListener("click", () => saveHtmlDesigner().catch((error) => {
-  el.htmlDesignerStatus.textContent = `保存失败：${error.message}`;
-}));
-el.htmlDesignerExportBtn.addEventListener("click", () => exportHtml());
-el.htmlDesignerCloseBtn.addEventListener("click", () => el.htmlDesignerDialog.close());
-document.querySelectorAll("[data-preview-width]").forEach((button) => {
-  button.addEventListener("click", () => {
-    el.htmlDesignerFrame.style.width = button.dataset.previewWidth;
-    document.querySelectorAll("[data-preview-width]").forEach((item) => item.classList.toggle("active", item === button));
-  });
-});
-document.querySelectorAll("[data-html-position]").forEach((button) => {
-  button.addEventListener("click", () => updateDesignerImageLayout({ position: button.dataset.htmlPosition }));
-});
-el.htmlDesignerAlignment.addEventListener("change", () => {
-  const alignment = el.htmlDesignerAlignment.value;
-  const currentWidth = designerShot()?.html_layout?.width || "100%";
-  const changes = { alignment };
-  if (alignment !== "center" && ["auto", "100%"].includes(currentWidth)) changes.width = "80%";
-  updateDesignerImageLayout(changes);
-});
-el.htmlDesignerWrap.addEventListener("change", () => {
-  const wrap = el.htmlDesignerWrap.value;
-  const currentWidth = designerShot()?.html_layout?.width || "100%";
-  const changes = { wrap };
-  if (wrap !== "none" && ["auto", "100%"].includes(currentWidth)) changes.width = "50%";
-  updateDesignerImageLayout(changes);
-});
-el.htmlDesignerWidthRange.addEventListener("input", () => {
-  const width = `${el.htmlDesignerWidthRange.value}%`;
-  el.htmlDesignerWidthValue.value = width;
-  el.htmlDesignerWidthInput.value = width;
-  updateDesignerImageLayout({ width });
-});
-el.htmlDesignerWidthInput.addEventListener("change", () => {
-  const width = el.htmlDesignerWidthInput.value.trim();
-  if (!/^\d{1,4}(?:\.\d+)?(?:%|px|rem|em|vw)$/.test(width) && width !== "auto") {
-    el.htmlDesignerStatus.textContent = "宽度格式应为 72%、420px、30rem、30em、40vw 或 auto";
-    return;
-  }
-  updateDesignerImageLayout({ width });
-});
-el.htmlDesignerCaption.addEventListener("input", () => {
-  const shot = designerShot();
-  if (!shot) return;
-  shot.html_layout = { position: "before", alignment: "center", wrap: "none", width: "100%", ...(shot.html_layout || {}), caption: el.htmlDesignerCaption.value };
-  const figure = [...(el.htmlDesignerFrame.contentDocument?.querySelectorAll("figure[data-shot-id]") || [])]
-    .find((item) => item.dataset.shotId === shot.id);
-  htmlVisualEditor.applyFigureLayout(figure, shot.html_layout);
-  syncDesignerLayoutToMainEditor(shot);
-  scheduleWorkspaceDraftSave();
-});
-for (const node of [
-  el.htmlDesignerFontFamily,
-  el.htmlDesignerHeadingFontFamily,
-  el.htmlDesignerBodyFontName,
-  el.htmlDesignerHeadingFontName,
-  el.htmlDesignerFontSize,
-  el.htmlDesignerLineHeight,
-  el.htmlDesignerContentWidth,
-  el.htmlDesignerParagraphSpacing,
-  el.htmlDesignerTextAlign,
-]) {
-  node.addEventListener("input", readDesignerSettings);
-  node.addEventListener("change", readDesignerSettings);
-}
 el.copyBtn.addEventListener("click", async () => {
   saveSelectedPrompt();
   await navigator.clipboard.writeText(el.promptBox.value);
@@ -2265,9 +1332,15 @@ el.feedbackInput.addEventListener("keydown", (event) => {
   }
 });
 
+window.FicFrameActionMenus.bind(document);
 window.addEventListener("beforeunload", saveWorkspaceDraft);
 
 renderHtmlSettings();
+renderShots();
+visualPresets.refresh().catch(() => {});
+visualPresets.refreshCapability().catch((error) => { el.imageReferenceCapability.textContent = `能力检查失败：${error.message}`; });
+visualPresets.resumeProbe().catch((error) => { el.health.textContent = `恢复多图测试失败：${error.message}`; });
+visualPresets.resume().catch((error) => { el.health.textContent = `恢复规范草稿失败：${error.message}`; });
 loadConfig().catch((error) => {
   el.health.textContent = error.message;
 });

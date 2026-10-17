@@ -4,7 +4,7 @@ import asyncio
 import io
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -17,7 +17,6 @@ from .characters import build_character_cards
 from .character_diff import analyze_character_differences
 from .comfyui import ComfyUIError, normalize_comfyui_base_url
 from .config_store import public_config, public_provider_config, read_provider_config, write_env_file, write_provider_config
-from .continuity import initial_state
 from .export import build_export_bundle
 from .io import read_text, write_json, write_text
 from .llm_pipeline import (
@@ -25,24 +24,30 @@ from .llm_pipeline import (
     extract_character_cards_with_llm_detailed,
     generate_or_revise_shot_with_llm,
     polish_shot_prompt,
-    refine_scenes_with_llm,
     respond_to_storyboard_feedback,
 )
 from .logging_utils import build_log_bundle, get_logger, redact, setup_logging
-from .models import CharacterCard, Scene, Shot, to_dict
+from .models import CharacterCard, Shot, to_dict
+from .pipeline import build_story_payload, polish_shots_with_llm
 from .providers import OpenAICompatibleProvider, ProviderError, effective_image_provider
 from . import provider_probe
 
-# 保留旧模块常量，兼容外部调用方和历史测试。
-COMFYUI_CLI_PORT = provider_probe.COMFYUI_CLI_PORT
-COMFYUI_DESKTOP_DEFAULT_PORT = provider_probe.COMFYUI_DESKTOP_DEFAULT_PORT
-COMFYUI_DESKTOP_PORT_SPAN = provider_probe.COMFYUI_DESKTOP_PORT_SPAN
 from .prompt_bank import analyze_reference_visuals, build_character_prompt_bank
-from .qa import annotate_shots
 from .render import normalize_html_settings
-from .runtime_paths import env_file, outputs_root, providers_file, resource_root, user_data_root, web_root
-from .segmenter import segment_novel
-from .storyboard import build_storyboard
+from .runtime_paths import env_file, outputs_root, providers_file, resource_root, user_data_root, visual_presets_root, web_root
+from .visual_presets import VisualPresetStore
+from .visual_preset_workflow import bind_defaults, bind_shot, bind_storyboard_shot
+from .visual_preset_routes import VisualPresetController, VisualPresetDependencies
+from .image_workflow import (
+    ImageSelectionError, ImageWorkflow, image_target_for_generation, image_url_for_path,
+    reference_image_entries, reference_regions_for_characters, strip_version_query, versioned_url_for_path,
+)
+from .payloads import (
+    available_reference_filename, bind_reference_image, dedupe_cards, parse_character_payload,
+    parse_json_list, parse_manual_characters, parse_prepared_characters, parse_reference_bindings,
+    parse_scene_payload, prompt_bank_status_text, safe_int, safe_optional_int, safe_string_dict,
+    safe_string_list, take_reference_binding,
+)
 from .storyboard_workflow import backfill_storyboard_sources, normalize_novel_text, storyboard_snapshot
 from .run_repository import RunNotFoundError, RunRepository
 from .storyboard_routes import (
@@ -58,6 +63,11 @@ from .storyboard_routes import (
 )
 from .task_manager import TaskManager, TaskReporter
 
+
+# 保留旧模块常量，兼容外部调用方和历史测试。
+COMFYUI_CLI_PORT = provider_probe.COMFYUI_CLI_PORT
+COMFYUI_DESKTOP_DEFAULT_PORT = provider_probe.COMFYUI_DESKTOP_DEFAULT_PORT
+COMFYUI_DESKTOP_PORT_SPAN = provider_probe.COMFYUI_DESKTOP_PORT_SPAN
 
 RESOURCE_ROOT = resource_root()
 ROOT = user_data_root()
@@ -83,6 +93,8 @@ def run_directory(run_id: str) -> Path:
 
 _RUN_REPOSITORIES: dict[str, RunRepository] = {}
 _TASK_MANAGERS: dict[str, TaskManager] = {}
+_VISUAL_PRESET_STORE: VisualPresetStore | None = None
+_VISUAL_TASK_MANAGERS: dict[str, TaskManager] = {}
 
 
 def get_run_repository() -> RunRepository:
@@ -104,6 +116,22 @@ def get_task_manager() -> TaskManager:
         manager = TaskManager(repository)
         _TASK_MANAGERS[key] = manager
     return manager
+
+
+def get_visual_preset_store() -> VisualPresetStore:
+    global _VISUAL_PRESET_STORE
+    root = visual_presets_root()
+    if _VISUAL_PRESET_STORE is None or _VISUAL_PRESET_STORE.root.resolve() != root.resolve():
+        _VISUAL_PRESET_STORE = VisualPresetStore(root)
+    return _VISUAL_PRESET_STORE
+
+
+def get_visual_task_manager() -> TaskManager:
+    root = get_visual_preset_store().root / "analysis-tasks"
+    key = str(root.resolve())
+    if key not in _VISUAL_TASK_MANAGERS:
+        _VISUAL_TASK_MANAGERS[key] = TaskManager(RunRepository(root))
+    return _VISUAL_TASK_MANAGERS[key]
 
 
 @app.middleware("http")
@@ -171,6 +199,11 @@ class LogBundleRequest(BaseModel):
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(WEB / "index.html")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon() -> FileResponse:
+    return FileResponse(WEB / "favicon.ico", media_type="image/vnd.microsoft.icon")
 
 
 @app.get("/api/health")
@@ -249,7 +282,10 @@ def get_task(task_id: str) -> dict[str, Any]:
     try:
         return get_task_manager().get(task_id)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="未找到该任务") from exc
+        try:
+            return get_visual_task_manager().get(task_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="未找到该任务") from exc
 
 
 @app.get("/api/runs/{run_id}/tasks")
@@ -266,7 +302,12 @@ def cancel_task(task_id: str) -> dict[str, Any]:
     try:
         return get_task_manager().cancel(task_id)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="未找到该任务") from exc
+        try:
+            return get_visual_task_manager().cancel(task_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="未找到该任务") from exc
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -548,6 +589,8 @@ async def pipeline(
     llm_profile: Annotated[str, Form()] = "fast",
     llm_concurrency: Annotated[int, Form()] = 3,
     run_id: Annotated[str | None, Form()] = None,
+    style_id: Annotated[str | None, Form()] = None,
+    style_reference_mode: Annotated[str | None, Form()] = None,
 ) -> dict[str, Any]:
     run_id = run_id or str(int(time.time()))
     repository = get_run_repository()
@@ -561,6 +604,12 @@ async def pipeline(
     if not character_text.strip():
         logger.warning("pipeline rejected empty characters filename=%s", characters.filename)
         raise HTTPException(status_code=400, detail="人设文件为空，请重新选择包含角色设定的 Markdown")
+    store = get_visual_preset_store()
+    try:
+        visual_defaults = bind_defaults(store, {"style_id": style_id, "style_reference_mode": style_reference_mode},
+                                       {"composition_id": None})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     logger.info(
         "pipeline started run_id=%s novel=%s characters=%s reference_images=%s max_shots=%s use_llm=%s llm_profile=%s llm_concurrency=%s",
         run_id,
@@ -606,55 +655,23 @@ async def pipeline(
             binding = take_reference_binding(bindings, original_filename)
             bind_reference_image(cards, original_filename, url, binding)
             logger.info("reference image saved run_id=%s filename=%s stored_filename=%s binding=%s", run_id, original_filename, filename, redact(binding))
-    vlm_provider = OpenAICompatibleProvider()
-    if reference_images and vlm_provider.config.vlm.api_key:
-        analyze_reference_visuals(cards, run_dir, vlm_provider, purpose=f"pipeline:{run_id}:vlm_reference_visuals")
-    scenes = segment_novel(novel_text, cards)
-    logger.info("pipeline local segmentation completed run_id=%s scene_count=%s novel_text_length=%s", run_id, len(scenes), len(novel_text))
-    if full_llm:
-        scenes = refine_scenes_with_llm(scenes, cards, provider, purpose=f"pipeline:{run_id}:refine_scenes")
-        logger.info("pipeline llm scene refinement completed run_id=%s scene_count=%s", run_id, len(scenes))
-    elif fast_llm:
-        logger.info("pipeline fast llm skipped scene refinement run_id=%s", run_id)
-    prompt_bank_result = build_character_prompt_bank(cards, scenes, provider if full_llm else None, purpose=f"pipeline:{run_id}:prompt_bank")
-    logger.info(
-        "pipeline prompt bank completed run_id=%s requested_mode=%s actual_mode=%s llm_error=%s reference_visual_count=%s identity_prompt_count=%s appearance_state_count=%s",
-        run_id,
-        "llm" if full_llm else "local",
-        prompt_bank_result.mode,
-        prompt_bank_result.llm_error,
-        sum(len(card.reference_visuals) for card in cards),
-        sum(1 for card in cards if card.identity_prompt),
-        sum(len(card.appearance_states) for card in cards),
-    )
-    difference_analysis = analyze_character_differences(cards, provider if full_llm else None, purpose=f"pipeline:{run_id}:character_diff")
-    state = initial_state(cards)
-    shots, state = build_storyboard(scenes, cards, state, max_shots=max_shots, difference_analysis=difference_analysis)
-    for shot in shots:
-        if shot.source_start is not None and shot.source_end is not None:
-            shot.source_text = novel_text[shot.source_start:shot.source_end]
-    annotate_shots(shots, cards)
-    if full_llm:
-        shots = polish_shots_with_llm(shots, cards, provider, llm_concurrency, run_id=run_id)
-    elif fast_llm:
-        for shot in shots:
-            shot.qa_notes.append("快速 LLM 模式：已跳过逐张 Prompt 精修，可在右侧手动编辑或使用独立 LLM 按钮增强角色。")
-
+    if reference_images:
+        vlm_provider = provider or OpenAICompatibleProvider()
+        if vlm_provider.config.vlm.api_key:
+            analyze_reference_visuals(cards, run_dir, vlm_provider, purpose=f"pipeline:{run_id}:vlm_reference_visuals")
     payload = {
+        **build_story_payload(novel_text, cards, max_shots=max_shots, provider=provider if full_llm else None,
+                              run_id=run_id, llm_concurrency=llm_concurrency, fast_llm=fast_llm,
+                              visual_store=store, visual_defaults=visual_defaults),
         "run_id": run_id,
-        "characters": to_dict(cards),
-        "difference_analysis": difference_analysis,
-        "scenes": to_dict(scenes),
-        "shots": to_dict(shots),
-        "continuity": to_dict(state),
-        "storyboard_messages": [],
-        "prompt_feedback_messages": [],
-        "storyboard_versions": {},
+        "storyboard_messages": [], "prompt_feedback_messages": [], "storyboard_versions": {},
+        "visual_presets": visual_defaults,
         "html_settings": normalize_html_settings(),
-        "next_shot_number": len(shots) + 1,
     }
+    payload["shots"] = [to_dict(bind_shot(store, Shot(**item), visual_defaults)) for item in payload["shots"]]
+    payload["next_shot_number"] = len(payload["shots"]) + 1
     repository.save(run_id, payload)
-    logger.info("pipeline completed run_id=%s character_count=%s scene_count=%s shot_count=%s", run_id, len(cards), len(scenes), len(shots))
+    logger.info("pipeline completed run_id=%s character_count=%s scene_count=%s shot_count=%s", run_id, len(cards), len(payload["scenes"]), len(payload["shots"]))
     return payload
 
 
@@ -670,6 +687,8 @@ async def create_pipeline_task(
     use_llm: Annotated[bool, Form()] = False,
     llm_profile: Annotated[str, Form()] = "fast",
     llm_concurrency: Annotated[int, Form()] = 3,
+    style_id: Annotated[str | None, Form()] = None,
+    style_reference_mode: Annotated[str | None, Form()] = None,
 ) -> dict[str, Any]:
     """读取上传内容后立即返回，后台任务不再依赖请求生命周期。"""
     run_id = f"{int(time.time())}_{time.time_ns() % 1_000_000}"
@@ -689,6 +708,7 @@ async def create_pipeline_task(
         result = asyncio.run(pipeline(
             novel_upload, character_upload, refs, reference_bindings, manual_characters,
             prepared_characters, max_shots, use_llm, llm_profile, llm_concurrency, run_id,
+            style_id=style_id, style_reference_mode=style_reference_mode,
         ))
         reporter.update("保存 run", 95, "分镜已生成，正在刷新持久化投影")
         return {"run_id": result["run_id"], "shot_count": len(result.get("shots", []))}
@@ -776,10 +796,11 @@ def get_storyboard_controller() -> StoryboardController:
             repository=get_run_repository,
             require_llm_provider=require_llm_provider,
             parse_character_payload=parse_character_payload,
-            generate_or_revise_shot=lambda *args, **kwargs: generate_or_revise_shot_with_llm(*args, **kwargs),
+            generate_or_revise_shot=lambda *args, **kwargs: generate_or_revise_shot_with_llm(*args, **kwargs, visual_store=get_visual_preset_store()),
             respond_to_feedback=lambda *args, **kwargs: respond_to_storyboard_feedback(*args, **kwargs),
-            polish_prompt=lambda *args, **kwargs: polish_shot_prompt(*args, **kwargs),
+            polish_prompt=lambda *args, **kwargs: polish_shot_prompt(*args, **kwargs, visual_store=get_visual_preset_store()),
             logger=logger,
+            bind_visual_presets=lambda shot, payload, old: bind_storyboard_shot(get_visual_preset_store(), shot, payload, old),
         )
     )
 
@@ -791,245 +812,45 @@ def require_llm_provider() -> OpenAICompatibleProvider:
     return provider
 
 
-def parse_manual_characters(raw: str | None) -> list[CharacterCard]:
-    if not raw:
-        return []
+def get_image_workflow() -> ImageWorkflow:
+    return ImageWorkflow(get_run_repository(), get_visual_preset_store(), reference_image_entries_for_shot)
+
+
+def visual_prompt_for_generation(run_id: str, shot: Shot) -> tuple[str, str, dict[str, Any]]:
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(data, list):
-        return []
-    cards: list[CharacterCard] = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "").strip()
-        if not name:
-            continue
-        source_text = str(item.get("source_text") or item.get("role") or "").strip()
-        cards.append(
-            CharacterCard(
-                name=name,
-                aliases=safe_string_list(item.get("aliases")),
-                role=str(item.get("role") or "").strip(),
-                source_text=source_text,
-                manual=True,
-                visual_traits=safe_string_list(item.get("visual_traits")),
-                personality_traits=safe_string_list(item.get("personality_traits")),
-                fixed_traits=safe_string_list(item.get("fixed_traits")),
-                variable_states=safe_string_dict(item.get("variable_states")),
-                relationships=safe_string_dict(item.get("relationships")),
-                reference_images=safe_string_list(item.get("reference_images")),
-                reference_visuals=item.get("reference_visuals") if isinstance(item.get("reference_visuals"), list) else [],
-                identity_prompt=str(item.get("identity_prompt") or "").strip(),
-                negative_identity_prompt=str(item.get("negative_identity_prompt") or "").strip(),
-                appearance_states=item.get("appearance_states") if isinstance(item.get("appearance_states"), list) else [],
-                prompt_cn=str(item.get("prompt_cn") or "").strip(),
-                prompt_en=str(item.get("prompt_en") or "").strip(),
-            )
-        )
-    return cards
+        return get_image_workflow().visual_prompt(run_id, shot)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
-def polish_shots_with_llm(
-    shots: list[Shot],
-    cards: list[CharacterCard],
-    provider: OpenAICompatibleProvider,
-    concurrency: int,
-    run_id: str,
-) -> list[Shot]:
-    workers = max(1, min(8, safe_int(concurrency, 3)))
-    if workers <= 1 or len(shots) <= 1:
-        logger.info("pipeline llm shot polish started mode=serial shot_count=%s", len(shots))
-        return [polish_shot_prompt(shot, cards, provider, purpose=f"pipeline:{run_id}:polish_shot:{shot.id}") for shot in shots]
-    logger.info("pipeline llm shot polish started mode=concurrent shot_count=%s workers=%s", len(shots), workers)
-
-    def polish_one(shot: Shot) -> Shot:
-        try:
-            return polish_shot_prompt(shot, cards, provider, purpose=f"pipeline:{run_id}:polish_shot:{shot.id}")
-        except Exception as exc:  # 单条数据异常时保留其余分镜，避免整组结果被丢弃。
-            logger.warning("pipeline llm shot polish item failed shot_id=%s error=%s", shot.id, exc)
-            shot.qa_notes.append(f"LLM 分镜精修失败，已保留本地 prompt：{exc}")
-            return shot
-
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        polished = list(executor.map(polish_one, shots))
-    logger.info("pipeline llm shot polish completed shot_count=%s workers=%s", len(polished), workers)
-    return polished
-
-
-def parse_prepared_characters(raw: str | None) -> list[CharacterCard]:
-    if not raw:
-        return []
+def record_visual_generation(run_id: str, shot: Shot, visual_snapshot: dict[str, Any]) -> None:
+    """Legacy Python entrypoint; image persistence now commits this atomically."""
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(data, list):
-        return []
-    return parse_character_payload(data)
+        with get_run_repository().transaction(run_id, render=False) as payload:
+            for item in payload.get("shots", []):
+                if item.get("id") == shot.id:
+                    item["last_generation_visual_snapshot"] = deepcopy(visual_snapshot)
+                    break
+    except RunNotFoundError:
+        pass
 
 
-def parse_json_list(raw: str | None) -> list[dict[str, Any]]:
-    if not raw:
-        return []
+def image_generation_inputs(provider: Any, run_id: str, shot: Shot, size: str):
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return []
-    return data if isinstance(data, list) else []
-
-
-def prompt_bank_status_text(result: Any, character_count: int) -> str:
-    if result.mode == "vlm_llm_reviewed":
-        return f"已由 VLM 提取并经 LLM 审查生成 {character_count} 个角色 Prompt Bank"
-    if result.mode == "vlm":
-        return f"已由 VLM 参考图结果生成 {character_count} 个角色 Prompt Bank"
-    if result.mode == "llm":
-        return f"LLM 已生成 {character_count} 个角色 Prompt Bank"
-    if result.mode == "llm_guarded":
-        return f"LLM 已生成 {character_count} 个角色 Prompt Bank，但{result.llm_error}"
-    detail = f"：{result.llm_error}" if result.llm_error else ""
-    return f"LLM 生成 Prompt Bank 失败{detail}，已改用本地规则生成 {character_count} 个角色 Prompt Bank"
-
-
-def parse_character_payload(items: list[dict[str, Any]]) -> list[CharacterCard]:
-    cards: list[CharacterCard] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "").strip()
-        if not name:
-            continue
-        cards.append(
-            CharacterCard(
-                name=name,
-                aliases=safe_string_list(item.get("aliases")),
-                role=str(item.get("role") or "").strip(),
-                source_text=str(item.get("source_text") or "").strip(),
-                manual=bool(item.get("manual", False)),
-                visual_traits=safe_string_list(item.get("visual_traits")),
-                personality_traits=safe_string_list(item.get("personality_traits")),
-                fixed_traits=safe_string_list(item.get("fixed_traits")),
-                variable_states=safe_string_dict(item.get("variable_states")),
-                relationships=safe_string_dict(item.get("relationships")),
-                reference_images=safe_string_list(item.get("reference_images")),
-                reference_visuals=item.get("reference_visuals") if isinstance(item.get("reference_visuals"), list) else [],
-                identity_prompt=str(item.get("identity_prompt") or "").strip(),
-                negative_identity_prompt=str(item.get("negative_identity_prompt") or "").strip(),
-                appearance_states=item.get("appearance_states") if isinstance(item.get("appearance_states"), list) else [],
-                prompt_cn=str(item.get("prompt_cn") or "").strip(),
-                prompt_en=str(item.get("prompt_en") or "").strip(),
-            )
-        )
-    return dedupe_cards(cards)
-
-
-def parse_scene_payload(items: list[dict[str, Any]]) -> list[Scene]:
-    scenes: list[Scene] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        scenes.append(
-            Scene(
-                id=str(item.get("id") or ""),
-                chapter=str(item.get("chapter") or ""),
-                index=safe_int(item.get("index"), len(scenes) + 1),
-                text=str(item.get("text") or ""),
-                summary=str(item.get("summary") or ""),
-                characters=safe_string_list(item.get("characters")),
-                location=str(item.get("location") or ""),
-                time=str(item.get("time") or ""),
-                mood=safe_string_list(item.get("mood")),
-                visual_type=str(item.get("visual_type") or ""),
-                visual_priority=safe_int(item.get("visual_priority"), 1),
-                source_start=safe_optional_int(item.get("source_start")),
-                source_end=safe_optional_int(item.get("source_end")),
-            )
-        )
-    return scenes
-
-
-def safe_int(value: object, fallback: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return fallback
-
-
-def safe_optional_int(value: object) -> int | None:
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def safe_string_list(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]
-
-
-def safe_string_dict(value: object) -> dict[str, str]:
-    if not isinstance(value, dict):
-        return {}
-    return {str(key).strip(): str(item).strip() for key, item in value.items() if str(key).strip() and str(item).strip()}
-
-
-def dedupe_cards(cards: list[CharacterCard]) -> list[CharacterCard]:
-    unique: list[CharacterCard] = []
-    seen: set[str] = set()
-    for card in cards:
-        if card.name in seen:
-            continue
-        seen.add(card.name)
-        unique.append(card)
-    return unique
+        return get_image_workflow().inputs(provider, run_id, shot, size)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/api/images")
 def generate_image(request: ImageRequest) -> dict[str, Any]:
-    shot = Shot(**request.shot)
-    provider = OpenAICompatibleProvider()
-    run_dir = run_directory(request.run_id)
-    current = current_shot_image(request.run_id, shot.id)
-    target = image_target_for_generation(run_dir, shot.id, bool(current))
-    if current and not request.overwrite:
-        image_url = str(current.get("image_url") or clean_image_url(request.run_id, shot.id))
-        logger.info("image generation skipped existing run_id=%s shot_id=%s path=%s", request.run_id, shot.id, target)
-        return {"image_path": current.get("image_path"), "image_url": image_url, "skipped": True, "activated": True}
     try:
-        reference_entries = reference_image_entries_for_shot(request.run_id, shot)
-        reference_names = [name for name, _ in reference_entries]
-        reference_groups = [group for _, group in reference_entries]
-        references = [path for group in reference_groups for path in group]
-        logger.info("image generation started run_id=%s shot_id=%s size=%s reference_count=%s", request.run_id, shot.id, request.size, len(references))
-        provider.image(
-            shot.positive_prompt,
-            target,
-            size=request.size,
-            negative_prompt=shot.negative_prompt,
-            reference_images=references,
-            reference_image_groups=reference_groups,
-            reference_regions=reference_regions_for_characters(shot, reference_names),
-            regional_guidance=shot.regional_guidance,
-            purpose=f"image:single:{request.run_id}:{shot.id}",
+        return get_image_workflow().generate_single(
+            OpenAICompatibleProvider(), request.run_id, Shot(**request.shot),
+            size=request.size, overwrite=request.overwrite, activate=request.activate,
         )
-    except ProviderError as exc:
-        logger.warning("image generation failed run_id=%s shot_id=%s error=%s", request.run_id, shot.id, exc)
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    image_url = image_url_for_path(request.run_id, target)
-    activate = request.activate if request.activate is not None else not bool(current)
-    payload = update_shot_image(request.run_id, shot.id, str(target), image_url, activate=activate)
-    logger.info("image generation completed run_id=%s shot_id=%s path=%s activated=%s", request.run_id, shot.id, target, activate)
-    return {
-        "image_path": str(target),
-        "image_url": versioned_url_for_path(image_url, target),
-        "raw_image_url": image_url,
-        "activated": activate,
-        "image_versions": payload.get("image_versions", []),
-    }
+    except (ValueError, ProviderError) as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/api/images/version")
@@ -1064,6 +885,7 @@ def _generate_all_images(request: dict[str, Any], reporter: TaskReporter | None 
     skip_existing = bool(request.get("skip_existing", True))
     shots = [Shot(**shot) for shot in request.get("shots", [])]
     results = []
+    reference_error = ""
     provider = OpenAICompatibleProvider()
     logger.info("batch image generation started run_id=%s shot_count=%s size=%s retry_count=%s skip_existing=%s", run_id, len(shots), size, retry_count, skip_existing)
     total = max(1, len(shots))
@@ -1085,8 +907,20 @@ def _generate_all_images(request: dict[str, Any], reporter: TaskReporter | None 
             )
             logger.info("batch image item skipped existing run_id=%s shot_id=%s", run_id, shot.id)
             continue
-        target = image_target_for_generation(run_dir, shot.id, bool(current))
-        result = generate_batch_image_item(provider, run_id, shot, target, size, retry_count, activate=not bool(current))
+        if reference_error:
+            results.append({"shot_id": shot.id, "ok": False, "attempts": 0,
+                            "error": f"本批次已停止：{reference_error}"})
+            continue
+        try:
+            target = image_target_for_generation(run_dir, shot.id, bool(current))
+            result = generate_batch_image_item(provider, run_id, shot, target, size, retry_count, activate=not bool(current))
+        except (HTTPException, ValueError) as exc:
+            # A stale selection must not discard successful results of other shots.
+            result = {"shot_id": shot.id, "ok": False, "attempts": 0,
+                      "error": str(exc.detail if isinstance(exc, HTTPException) else exc)}
+        if result.get("reference_rejected"):
+            # Stop this batch on an explicit rejection; a later request can retry directly.
+            reference_error = result["error"]
         results.append(result)
     logger.info("batch image generation completed run_id=%s ok_count=%s total=%s", run_id, len([item for item in results if item["ok"]]), len(results))
     write_json(run_dir / "image_results.json", {"run_id": run_id, "size": size, "retry_count": retry_count, "skip_existing": skip_existing, "results": results})
@@ -1109,51 +943,10 @@ def create_batch_image_task(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def generate_batch_image_item(
-    provider: OpenAICompatibleProvider,
-    run_id: str,
-    shot: Shot,
-    target: Path,
-    size: str,
-    retry_count: int,
-    activate: bool,
+    provider: OpenAICompatibleProvider, run_id: str, shot: Shot, target: Path,
+    size: str, retry_count: int, activate: bool,
 ) -> dict[str, Any]:
-    reference_entries = reference_image_entries_for_shot(run_id, shot)
-    reference_names = [name for name, _ in reference_entries]
-    reference_groups = [group for _, group in reference_entries]
-    references = [path for group in reference_groups for path in group]
-    last_error = ""
-    for attempt in range(retry_count + 1):
-        try:
-            provider.image(
-                shot.positive_prompt,
-                target,
-                size=size,
-                negative_prompt=shot.negative_prompt,
-                reference_images=references,
-                reference_image_groups=reference_groups,
-                reference_regions=reference_regions_for_characters(shot, reference_names),
-                regional_guidance=shot.regional_guidance,
-                purpose=f"image:batch:{run_id}:{shot.id}:attempt{attempt + 1}",
-            )
-            image_url = image_url_for_path(run_id, target)
-            payload = update_shot_image(run_id, shot.id, str(target), image_url, activate=activate)
-            logger.info("batch image item completed run_id=%s shot_id=%s reference_count=%s attempt=%s", run_id, shot.id, len(references), attempt + 1)
-            return {
-                "shot_id": shot.id,
-                "ok": True,
-                "attempts": attempt + 1,
-                "image_path": str(target),
-                "image_url": versioned_url_for_path(image_url, target),
-                "raw_image_url": image_url,
-                "activated": activate,
-                "image_versions": payload.get("image_versions", []),
-            }
-        except ProviderError as exc:
-            last_error = str(exc)
-            logger.warning("batch image item failed run_id=%s shot_id=%s attempt=%s error=%s", run_id, shot.id, attempt + 1, exc)
-            if attempt < retry_count:
-                time.sleep(min(2 * (attempt + 1), 6))
-    return {"shot_id": shot.id, "ok": False, "attempts": retry_count + 1, "error": last_error}
+    return get_image_workflow().generate_item(provider, run_id, shot, target, size, retry_count, activate)
 
 
 @app.get("/api/export/{run_id}.md", response_class=PlainTextResponse)
@@ -1237,77 +1030,23 @@ def build_exported_novel(run_id: str) -> dict[str, Any]:
 
 
 def current_shot_image(run_id: str, shot_id: str) -> dict[str, Any] | None:
-    payload = get_run_repository().load(run_id, required=False)
-    for shot in payload.get("shots", []):
-        if shot.get("id") == shot_id:
-            if shot.get("image_url") or shot.get("image_path"):
-                return {"image_url": shot.get("image_url"), "image_path": shot.get("image_path")}
-    return None
+    return get_image_workflow().current_image(run_id, shot_id)
 
 
-def image_target_for_generation(run_dir: Path, shot_id: str, has_current: bool) -> Path:
-    images_dir = run_dir / "images"
-    if not has_current:
-        return images_dir / f"{shot_id}.png"
-    return images_dir / f"{shot_id}_{int(time.time() * 1000)}.png"
-
-
-def image_url_for_path(run_id: str, path: Path) -> str:
-    return f"/runs/{run_id}/images/{path.name}"
-
-
-def versioned_url_for_path(image_url: str, path: Path) -> str:
-    version = int(path.stat().st_mtime_ns) if path.exists() else int(time.time_ns())
-    return f"{image_url}?v={version}"
-
-
-def update_shot_image(run_id: str, shot_id: str, image_path: str, image_url: str, activate: bool = True) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    try:
-        with get_run_repository().transaction(run_id) as payload:
-            for shot in payload.get("shots", []):
-                if shot.get("id") != shot_id:
-                    continue
-                versions = shot.setdefault("image_versions", [])
-                existing_url = shot.get("image_url")
-                existing_path = shot.get("image_path")
-                if existing_url and existing_path and not any(item.get("image_url") == existing_url for item in versions if isinstance(item, dict)):
-                    versions.append({
-                        "image_path": existing_path,
-                        "image_url": existing_url,
-                        "created_at": int(Path(str(existing_path)).stat().st_mtime) if Path(str(existing_path)).exists() else int(time.time()),
-                    })
-                if not any(item.get("image_url") == image_url for item in versions if isinstance(item, dict)):
-                    versions.append({"image_path": image_path, "image_url": image_url, "created_at": int(time.time())})
-                if activate:
-                    shot["image_path"] = image_path
-                    shot["image_url"] = image_url
-                result = {"shot_id": shot_id, "image_path": shot.get("image_path"), "image_url": shot.get("image_url"), "image_versions": versions}
-    except RunNotFoundError:
-        return {}
-    return result
+def update_shot_image(
+    run_id: str, shot_id: str, image_path: str, image_url: str,
+    activate: bool = True, visual_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return get_image_workflow().update_image(run_id, shot_id, image_path, image_url, activate, visual_snapshot)
 
 
 def activate_shot_image(run_id: str, shot_id: str, image_url: str) -> dict[str, Any]:
     try:
-        with get_run_repository().transaction(run_id) as payload:
-            for shot in payload.get("shots", []):
-                if shot.get("id") != shot_id:
-                    continue
-                versions = shot.get("image_versions", [])
-                for version in versions:
-                    if isinstance(version, dict) and strip_version_query(str(version.get("image_url") or "")) == strip_version_query(image_url):
-                        shot["image_url"] = version.get("image_url")
-                        shot["image_path"] = version.get("image_path")
-                        return {"shot_id": shot_id, "image_path": shot.get("image_path"), "image_url": versioned_url_for_path(str(shot.get("image_url")), Path(str(shot.get("image_path")))), "raw_image_url": shot.get("image_url"), "image_versions": versions}
-                raise HTTPException(status_code=404, detail="未找到该图片版本")
+        return get_image_workflow().activate_version(run_id, shot_id, image_url)
     except RunNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="run 不存在") from exc
-    raise HTTPException(status_code=404, detail="未找到该分镜")
-
-
-def strip_version_query(url: str) -> str:
-    return url.split("?", 1)[0]
+        raise HTTPException(404, "run 不存在") from exc
+    except ImageSelectionError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 def clean_image_url(run_id: str, shot_id: str) -> str:
@@ -1315,35 +1054,11 @@ def clean_image_url(run_id: str, shot_id: str) -> str:
 
 
 def versioned_image_url(run_id: str, shot_id: str, target: Path) -> str:
-    version = int(target.stat().st_mtime_ns) if target.exists() else int(time.time_ns())
-    return f"{clean_image_url(run_id, shot_id)}?v={version}"
+    return versioned_url_for_path(clean_image_url(run_id, shot_id), target)
 
 
 def reference_image_entries_for_shot(run_id: str, shot: Shot) -> list[tuple[str, list[Path]]]:
-    run_dir = run_directory(run_id)
-    payload = get_run_repository().load(run_id, required=False)
-    characters = {
-        str(character.get("name")): character
-        for character in payload.get("characters", [])
-        if isinstance(character, dict) and character.get("name")
-    }
-    entries: list[tuple[str, list[Path]]] = []
-    for character_name in dict.fromkeys(shot.characters):
-        character = characters.get(character_name)
-        if not character:
-            continue
-        paths: list[Path] = []
-        for reference in character.get("reference_images", []):
-            url = str(reference).split(" (", 1)[0]
-            prefix = f"/runs/{run_id}/"
-            if url.startswith(prefix):
-                local_path = (run_dir / url.removeprefix(prefix)).resolve()
-                if run_dir.resolve() in local_path.parents and local_path.exists():
-                    paths.append(local_path)
-        unique_paths = list(dict.fromkeys(paths))
-        if unique_paths:
-            entries.append((character_name, unique_paths))
-    return entries
+    return reference_image_entries(get_run_repository(), run_id, shot)
 
 
 def reference_image_groups_for_shot(run_id: str, shot: Shot) -> list[list[Path]]:
@@ -1352,82 +1067,6 @@ def reference_image_groups_for_shot(run_id: str, shot: Shot) -> list[list[Path]]
 
 def reference_paths_for_shot(run_id: str, shot: Shot) -> list[Path]:
     return [path for group in reference_image_groups_for_shot(run_id, shot) for path in group]
-
-
-def reference_regions_for_characters(shot: Shot, character_names: list[str]) -> list[list[float] | None]:
-    by_name = {
-        str(item.get("character")): item.get("region")
-        for item in shot.character_layout
-        if isinstance(item, dict) and item.get("character")
-    }
-    return [by_name.get(name) if isinstance(by_name.get(name), list) else None for name in character_names]
-
-
-def parse_reference_bindings(raw: str | None) -> dict[str, list[dict[str, str]]]:
-    if not raw:
-        return {}
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    if not isinstance(data, list):
-        return {}
-    result: dict[str, list[dict[str, str]]] = {}
-    for item in data:
-        if isinstance(item, dict) and item.get("filename"):
-            filename = Path(str(item["filename"])).name
-            binding = {str(key): str(value) for key, value in item.items() if value is not None}
-            result.setdefault(filename, []).append(binding)
-    return result
-
-
-def take_reference_binding(
-    bindings: dict[str, list[dict[str, str]]],
-    filename: str,
-) -> dict[str, str]:
-    queue = bindings.get(Path(filename).name, [])
-    return queue.pop(0) if queue else {}
-
-
-def available_reference_filename(directory: Path, filename: str) -> str:
-    safe_name = Path(filename).name or "reference.png"
-    candidate = directory / safe_name
-    if not candidate.exists():
-        return safe_name
-    stem = Path(safe_name).stem or "reference"
-    suffix = Path(safe_name).suffix
-    index = 2
-    while True:
-        unique_name = f"{stem}_{index}{suffix}"
-        if not (directory / unique_name).exists():
-            return unique_name
-        index += 1
-
-
-def bind_reference_image(cards: list[Any], filename: str, url: str, binding: dict[str, str]) -> None:
-    enabled = binding.get("enabled", "true").lower() != "false"
-    if not enabled:
-        return
-    target_name = binding.get("character", "").strip()
-    ref_type = binding.get("type", "").strip()
-    note = binding.get("note", "").strip()
-    value = url
-    if ref_type or note:
-        meta = "；".join(item for item in [ref_type, note] if item)
-        value = f"{url} ({meta})"
-    if target_name:
-        for card in cards:
-            if card.name == target_name:
-                card.reference_images.append(value)
-                return
-    stem = Path(filename).stem.lower()
-    for card in cards:
-        names = [card.name, *card.aliases]
-        if any(name and name.lower() in stem for name in names):
-            card.reference_images.append(value)
-            return
-    if len(cards) == 1:
-        cards[0].reference_images.append(value)
 
 
 def hydrate_provider_secret(source: dict[str, Any]) -> dict[str, Any]:
@@ -1447,3 +1086,10 @@ def hydrate_provider_secret(source: dict[str, Any]) -> dict[str, Any]:
 # 上方保留的函数为现有调用方和测试提供稳定的 Python API。
 _storyboard_http_controller = get_storyboard_controller()
 app.include_router(_storyboard_http_controller.router)
+app.include_router(VisualPresetController(VisualPresetDependencies(
+    store=lambda: get_visual_preset_store(),
+    repository=lambda: get_run_repository(),
+    task_manager=lambda: get_visual_task_manager(),
+    provider=lambda: OpenAICompatibleProvider(),
+    reference_entries=lambda run_id, shot: reference_image_entries_for_shot(run_id, shot),
+)).router)

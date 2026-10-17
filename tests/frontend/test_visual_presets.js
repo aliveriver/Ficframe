@@ -1,0 +1,412 @@
+const assert = require("node:assert/strict");
+const test = require("node:test");
+global.window = global;
+require("../../web/visual_presets.js");
+require("../../web/task_monitor.js");
+
+function fixture({ api = async () => ({ presets: [] }), taskMonitor, initial = {}, enabledKinds = ["style", "composition"] } = {}) {
+  const nodes = new Map();
+  const elements = new Proxy({}, { get(_, key) {
+    if (!nodes.has(key)) nodes.set(key, {
+      value: "", textContent: "", innerHTML: "", disabled: false, files: [], open: false,
+      listeners: {}, querySelectorAll: () => [],
+      addEventListener(event, action) { this.listeners[event] = action; },
+      showModal() { this.open = true; }, close() { this.open = false; this.listeners.close?.(); },
+    });
+    return nodes.get(key);
+  }, set(_, key, value) { nodes.set(key, value); return true; } });
+  const storage = new Map();
+  elements.compositionFeatures = [];
+  const selected = { id: "shot", style_preset_mode: "inherit", composition_preset_mode: "inherit" };
+  const state = { runId: "run", selected, shots: [selected], visualPresets: [], visualPresetDefaults: {}, ...initial };
+  let persisted = 0;
+  let draftSaves = 0;
+  const controller = FicFrameVisualPresets.createController({ state, elements, api, enabledKinds,
+    taskMonitor: taskMonitor || { wait: async () => ({}) }, escapeHtml: String,
+    setBusy: (button, busy) => { button.disabled = busy; },
+    storage: { setItem: (key, value) => storage.set(key, value), removeItem: (key) => storage.delete(key), getItem: (key) => storage.get(key) },
+    saveWorkspaceDraft() { draftSaves++; }, persistStoryboard: async () => { persisted++; },
+  });
+  controller.bindEvents();
+  return { controller, state, elements, storage, persisted: () => persisted, draftSaves: () => draftSaves };
+}
+
+test("a newly created style and reference mode can be selected before a run exists", async () => {
+  const presets = [];
+  const writes = [];
+  const f = fixture({ initial: { runId: null, shots: [], selected: null }, enabledKinds: ["style"], api: async (path, options) => {
+    if (options?.method === "POST") {
+      writes.push(path);
+      presets.push({ ...JSON.parse(options.body), id: "style_new", version: 1, reference_mode: "image" });
+    }
+    return { enabled_types: ["style"], presets };
+  } });
+  await f.controller.refresh();
+  f.controller.openEditor();
+  f.elements.visualPresetName.value = "Ink";
+  f.elements.visualPresetPositive.value = "ink lines";
+  await f.elements.visualPresetForm.listeners.submit({ preventDefault() {} });
+
+  assert.match(f.elements.runStylePreset.innerHTML, /style_new/);
+  assert.equal(f.elements.runStylePreset.disabled, false);
+  assert.equal(f.elements.runStyleReferenceMode.disabled, false);
+  assert.equal(f.elements.shotStylePreset.disabled, true);
+  f.elements.runStylePreset.value = "style_new";
+  f.elements.runStylePreset.listeners.change();
+  await f.controller.flush();
+  assert.equal(f.state.visualPresetDefaults.style_id, "style_new");
+  assert.equal(f.elements.runStyleReferenceMode.value, "image");
+  f.elements.runStyleReferenceMode.value = "text";
+  f.elements.runStyleReferenceMode.listeners.change();
+  await f.controller.flush();
+  await f.controller.refresh();
+  assert.equal(f.elements.runStylePreset.value, "style_new");
+  assert.equal(f.elements.runStyleReferenceMode.value, "text");
+  assert.equal(f.draftSaves(), 2);
+  assert.deepEqual(writes, ["/api/visual-presets"]);
+});
+
+test("style update reminder survives preview and never rewrites manual prompts", async () => {
+  let pending = true;
+  const f = fixture({ api: async () => ({ visual_preset_snapshot: {}, positive_prompt: "preview only", negative_prompt: "preview negative",
+    prompt_style_pending: pending, prompt_style_message: pending ? "画风已调整，建议 LLM 重建，保留手工修改" : "" }) });
+  f.state.selected.positive_prompt = "USER ACTION: blue glass";
+  f.state.selected.negative_prompt = "red glass";
+  await f.controller.preview();
+  assert.equal(f.elements.promptStyleWarning.hidden, false);
+  assert.match(f.elements.promptStyleWarning.textContent, /LLM 重建/);
+  await f.controller.preview();
+  assert.equal(f.elements.promptStyleWarning.hidden, false);
+  assert.equal(f.state.selected.positive_prompt, "USER ACTION: blue glass");
+  assert.equal(f.state.selected.negative_prompt, "red glass");
+  pending = false;
+  await f.controller.preview();
+  assert.equal(f.elements.promptStyleWarning.hidden, true);
+});
+
+test("late preview for a different shot cannot clear its style reminder", async () => {
+  const replies = [];
+  const f = fixture({ api: () => new Promise((resolve) => replies.push(resolve)) });
+  const oldPreview = f.controller.preview();
+  f.state.selected = { id: "another" };
+  const newPreview = f.controller.preview();
+  replies[1]({ prompt_style_pending: true, prompt_style_message: "update needed" });
+  await newPreview;
+  replies[0]({ prompt_style_pending: false });
+  await oldPreview;
+  assert.equal(f.elements.promptStyleWarning.hidden, false);
+  assert.equal(f.elements.promptStyleWarning.textContent, "update needed");
+});
+
+test("analysis consumes task monitor result directly and requires explicit confirmation", async () => {
+  const draft = { status: "analyzed", positive: "dry brush", negative: "glossy", structured: { linework: "ink" }, reference_paths: ["drafts/id/ref.png"] };
+  const writes = [];
+  const monitor = FicFrameTaskMonitor.createMonitor({ request: async () => ({ status: "succeeded", result: draft }) });
+  const f = fixture({ taskMonitor: monitor, api: async (path, options) => {
+    if (path.endsWith("analyze-task")) return { task_id: "task" };
+    if (options?.method === "POST") writes.push(JSON.parse(options.body));
+    return { presets: [] };
+  } });
+  f.elements.stylePresetImages.files = [new Blob(["reference"], { type: "image/png" })];
+  await f.controller.analyze("style");
+  assert.equal(f.elements.visualPresetPositive.value, "dry brush");
+  assert.equal(f.elements.visualPresetNegative.value, "glossy");
+  assert.deepEqual(JSON.parse(f.elements.visualPresetStructured.value), { linework: "ink" });
+  assert.match(f.elements.visualPresetDraftImages.innerHTML, /reference\/drafts\/id\/ref.png/);
+  assert.equal(writes.length, 0);
+  f.elements.visualPresetName.value = "Ink";
+  await f.elements.visualPresetForm.listeners.submit({ preventDefault() {} });
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0].reference_paths, draft.reference_paths);
+  assert.equal(f.storage.size, 0);
+});
+
+test("invalid structured edits and manual no-VLM draft survive closing and resuming", async () => {
+  const f = fixture();
+  f.controller.openEditor(null, "composition", { status: "vlm_not_configured", reference_paths: ["drafts/id/ref.png"] });
+  assert.match(f.elements.visualPresetDraftState.textContent, /未配置 VLM/);
+  f.elements.visualPresetName.value = "Manual";
+  f.elements.visualPresetPositive.value = "subject left";
+  f.elements.visualPresetStructured.value = "{unfinished";
+  f.elements.cancelVisualPresetBtn.listeners.click();
+  assert.equal(f.elements.visualPresetDialog.open, false);
+  await f.controller.resume();
+  assert.equal(f.elements.visualPresetStructured.value, "{unfinished");
+  assert.equal(f.elements.visualPresetPositive.value, "subject left");
+});
+
+test("run default updates are serialized and an early response does not overwrite a newer selection", async () => {
+  let release;
+  const requests = [];
+  const f = fixture({ api: async (path, options) => {
+    const body = JSON.parse(options.body);
+    requests.push(body);
+    if (requests.length === 1) await new Promise((resolve) => { release = resolve; });
+    return { visual_presets: { style_id: body.style_id, composition_id: body.composition_id }, shots: [] };
+  } });
+  f.elements.runStylePreset.value = "style_first";
+  f.elements.runStylePreset.listeners.change();
+  await Promise.resolve(); await Promise.resolve();
+  f.elements.runStylePreset.value = "style_second";
+  f.elements.runStylePreset.listeners.change();
+  release();
+  await f.controller.flush();
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].style_id, "style_second");
+  assert.equal(f.state.visualPresetDefaults.style_id, "style_second");
+});
+
+test("deleted presets retain bound IDs and preset lists cannot alter workspace selection", async () => {
+  const f = fixture({ initial: { visualPresetDefaults: { style_id: "style_deleted", style_snapshot: { name: "Saved", version: 1 } } } });
+  f.state.selected.style_preset_mode = "preset";
+  f.state.selected.style_preset_id = "style_deleted";
+  f.controller.renderSelectors();
+  assert.equal(f.elements.runStylePreset.value, "style_deleted");
+  assert.equal(f.elements.shotStylePreset.value, "style_deleted");
+  assert.match(f.elements.runStylePreset.innerHTML, /已删除/);
+  await f.controller.refresh();
+  assert.equal(f.state.selected.style_preset_id, "style_deleted");
+  assert.equal(FicFrameVisualPresets.referenceUrl("../presets.json"), "");
+});
+
+test("shot selection is persisted independently of manually edited prompts", async () => {
+  const requests = [];
+  const f = fixture({ api: async (path, options) => {
+    const body = JSON.parse(options.body);
+    requests.push({ path, body });
+    return { shot: { ...body.shot, style_preset_snapshot: { id: "style_1", version: 1 } } };
+  } });
+  f.state.selected.positive_prompt = "unsaved edit";
+  f.elements.shotStylePreset.value = "style_1";
+  f.elements.shotCompositionPreset.value = "none";
+  f.elements.shotStylePreset.listeners.change();
+  await f.controller.flush();
+  assert.equal(requests[0].body.shot.style_preset_mode, "preset");
+  assert.equal(requests[0].body.shot.composition_preset_mode, "none");
+  assert.equal(f.state.selected.positive_prompt, "unsaved edit");
+  assert.equal(f.state.selected.style_preset_snapshot.version, 1);
+  assert.equal(f.persisted(), 0);
+  await f.controller.prepareGeneration();
+  assert.equal(f.persisted(), 1);
+});
+
+test("current-image snapshot is not replaced by a newer candidate's snapshot", () => {
+  const f = fixture();
+  const first = { style: { id: "style", name: "Ink", version: 1, positive: "ink" } };
+  f.state.selected.image_url = "/one.png?v=1";
+  f.state.selected.image_versions = [{ image_url: "/one.png", visual_preset_snapshot: first }, { image_url: "/two.png", visual_preset_snapshot: { style: { id: "style", version: 2 } } }];
+  f.state.selected.last_generation_visual_snapshot = { style: { id: "style", version: 2 } };
+  f.controller.renderSnapshot();
+  assert.match(f.elements.visualPromptSnapshot.textContent, /Ink v1/);
+  assert.doesNotMatch(f.elements.visualPromptSnapshot.textContent, /v2/);
+});
+
+test("ungenerated shots and empty old snapshots do not claim image constraints", () => {
+  const f = fixture();
+  f.state.selected.last_generation_visual_snapshot = {};
+  f.controller.renderSnapshot();
+  assert.match(f.elements.visualPromptSnapshot.textContent, /尚未生成/);
+});
+
+test("upload-only image mode does not need VLM and does not replace manual text", async () => {
+  const paths = ["drafts/id/ref.png"];
+  const writes = [];
+  const f = fixture({ api: async (path, options) => {
+    writes.push(path);
+    if (path.endsWith("/upload")) return { reference_paths: paths };
+    return { presets: [] };
+  } });
+  f.controller.openEditor(null, "style");
+  f.elements.visualPresetPositive.value = "manual style";
+  f.elements.visualPresetReferenceMode.value = "image";
+  f.elements.visualPresetReferenceFiles.files = [new Blob(["reference"], { type: "image/png" })];
+  await f.controller.editorReferences(false);
+  assert.deepEqual(writes, ["/api/visual-presets/upload"]);
+  assert.equal(f.elements.visualPresetPositive.value, "manual style");
+  assert.equal(f.elements.visualPresetReferenceMode.value, "image");
+  assert.match(f.elements.visualPresetDraftImages.innerHTML, /ref.png/);
+});
+
+test("saving an unchanged preset reports its existing version and preserves structured style fields", async () => {
+  const item = { id: "style", type: "style", name: "Manga", version: 3, positive: "", negative: "", reference_mode: "image",
+    reference_images: ["references/style/ref.png"], vlm_analysis: { structured: { stylization: "chibi", proportions: "two heads tall", summary: "simple shapes" } } };
+  const writes = [];
+  const f = fixture({ api: async (path, options) => {
+    if (options?.method === "PATCH") { writes.push(JSON.parse(options.body)); return item; }
+    return { presets: [item] };
+  } });
+  f.controller.openEditor(item);
+  await f.elements.visualPresetForm.listeners.submit({ preventDefault() {} });
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0].reference_paths, item.reference_images);
+  assert.deepEqual(writes[0].vlm_analysis.structured, item.vlm_analysis.structured);
+  assert.match(f.elements.health.textContent, /内容未修改，保留 v3/);
+  assert.equal(f.elements.visualPresetDialog.open, false);
+});
+
+test("preflight prevents generation when the adapter cannot deliver images", async () => {
+  const f = fixture({ api: async () => ({ reference_preflight: { ok: false, status: "unsupported", message: "多图不支持", total_count: 3 } }) });
+  f.state.selected.style_reference_mode = "image";
+  await assert.rejects(f.controller.prepareGeneration(["shot"]), /多图不支持/);
+  assert.equal(f.state.selected.style_reference_mode, "image");
+  assert.equal(f.elements.visualReferenceWarning.hidden, false);
+  assert.equal(f.persisted(), 1);
+});
+
+test("generation accepts advisory probe results without starting a test or dropping image mode", async () => {
+  for (const status of ["unknown", "supported", "unsupported"]) {
+    const requests = [];
+    const f = fixture({ api: async (path) => {
+      requests.push(path);
+      return { reference_preflight: { ok: true, status, adapter_supported: true, tested_count: 2, total_count: 4 } };
+    } });
+    f.state.selected.style_reference_mode = "image";
+    f.elements.visualReferenceWarning.hidden = false;
+    await f.controller.prepareGeneration(["shot"]);
+    assert.deepEqual(requests, ["/api/runs/run/visual-preview"]);
+    assert.equal(f.state.selected.style_reference_mode, "image");
+    assert.equal(f.elements.visualReferenceWarning.hidden, true);
+    assert.equal(f.persisted(), 1);
+  }
+});
+
+test("live probe only runs after cost confirmation and uses maximum reference count", async () => {
+  const requests = [];
+  let consent = false;
+  global.confirm = () => consent;
+  const f = fixture({ taskMonitor: { wait: async () => ({ status: "supported", message: "accepted" }) }, api: async (path, options) => {
+    if (path.includes("visual-preview")) return { reference_preflight: { total_count: 5, ok: true, message: "unverified" } };
+    if (path.includes("capability")) return { provider: "openai", model: "test", status: "unknown", adapter_supported: true };
+    requests.push(JSON.parse(options.body));
+    return { task_id: "probe" };
+  } });
+  await f.controller.testReferences();
+  assert.equal(requests.length, 0);
+  consent = true;
+  await f.controller.testReferences();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].reference_count, 5);
+  assert.equal(requests[0].confirmed, true);
+  delete global.confirm;
+});
+
+test("run and per-shot reference modes persist independently", async () => {
+  const requests = [];
+  const f = fixture({ api: async (path, options) => {
+    const body = JSON.parse(options.body);
+    requests.push(body);
+    return { shot: body.shot, visual_presets: { style_reference_mode: body.style_reference_mode, composition_reference_mode: body.composition_reference_mode }, shots: [] };
+  } });
+  f.elements.runStyleReferenceMode.value = "image";
+  f.elements.runStyleReferenceMode.listeners.change();
+  await f.controller.flush();
+  assert.equal(requests[0].style_reference_mode, "image");
+  f.elements.shotStyleReferenceMode.value = "text";
+  f.elements.shotCompositionReferenceMode.value = "image";
+  f.elements.shotStyleReferenceMode.listeners.change();
+  await f.controller.flush();
+  assert.equal(requests[1].shot.style_reference_mode, "text");
+  assert.equal(requests[1].shot.composition_reference_mode, "image");
+});
+
+test("concurrent test clicks create only one paid probe", async () => {
+  const requests = [];
+  global.confirm = () => true;
+  const f = fixture({ taskMonitor: { wait: async () => ({ message: "accepted" }) }, api: async (path, options) => {
+    if (path.includes("visual-preview")) return { reference_preflight: { total_count: 2, ok: true } };
+    if (path.includes("capability")) return { provider: "openai", model: "test", adapter_supported: true };
+    requests.push(path);
+    return { task_id: "probe" };
+  } });
+  try {
+    await Promise.all([f.controller.testReferences(), f.controller.testReferences()]);
+    assert.deepEqual(requests, ["/api/image-reference-test-task"]);
+  } finally { delete global.confirm; }
+});
+
+test("refresh resumes a saved probe without starting another paid task", async () => {
+  const waited = [];
+  const requests = [];
+  const f = fixture({ taskMonitor: { wait: async (id) => { waited.push(id); return { message: "accepted" }; } }, api: async (path, options) => {
+    requests.push(path);
+    assert.ok(!path.endsWith("test-task"));
+    if (path.includes("capability")) return { message: "accepted", status: "supported" };
+    return { reference_preflight: { ok: true, message: "accepted" } };
+  } });
+  f.storage.set("ficframe.image-reference-test.v1", JSON.stringify({ task_id: "saved-probe" }));
+  assert.equal(await f.controller.resumeProbe(), true);
+  assert.deepEqual(waited, ["saved-probe"]);
+  assert.equal(f.storage.has("ficframe.image-reference-test.v1"), false);
+  assert.equal(f.elements.testImageReferencesBtn.disabled, false);
+  assert.match(f.elements.health.textContent, /accepted/);
+});
+
+test("temporary probe monitoring failure retains the task ID for recovery", async () => {
+  const f = fixture({ taskMonitor: { wait: async () => { throw new Error("offline"); } }, api: async () => ({ status: "running" }) });
+  f.storage.set("ficframe.image-reference-test.v1", JSON.stringify({ task_id: "running-probe" }));
+  await assert.rejects(f.controller.resumeProbe(), /offline/);
+  assert.equal(f.storage.has("ficframe.image-reference-test.v1"), true);
+  assert.equal(f.elements.testImageReferencesBtn.disabled, false);
+  assert.match(f.elements.imageReferenceCapability.textContent, /恢复/);
+});
+
+test("older capability responses cannot replace the current size status", async () => {
+  let release;
+  let calls = 0;
+  const f = fixture({ api: async () => {
+    const number = ++calls;
+    if (number === 1) await new Promise((resolve) => { release = resolve; });
+    return { model: "test", message: number === 1 ? "old" : "current" };
+  } });
+  const first = f.controller.refreshCapability();
+  await f.controller.refreshCapability();
+  release();
+  await first;
+  assert.equal(f.elements.imageReferenceCapability.textContent, "test：current");
+});
+
+test("dormant composition presets stay hidden and saved analysis tasks are not resumed", async () => {
+  const calls = [];
+  const f = fixture({ enabledKinds: ["style"],
+    taskMonitor: { wait: async () => { throw new Error("composition task must stay dormant"); } },
+    api: async (path) => {
+      calls.push(path);
+      return { enabled_types: ["style"], presets: [{ id: "style", type: "style", name: "Ink" }, { id: "composition", type: "composition", name: "Hidden layout" }] };
+    },
+  });
+  f.elements.compositionFeatures = [{ hidden: false }];
+  await f.controller.refresh();
+  assert.equal(f.elements.compositionFeatures[0].hidden, true);
+  assert.doesNotMatch(f.elements.visualPresetStatus.innerHTML, /Hidden layout|构图/);
+  f.controller.openEditor(null, "composition");
+  await f.controller.analyze("composition");
+  f.storage.set("ficframe.visual-preset-draft.v1", JSON.stringify({ kind: "composition", task_id: "old-task" }));
+  await f.controller.resume();
+  assert.equal(f.elements.visualPresetDialog.open, false);
+  assert.equal(f.storage.has("ficframe.visual-preset-draft.v1"), true);
+  f.elements.runCompositionPreset.listeners.change();
+  f.elements.shotCompositionPreset.listeners.change();
+  f.elements.runCompositionReferenceMode.listeners.change();
+  f.elements.shotCompositionReferenceMode.listeners.change();
+  await f.controller.flush();
+  assert.deepEqual(calls, ["/api/visual-presets"]);
+});
+
+test("style edits do not overwrite dormant composition bindings", async () => {
+  const requests = [];
+  const f = fixture({ enabledKinds: ["style"], initial: { visualPresetDefaults: { composition_id: "saved-layout" } }, api: async (path, options) => {
+    const body = JSON.parse(options.body);
+    requests.push(body);
+    return { visual_presets: { style_id: body.style_id, composition_id: "saved-layout" }, shots: [] };
+  } });
+  f.state.selected.composition_preset_mode = "preset";
+  f.state.selected.composition_preset_id = "saved-shot-layout";
+  f.elements.runStylePreset.value = "style";
+  f.elements.runStylePreset.listeners.change();
+  await f.controller.flush();
+  assert.equal(Object.hasOwn(requests[0], "composition_id"), false);
+  f.controller.saveShot();
+  assert.equal(f.state.visualPresetDefaults.composition_id, "saved-layout");
+  assert.equal(f.state.selected.composition_preset_id, "saved-shot-layout");
+  assert.doesNotMatch(FicFrameVisualPresets.snapshotText({ composition: { id: "saved", name: "Hidden" } }), /构图|Hidden/);
+});

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import httpx
 from unittest.mock import patch
 
 from ficframe.providers import (
@@ -112,6 +113,19 @@ class DeepSeekResponsesTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ProviderError, "max_output_tokens"):
             ensure_response_completed(data)
+
+    def test_visual_analysis_logs_do_not_echo_request_or_error_contents(self) -> None:
+        provider = self._provider()
+        payload = {"model": "test", "input": [{"content": [{"type": "input_text", "text": "private-novel-text"},
+                                                               {"type": "input_image", "image_url": "data:image/png;base64,private-image-data"}]}]}
+        response = httpx.Response(400, json={"error": "echo private-api-key private-image-data"})
+        with patch("ficframe.providers.httpx.Client") as client, patch("ficframe.providers.logger") as logger:
+            client.return_value.__enter__.return_value.post.return_value = response
+            with self.assertRaises(ProviderError):
+                provider._post(provider.config.vlm, "vlm", "responses", payload, purpose="visual_preset:analyze_task")
+        logs = str(logger.mock_calls)
+        for private in ("private-novel-text", "private-image-data", "private-api-key"):
+            self.assertNotIn(private, logs)
 
 
 if __name__ == "__main__":

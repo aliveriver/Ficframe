@@ -8,6 +8,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 outputs/
+visual-presets/
 build/
 dist/
 release/

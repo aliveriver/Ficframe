@@ -7,6 +7,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .models import CharacterCard, Shot, to_dict
+from .visual_preset_workflow import SELECTION_FIELDS
 from .segmenter import locate_source_span
 from .source_reference import (
     build_description_source_ref,
@@ -98,6 +99,7 @@ def revise_storyboard_items(
     feedback_history: list[dict[str, Any]],
     purpose_prefix: str,
     revise_shot: Callable[..., Shot],
+    prepare_shot: Callable[[Shot, dict[str, Any]], Shot] | None = None,
 ) -> list[dict[str, Any]]:
     """重建选中的分镜，并在业务边界上强制保留已有图片。"""
     revised: list[dict[str, Any]] = []
@@ -106,7 +108,10 @@ def revise_storyboard_items(
             revised.append(item)
             continue
         shot = Shot(**item)
+        if prepare_shot:
+            shot = prepare_shot(shot, item)
         preserved_images = {field: to_dict(getattr(shot, field)) for field in IMAGE_FIELDS}
+        preserved_visuals = {field: to_dict(getattr(shot, field)) for field in (*SELECTION_FIELDS, "last_generation_visual_snapshot")}
         try:
             shot = revise_shot(
                 shot,
@@ -118,6 +123,8 @@ def revise_storyboard_items(
         except Exception as exc:
             raise StoryboardRevisionError(shot.id, exc) from exc
         for field, value in preserved_images.items():
+            setattr(shot, field, value)
+        for field, value in preserved_visuals.items():
             setattr(shot, field, value)
         revised.append(to_dict(shot))
     return revised

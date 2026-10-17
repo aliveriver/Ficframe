@@ -2,15 +2,76 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Any
 
 from .logging_utils import get_logger
 from .models import CharacterCard, Scene, Shot
 from .providers import OpenAICompatibleProvider, ProviderError
+from .prompts import SINGLE_FRAME_LLM_RULE
 from .text_utils import compact
+from .storyboard_visual_guidance import remember_prompt_style, style_neutral_errors
+from .visual_presets import VisualPresetStore
+from .visual_preset_workflow import prepare_storyboard_prompt, storyboard_visual_guides
 
 
 JSON_RULE = "只输出 JSON，不要 Markdown，不要解释。"
 logger = get_logger("llm_pipeline")
+
+
+def storyboard_text(provider: OpenAICompatibleProvider, system: str, payload: dict[str, Any], shot: Shot,
+                    purpose: str, visual_store: VisualPresetStore | None = None) -> str:
+    guides = storyboard_visual_guides(shot)
+    image_style = guides.get("style", {}).get("guidance_mode") == "compatibility_only"
+    if guides or shot.prompt_style_snapshot:
+        payload["visual_guides"] = guides
+        payload["previous_prompt_style"] = shot.prompt_style_snapshot
+        payload["previous_generated_prompt"] = shot.prompt_generation_baseline
+        system += (
+            " Selected visual_guides are pinned text-only guidance. No images are attached. "
+            "Do not invent visual observations or call a vision model. "
+            "The current shot prompts include the user's edits: preserve their scene facts, light sources, "
+            "time, props, composition, character identity and explicit non-style constraints for the chosen moment; "
+            "use dialogue and earlier or later actions as narrative context. "
+            "Compare previous_generated_prompt when available to identify and preserve user modifications. "
+            "When the style selection changes, replace obsolete style definitions and negative style exclusions "
+            "instead of appending a second conflicting style. Preserve unrelated edits and factual content for the chosen moment, "
+            "including facts inside mixed Lighting and style sections or unfamiliar sections such as Action. "
+            "In text mode, write the supplied textual style into the prompt. "
+            "If no guide is selected now, stop enforcing the previous preset and use the normal prompt behavior. "
+            "When guidance_mode=compatibility_only, use compatibility_context only to avoid conflicts, "
+            "never as a target style to imitate, expand or reconstruct; do not copy characters, outfits or plot from it."
+        )
+    if image_style:
+        system += (
+            " OVERRIDE any earlier requirement for a Style section: omit it entirely. "
+            "Neither positive_prompt nor negative_prompt may define drawing style, rendering, linework, "
+            "stylization or artistic proportions. Do not exclude chibi, flat colors or cel shading. "
+            "The image model alone chooses the drawing treatment from actual style references. "
+            "Keep physical scene lighting in a separate Lighting section, with the selected moment's facts intact."
+        )
+        payload.get("required_schema", {})["positive_prompt"] = "English structured scene prompt; preserve facts and user edits, omit all artistic style definitions"
+        payload.get("required_schema", {})["negative_prompt"] = "English constraints on quality, anatomy and identity; no artistic style exclusions"
+    system += SINGLE_FRAME_LLM_RULE
+    schema = payload.get("required_schema", {})
+    if "positive_prompt" in schema:
+        schema["positive_prompt"] += "; describe only one frozen moment in one continuous full-frame scene, no chronological action lists or transcribed dialogue"
+    if "negative_prompt" in schema:
+        schema["negative_prompt"] += "; exclude panel grids, multi-panel layout, insets, collages, storyboard sheets, captions and speech bubbles"
+    raw = provider.text(system, json.dumps(payload, ensure_ascii=False), purpose=purpose)
+    if not image_style:
+        return raw
+    data = parse_llm_json(raw)
+    errors = style_neutral_errors(data)
+    if errors:
+        # Give the full candidate and original to the LLM. No regex deletes any
+        # narrative, negative prompt, unknown section or user-authored text.
+        repair = {**payload, "candidate": data, "corrections_required": errors}
+        raw = provider.text(system + " Correct the candidate while preserving non-style facts and user edits for the chosen moment. Keep source text intact. Return the full required JSON.",
+                            json.dumps(repair, ensure_ascii=False), purpose=purpose + ":style_repair")
+        data = parse_llm_json(raw)
+        if style_neutral_errors(data):
+            raise ProviderError("画风中性检查未通过，LLM 仍返回画风定义或排斥参考画风的负向词；原 Prompt 已保留，请重试。")
+    return raw
 
 
 def polish_shot_prompt(
@@ -19,7 +80,10 @@ def polish_shot_prompt(
     provider: OpenAICompatibleProvider,
     purpose: str | None = None,
     feedback_history: list[dict] | None = None,
+    visual_store: VisualPresetStore | None = None,
 ) -> Shot:
+    original_prompts = (shot.positive_prompt, shot.negative_prompt)
+    prepare_storyboard_prompt(shot)
     feedback_context = [
         {
             "role": str(message.get("role") or ""),
@@ -46,7 +110,7 @@ def polish_shot_prompt(
         "不要把某个角色的人设词套到另一个角色身上。不要新增原文没有出现的人物。"
         + JSON_RULE
     )
-    user = json.dumps(
+    payload = (
         {
             "shot": {
                 "id": shot.id,
@@ -94,18 +158,20 @@ def polish_shot_prompt(
                 ],
                 "qa_notes": ["string"],
             },
-        },
-        ensure_ascii=False,
+        }
     )
     try:
-        raw = provider.text(system, user, purpose=purpose or f"pipeline:polish_shot_prompt:{shot.id}")
+        raw = storyboard_text(provider, system, payload, shot, purpose or f"pipeline:polish_shot_prompt:{shot.id}", visual_store)
         data = parse_llm_json(raw)
     except (ProviderError, json.JSONDecodeError, TypeError) as exc:
+        shot.positive_prompt, shot.negative_prompt = original_prompts
+        if purpose and purpose.startswith("storyboard:"):
+            raise
         shot.qa_notes.append(f"LLM 增强失败，已保留本地 prompt：{exc}")
         return shot
 
     positive_prompt = data.get("positive_prompt") or shot.positive_prompt
-    negative_prompt = data.get("negative_prompt") or shot.negative_prompt
+    negative_prompt = data["negative_prompt"] if isinstance(data.get("negative_prompt"), str) else shot.negative_prompt
     if not is_english_structured_prompt(positive_prompt):
         repaired = repair_prompt_with_llm(
             shot,
@@ -115,10 +181,11 @@ def polish_shot_prompt(
             negative_prompt,
             purpose=f"{purpose or 'pipeline:polish_shot_prompt'}:repair:{shot.id}",
             feedback_history=feedback_history,
+            visual_store=visual_store,
         )
         if repaired:
             positive_prompt = repaired.get("positive_prompt") or positive_prompt
-            negative_prompt = repaired.get("negative_prompt") or negative_prompt
+            negative_prompt = repaired["negative_prompt"] if isinstance(repaired.get("negative_prompt"), str) else negative_prompt
             shot.qa_notes.append("LLM prompt 已二次统一为英文结构化格式。")
         else:
             shot.qa_notes.append("LLM 返回了可解析 JSON，但 prompt 未完全符合英文结构化格式，已保留返回内容。")
@@ -137,7 +204,7 @@ def polish_shot_prompt(
     elif layout:
         shot.regional_guidance = True
     shot.qa_notes.extend(data.get("qa_notes") or [])
-    return shot
+    return remember_prompt_style(prepare_storyboard_prompt(shot))
 
 
 def generate_or_revise_shot_with_llm(
@@ -146,8 +213,10 @@ def generate_or_revise_shot_with_llm(
     provider: OpenAICompatibleProvider,
     feedback_history: list[dict] | None = None,
     purpose: str | None = None,
+    visual_store: VisualPresetStore | None = None,
 ) -> Shot:
     """生成或重建完整分镜记录，同时保持原文来源和图片身份稳定。"""
+    prepare_storyboard_prompt(shot)
     system = (
         "你是小说插画分镜 Agent。根据用户指定的小说原文或画面描述，输出一条完整、可执行的分镜。"
         "必须尊重历次反馈：做得好的地方继续保留，不妥之处明确修正。"
@@ -156,7 +225,7 @@ def generate_or_revise_shot_with_llm(
         "positive_prompt 与 negative_prompt 主要使用英文，并保持角色身份清楚、画面人数准确。"
         "只输出 JSON，不要 Markdown，不要解释。"
     )
-    user = json.dumps(
+    payload = (
         {
             "task": "revise" if feedback_history else "generate",
             "source_text": shot.source_text,
@@ -204,13 +273,12 @@ def generate_or_revise_shot_with_llm(
                 "character_layout": [],
                 "change_summary": "Chinese string",
             },
-        },
-        ensure_ascii=False,
+        }
     )
-    data = parse_llm_json(provider.text(system, user, purpose=purpose or f"storyboard:revise:{shot.id}"))
+    data = parse_llm_json(storyboard_text(provider, system, payload, shot, purpose or f"storyboard:revise:{shot.id}", visual_store))
     for field in ["title", "location", "time", "camera", "composition", "visual_goal", "positive_prompt", "negative_prompt"]:
         value = data.get(field)
-        if isinstance(value, str) and value.strip():
+        if isinstance(value, str) and (value.strip() or field == "negative_prompt"):
             setattr(shot, field, value.strip())
     excerpt = str(data.get("source_excerpt") or "").strip()
     if excerpt and (not shot.source_text or excerpt in shot.source_text):
@@ -230,7 +298,7 @@ def generate_or_revise_shot_with_llm(
     summary = str(data.get("change_summary") or "").strip()
     if summary:
         shot.qa_notes.append(summary)
-    return shot
+    return remember_prompt_style(prepare_storyboard_prompt(shot))
 
 
 def respond_to_storyboard_feedback(
@@ -492,6 +560,7 @@ def repair_prompt_with_llm(
     negative_prompt: str,
     purpose: str = "llm:repair_prompt",
     feedback_history: list[dict] | None = None,
+    visual_store: VisualPresetStore | None = None,
 ) -> dict | None:
     system = (
         "Rewrite this image-generation prompt into a consistent English prompt. "
@@ -500,7 +569,7 @@ def repair_prompt_with_llm(
         "Use English for all descriptive text; character names and proper nouns may remain unchanged. "
         "Return JSON only."
     )
-    user = json.dumps(
+    payload = (
         {
             "shot": {
                 "id": shot.id,
@@ -523,11 +592,10 @@ def repair_prompt_with_llm(
                 "negative_prompt": "English negative prompt string",
             },
             "user_feedback_history": feedback_history or [],
-        },
-        ensure_ascii=False,
+        }
     )
     try:
-        data = parse_llm_json(provider.text(system, user, purpose=purpose))
+        data = parse_llm_json(storyboard_text(provider, system, payload, shot, purpose, visual_store))
     except (ProviderError, json.JSONDecodeError, TypeError):
         return None
     if is_english_structured_prompt(str(data.get("positive_prompt") or "")):

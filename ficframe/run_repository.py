@@ -125,6 +125,25 @@ class RunRepository:
         payload.setdefault("prompt_feedback_messages", [])
         payload.setdefault("storyboard_versions", {})
         payload.setdefault("html_settings", normalize_html_settings())
+        payload.setdefault("visual_presets", {"style_id": None, "composition_id": None})
+        defaults = payload.get("visual_presets")
+        if not isinstance(defaults, dict):
+            payload["visual_presets"] = {"style_id": None, "composition_id": None}
+        else:
+            defaults.setdefault("style_id", None)
+            defaults.setdefault("composition_id", None)
+        for item in payload.get("shots", []):
+            if not isinstance(item, dict):
+                continue
+            item.setdefault("style_preset_id", None)
+            item.setdefault("composition_preset_id", None)
+            item.setdefault("style_preset_mode", "inherit")
+            item.setdefault("composition_preset_mode", "inherit")
+            item.setdefault("style_reference_mode", "inherit")
+            item.setdefault("composition_reference_mode", "inherit")
+            item.setdefault("style_preset_snapshot", {})
+            item.setdefault("composition_preset_snapshot", {})
+            item.setdefault("last_generation_visual_snapshot", {})
         return payload
 
     @staticmethod

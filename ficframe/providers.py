@@ -5,6 +5,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,7 +15,8 @@ from urllib.parse import urlparse
 import httpx
 from dotenv import load_dotenv
 
-from .logging_utils import get_logger
+from .image_sizes import normalize_image_size
+from .logging_utils import get_logger, redact_text
 from .comfyui import ComfyUIClient, ComfyUIError, load_api_workflow, render_api_workflow
 from .runtime_paths import env_file
 
@@ -103,7 +105,10 @@ class OpenAICompatibleProvider:
     ) -> dict[str, Any]:
         url = build_url(endpoint.base_url, path)
         timeout = self._timeout_for(label)
+        private_visual_analysis = purpose.startswith(("visual_preset:", "reference_probe:", "visual_reference:"))
         request_summary = summarize_payload(payload)
+        if private_visual_analysis:
+            request_summary.pop("text_preview", None)
         started = time.perf_counter()
         logger.info(
             "provider request label=%s purpose=%s provider=%s url=%s model=%s timeout_s=%s summary=%s",
@@ -128,7 +133,7 @@ class OpenAICompatibleProvider:
                 path,
                 duration_ms,
                 request_summary,
-                exc,
+                type(exc).__name__ if private_visual_analysis else exc,
             )
             raise ProviderError(provider_exception_message(label, exc, timeout)) from exc
         duration_ms = int((time.perf_counter() - started) * 1000)
@@ -142,7 +147,8 @@ class OpenAICompatibleProvider:
             response.status_code,
             duration_ms,
             payload.get("model", ""),
-            summarize_response(response),
+            {"content_type": response.headers.get("content-type", ""), "body_bytes": len(response.content)}
+            if private_visual_analysis else summarize_response(response),
         )
         if response.status_code >= 400:
             logger.warning(
@@ -153,9 +159,10 @@ class OpenAICompatibleProvider:
                 path,
                 response.status_code,
                 request_summary,
-                response.text[:500],
+                "[visual analysis response omitted]" if private_visual_analysis else response.text[:500],
             )
-            raise ProviderError(f"{response.status_code} {url}: {response.text[:1000]}")
+            detail = safe_provider_error(response_error_detail(response), endpoint, collect_texts(payload)) if private_visual_analysis else response.text[:1000]
+            raise ProviderError(f"{response.status_code} {safe_url(url)}: {detail}")
         return response.json()
 
     def _post_multipart(
@@ -171,6 +178,7 @@ class OpenAICompatibleProvider:
         headers = self._headers(endpoint, label)
         headers.pop("Content-Type", None)
         timeout = self._timeout_for(label)
+        private_reference = purpose.startswith(("visual_reference:", "reference_probe:"))
         request_summary = {
             "model": data.get("model", ""),
             "data_keys": sorted(data.keys()),
@@ -200,7 +208,7 @@ class OpenAICompatibleProvider:
                 path,
                 duration_ms,
                 request_summary,
-                exc,
+                type(exc).__name__ if private_reference else exc,
             )
             raise ProviderError(provider_exception_message(label, exc, timeout)) from exc
         duration_ms = int((time.perf_counter() - started) * 1000)
@@ -215,22 +223,30 @@ class OpenAICompatibleProvider:
             duration_ms,
             data.get("model", ""),
             len(files),
-            summarize_response(response),
+            {"content_type": response.headers.get("content-type", ""), "body_bytes": len(response.content)}
+            if private_reference else summarize_response(response),
         )
         if response.status_code >= 400:
-            logger.warning("provider multipart failed label=%s purpose=%s url=%s path=%s status=%s body=%s", label, purpose, safe_url(url), path, response.status_code, response.text[:500])
-            raise ProviderError(f"{response.status_code} {url}: {response.text[:1000]}")
+            logger.warning("provider multipart failed label=%s purpose=%s url=%s path=%s status=%s body=%s", label, purpose, safe_url(url), path, response.status_code, "[reference response omitted]" if private_reference else response.text[:500])
+            detail = safe_provider_error(response_error_detail(response), endpoint, [data.get("prompt", "")]) if private_reference else response.text[:1000]
+            raise ProviderError(f"{response.status_code} {safe_url(url)}: {detail}")
         return response.json()
 
-    def text(self, system: str, user: str, model: str | None = None, purpose: str = "") -> str:
+    def text(self, system: str, user: str, model: str | None = None, purpose: str = "",
+             image_paths: list[Path] | None = None) -> str:
         endpoint = self.config.llm
         runtime = effective_llm_provider(endpoint)
+        images = [to_data_url(path) for path in (image_paths or [])]
+        if images and not purpose.startswith("visual_reference:"):
+            purpose = "visual_reference:" + purpose
+        chat_content = [{"type": "text", "text": user},
+                        *({"type": "image_url", "image_url": {"url": url}} for url in images)] if images else user
         if runtime == "chat_completions":
             payload = {
                 "model": model or endpoint.model,
                 "messages": [
                     {"role": "system", "content": system},
-                    {"role": "user", "content": user},
+                    {"role": "user", "content": chat_content},
                 ],
                 "response_format": {"type": "json_object"},
             }
@@ -240,7 +256,8 @@ class OpenAICompatibleProvider:
                 "model": model or endpoint.model,
                 "input": [
                     {"role": "system", "content": [{"type": "input_text", "text": system}]},
-                    {"role": "user", "content": [{"type": "input_text", "text": user}]},
+                    {"role": "user", "content": [{"type": "input_text", "text": user},
+                                                  *({"type": "input_image", "image_url": url} for url in images)]},
                 ],
             }
             if is_deepseek_endpoint(endpoint):
@@ -264,14 +281,19 @@ class OpenAICompatibleProvider:
                     "model": model or endpoint.model,
                     "messages": [
                         {"role": "system", "content": system},
-                        {"role": "user", "content": user},
+                        {"role": "user", "content": chat_content},
                     ],
                     "response_format": {"type": "json_object"},
                     "reasoning_effort": "high",
                     "thinking": {"type": "enabled"},
                 }
                 data = self._post(endpoint, "llm", "chat/completions", chat_payload, purpose=f"{purpose}:chat_fallback")
-        ensure_response_completed(data)
+        try:
+            ensure_response_completed(data)
+        except ProviderError as exc:
+            if purpose.startswith("visual_reference:"):
+                raise ProviderError(safe_provider_error(str(exc), endpoint, [system, user])) from exc
+            raise
         return extract_response_text(data)
 
     def vision(self, system: str, prompt: str, image_paths: list[Path], model: str | None = None, purpose: str = "") -> str:
@@ -327,12 +349,29 @@ class OpenAICompatibleProvider:
         reference_regions: list[list[float] | None] | None = None,
         regional_guidance: bool | None = None,
         purpose: str = "",
+        style_reference_images: list[Path] | None = None,
+        composition_reference_images: list[Path] | None = None,
+        reference_roles_embedded: bool = False,
     ) -> Path:
         endpoint = self.config.image
+        size = normalize_image_size(size)
         groups = [group for group in (reference_image_groups or []) if group]
         references = [path for group in groups for path in group] if groups else (reference_images or [])
         provider = effective_image_provider(endpoint)
+        style_references = style_reference_images or []
+        composition_references = composition_reference_images or []
+        has_visual_references = bool(style_references or composition_references)
+        if has_visual_references:
+            if provider in {"siliconflow", "comfyui"}:
+                raise ProviderError("当前适配器不支持独立画风/构图原图参考，请改用仅文本模式。")
+            from .image_reference_workflow import purpose_prompt
+            if not reference_roles_embedded:
+                prompt = purpose_prompt(prompt, len(references), len(style_references), len(composition_references))
+            references = [*references, *style_references, *composition_references]
+            if not purpose.startswith("reference_probe:"):
+                purpose = "visual_reference:" + purpose
         cloud_prompt = image_prompt_with_negative(prompt, negative_prompt)
+        reference_prompt = cloud_prompt if has_visual_references else reference_aware_prompt(cloud_prompt, bool(references))
         logger.info("image request purpose=%s provider=%s model=%s size=%s reference_count=%s", purpose, provider, model or endpoint.model, size, len(references))
 
         if provider == "comfyui":
@@ -372,7 +411,7 @@ class OpenAICompatibleProvider:
         if provider == "grsai":
             payload = {
                 "model": model or endpoint.model,
-                "prompt": reference_aware_prompt(cloud_prompt, bool(references)),
+                "prompt": reference_prompt,
                 "images": [to_data_url(path) for path in references],
                 "aspectRatio": size,
                 "replyType": "json",
@@ -381,7 +420,7 @@ class OpenAICompatibleProvider:
         elif provider == "ark":
             payload = {
                 "model": model or endpoint.model,
-                "prompt": reference_aware_prompt(cloud_prompt, bool(references)),
+                "prompt": reference_prompt,
                 "sequential_image_generation": os.getenv("FICFRAME_IMAGE_SEQUENTIAL", "disabled"),
                 "response_format": os.getenv("FICFRAME_IMAGE_RESPONSE_FORMAT", "url"),
                 "size": size,
@@ -419,7 +458,7 @@ class OpenAICompatibleProvider:
                 "images/edits",
                 {
                     "model": model or endpoint.model,
-                    "prompt": reference_aware_prompt(cloud_prompt, True),
+                    "prompt": reference_prompt,
                     "size": size,
                     "n": "1",
                 },
@@ -436,6 +475,10 @@ class OpenAICompatibleProvider:
             data = self._post(endpoint, "image", "images/generations", payload, purpose=purpose)
 
         item = extract_image_item(data)
+        for result in (data, item):
+            if result.get("error") or result.get("status") in {"failed", "error"}:
+                detail = safe_provider_error(provider_error_detail(result) or "供应商生成失败", endpoint, [cloud_prompt, prompt, negative_prompt])
+                raise ProviderError(f"图片 API 返回错误：{detail}")
         target = Path(out_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         if item.get("b64_json"):
@@ -447,7 +490,7 @@ class OpenAICompatibleProvider:
                 with httpx.Client(timeout=self.config.image_timeout) as client:
                     response = client.get(item["url"])
             except httpx.HTTPError as exc:
-                logger.warning("image download exception error=%s", exc)
+                logger.warning("image download exception error=%s", type(exc).__name__ if has_visual_references else exc)
                 raise ProviderError(provider_exception_message("image download", exc, self.config.image_timeout)) from exc
             if response.status_code >= 400:
                 logger.warning("image download failed status=%s", response.status_code)
@@ -656,6 +699,35 @@ def to_data_url(path: Path) -> str:
     mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")
     return f"data:{mime_type};base64,{encoded}"
+
+
+def safe_provider_error(message: str, endpoint: EndpointConfig, private_texts: list[str] | None = None) -> str:
+    """Keep actionable errors without echoing credentials or submitted image/text inputs."""
+    for private in [*(private_texts or []), endpoint.api_key]:
+        if private:
+            message = message.replace(private, "[已隐藏]").replace(json.dumps(private, ensure_ascii=True)[1:-1], "[已隐藏]")
+    message = re.sub(r"data:image/[^\s;,]+;base64,[A-Za-z0-9+/=]+", "[图片内容已隐藏]", message)
+    return compact_log_text(redact_text(message), 600)
+
+
+def provider_error_detail(data: dict[str, Any]) -> str:
+    error = data.get("error")
+    if isinstance(error, dict):
+        parts = [str(error[key]) for key in ("message", "code", "type", "param") if error.get(key)]
+    else:
+        parts = [str(error or data.get("message") or "")]
+    request_id = data.get("request_id") or data.get("id")
+    if request_id:
+        parts.append(f"request_id={request_id}")
+    return "; ".join(part for part in parts if part)
+
+
+def response_error_detail(response: httpx.Response) -> str:
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    return (provider_error_detail(data) if isinstance(data, dict) else "") or response.reason_phrase
 
 
 def extract_image_item(data: dict[str, Any]) -> dict[str, Any]:

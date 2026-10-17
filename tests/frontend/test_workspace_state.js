@@ -28,6 +28,21 @@ test("workspace draft round-trips sets as selected shot ids", () => {
   assert.deepEqual(draft.selectedShotIds, ["shot-1"]);
 });
 
+test("workspace draft preserves visual preset defaults and per-shot choices", () => {
+  const storage = memoryStorage();
+  const state = FicFrameWorkspaceState.createInitialState();
+  state.runId = "run-visual";
+  state.visualPresetDefaults = { style_id: "style-1", composition_id: "composition-1" };
+  state.shots = [{ id: "shot-1", style_preset_mode: "none", composition_preset_mode: "preset", composition_preset_id: "composition-2" }];
+
+  FicFrameWorkspaceState.saveDraft(storage, "workspace", state);
+  const draft = FicFrameWorkspaceState.loadDraft(storage, "workspace");
+
+  assert.deepEqual(draft.visualPresetDefaults, state.visualPresetDefaults);
+  assert.equal(draft.shots[0].style_preset_mode, "none");
+  assert.equal(draft.shots[0].composition_preset_id, "composition-2");
+});
+
 test("empty workspace removes stale draft", () => {
   const storage = memoryStorage();
   storage.setItem("workspace", "stale");
@@ -35,6 +50,26 @@ test("empty workspace removes stale draft", () => {
 
   assert.equal(FicFrameWorkspaceState.saveDraft(storage, "workspace", state), false);
   assert.equal(storage.getItem("workspace"), null);
+});
+
+test("a style selection is saved and restored before importing input files", () => {
+  const storage = memoryStorage();
+  const state = FicFrameWorkspaceState.createInitialState();
+  state.visualPresetDefaults = { style_id: "style-1", style_reference_mode: "image" };
+  assert.equal(FicFrameWorkspaceState.saveDraft(storage, "workspace", state), true);
+  assert.deepEqual(FicFrameWorkspaceState.loadDraft(storage, "workspace").visualPresetDefaults, state.visualPresetDefaults);
+
+  state.visualPresetDefaults = { style_id: null, style_reference_mode: "text" };
+  assert.equal(FicFrameWorkspaceState.saveDraft(storage, "workspace", state), false);
+});
+
+test("changing input files retains style choices and releases the previous run snapshot", () => {
+  const state = FicFrameWorkspaceState.createInitialState();
+  state.runId = "old-run";
+  state.visualPresetDefaults = { style_id: "style-1", style_reference_mode: "image", style_snapshot: { id: "style-1", version: 1 } };
+  FicFrameWorkspaceState.resetRun(state);
+  assert.deepEqual(state.visualPresetDefaults, { style_id: "style-1", style_reference_mode: "image" });
+  assert.equal(state.runId, null);
 });
 
 test("reset run preserves prepared characters and provider config", () => {

@@ -1,8 +1,8 @@
 (function initImageWorkflow(global) {
   function createController({
     state, elements, api, taskMonitor, escapeHtml, clone, setBusy,
-    saveSelectedPrompt, saveCharacterEditor, saveWorkspaceDraft,
-    renderShots, selectedImageSize,
+    saveSelectedPrompt, saveCharacterEditor, saveShotEditor = () => {}, saveWorkspaceDraft,
+    renderShots, selectedImageSize, prepareGeneration = async () => {},
   }) {
     function stripVersionQuery(url = "") {
       return String(url).split("?", 1)[0];
@@ -23,6 +23,7 @@
     function applyResult(result) {
       const shot = state.shots.find((item) => item.id === result.shot_id);
       if (shot) {
+        if (result.visual_preset_snapshot) shot.last_generation_visual_snapshot = result.visual_preset_snapshot;
         if (Array.isArray(result.image_versions)) {
           shot.image_versions = result.image_versions;
         } else if (result.raw_image_url || result.image_url) {
@@ -43,6 +44,12 @@
           elements.preview.innerHTML = `<img alt="${escapeHtml(result.shot_id)}" src="${escapeHtml(versionedUrl(shot.image_url, Date.now()))}" />`;
         }
         renderVersions();
+        if (elements.visualPromptSnapshot) {
+          const snapshot = shot?.last_generation_visual_snapshot || {};
+          const label = (kind, text) => snapshot[kind]?.id ? `${text}：${snapshot[kind].name || snapshot[kind].id} v${snapshot[kind].version || 1}${snapshot[kind].positive ? ` · ${snapshot[kind].positive}` : ""}` : `${text}：未使用`;
+          const kinds = state.visualPresetKinds || ["style"];
+          elements.visualPromptSnapshot.textContent = `最近生成实际规范（软约束） · ${kinds.map((kind) => label(kind, kind === "style" ? "画风" : "构图")).join(" · ")}`;
+        }
       }
       renderShots(state.selected?.id);
       saveWorkspaceDraft();
@@ -127,9 +134,11 @@
       if (!state.selected || !state.runId) return;
       saveSelectedPrompt();
       saveCharacterEditor();
-      const shot = clone(state.selected);
+      saveShotEditor();
       setBusy(elements.imageBtn, true);
       try {
+        await prepareGeneration([state.selected.id]);
+        const shot = clone(state.selected);
         const created = await api("/api/images/task", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -149,13 +158,17 @@
       if (!state.runId || !state.shots.length) return;
       saveSelectedPrompt();
       saveCharacterEditor();
+      saveShotEditor();
       if (!shots.length) {
         elements.health.textContent = emptyMessage;
         return;
       }
       setBusy(button, true);
       try {
-        const results = await generateBatch(shots, options);
+        const ids = new Set(shots.map((shot) => shot.id));
+        await prepareGeneration([...ids]);
+        const savedShots = state.shots.filter((shot) => ids.has(shot.id));
+        const results = await generateBatch(savedShots, options);
         const failures = results.filter((item) => !item.ok);
         const skipped = results.filter((item) => item.skipped).length;
         elements.health.textContent = `${options.label}完成：${results.length - failures.length}/${shots.length}${skipped ? `，跳过 ${skipped}` : ""}`;

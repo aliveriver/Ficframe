@@ -5,16 +5,16 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release version without the v prefix; must match pyproject.toml
+        description: Release version without v; must match the project and CHANGELOG.md
         required: true
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   prepare:
@@ -22,51 +22,67 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Resolve and validate version
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate versions and extract changelog
         id: version
-        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
         run: |
-          version="${{ inputs.version }}"
-          project_version="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)"/\1/p' pyproject.toml | head -n 1)"
-          package_version="$(sed -nE 's/^__version__[[:space:]]*=[[:space:]]*"([^"]+)"/\1/p' ficframe/__init__.py | head -n 1)"
-          lock_version="$(awk '/^name = "ficframe"$/ { found=1; next } found && /^version = / { gsub(/^version = "|"$/, ""); print; exit }' uv.lock)"
-          if [[ -z "$version" ]]; then
-            version="$project_version"
-          fi
-          if [[ -z "$version" || ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Invalid release version: $version"
+          python scripts/release_notes.py --version "$REQUESTED_VERSION" \
+            --output release-notes.md --github-output "$GITHUB_OUTPUT"
+          cat release-notes.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Validate release branch and tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::Releases must be started from main, not $GITHUB_REF"
             exit 1
           fi
-          if [[ "$project_version" != "$package_version" || "$project_version" != "$lock_version" ]]; then
-            echo "::error::Version mismatch: pyproject=$project_version package=$package_version lock=$lock_version"
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            echo "::error::$RELEASE_TAG already exists. Choose a new version."
             exit 1
           fi
-          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
-            if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
-              echo "::error::Releases must be started from the main branch, not $GITHUB_REF"
-              exit 1
-            fi
-            if [[ "$version" != "$project_version" ]]; then
-              echo "::error::Requested release $version does not match project version $project_version"
-              exit 1
-            fi
-            if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1; then
-              echo "::error::Release v$version already exists. Choose a new version."
-              exit 1
-            fi
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+          retention-days: 14
 
-  windows:
+  build:
     needs: prepare
-    runs-on: windows-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            runner: windows-latest
+            artifact: windows-x64
+            package_pattern: windows-x64-*
+            binary: build/package/windows/dist/FicFrame/FicFrame.exe
+          - platform: linux
+            runner: ubuntu-22.04
+            artifact: linux-x86_64
+            package_pattern: linux-x86_64.*
+            binary: build/package/linux/dist/FicFrame/FicFrame
     env:
       UV_DEFAULT_INDEX: https://pypi.org/simple
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/build/package/${{ matrix.platform }}/.venv
+      UV_PYTHON_INSTALL_DIR: ${{ github.workspace }}/build/package/${{ matrix.platform }}/python
+      PYINSTALLER_CONFIG_DIR: ${{ github.workspace }}/build/package/${{ matrix.platform }}/pyinstaller-cache
+      PYTHONUTF8: "1"
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -75,71 +91,95 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Use official PyPI on GitHub runner
-        shell: pwsh
+        shell: python
         run: |
-          $lockPath = Join-Path $PWD "uv.lock"
-          $content = [IO.File]::ReadAllText($lockPath)
-          $content = $content.Replace("https://pypi.tuna.tsinghua.edu.cn/simple", "https://pypi.org/simple")
-          $content = $content.Replace("https://pypi.tuna.tsinghua.edu.cn/packages", "https://files.pythonhosted.org/packages")
-          [IO.File]::WriteAllText($lockPath, $content)
-          uv lock --check
-      - name: Build Windows installer
+          from pathlib import Path
+          lock = Path("uv.lock")
+          text = lock.read_text(encoding="utf-8")
+          text = text.replace("https://pypi.tuna.tsinghua.edu.cn/simple", "https://pypi.org/simple")
+          text = text.replace("https://pypi.tuna.tsinghua.edu.cn/packages", "https://files.pythonhosted.org/packages")
+          lock.write_text(text, encoding="utf-8")
+      - name: Check lockfile
+        run: uv lock --check
+      - name: Build Windows packages
+        if: matrix.platform == 'windows'
         shell: pwsh
-        run: .\scripts\build_windows.ps1 -Version "${{ needs.prepare.outputs.version }}" -RequireInstaller
+        run: .\scripts\build_windows.ps1 -Version $env:RELEASE_VERSION -RequireInstaller
+      - name: Build Linux packages
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: bash scripts/build_linux.sh "$RELEASE_VERSION"
+      - name: Check backend
+        run: uv run --locked --extra build python -m unittest discover -s tests
+      - name: Check frontend
+        shell: bash
+        run: node --test tests/frontend/*.js tests/test_storyboard_workspace.js
+      - name: Smoke test packaged executable
+        shell: bash
+        env:
+          APP_BINARY: ${{ matrix.binary }}
+        run: '"$APP_BINARY" --help'
       - uses: actions/upload-artifact@v4
         with:
-          name: FicFrame-windows-x64
-          path: release/FicFrame-*-windows-x64-*
+          name: FicFrame-${{ matrix.artifact }}
+          path: release/FicFrame-${{ needs.prepare.outputs.version }}-${{ matrix.package_pattern }}
           if-no-files-found: error
-
-  linux:
-    needs: prepare
-    runs-on: ubuntu-22.04
-    env:
-      UV_DEFAULT_INDEX: https://pypi.org/simple
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Use official PyPI on GitHub runner
-        shell: bash
-        run: |
-          sed -i \
-            -e 's#https://pypi.tuna.tsinghua.edu.cn/simple#https://pypi.org/simple#g' \
-            -e 's#https://pypi.tuna.tsinghua.edu.cn/packages#https://files.pythonhosted.org/packages#g' \
-            uv.lock
-          uv lock --check
-      - name: Build Linux installer
-        shell: bash
-        run: bash scripts/build_linux.sh "${{ needs.prepare.outputs.version }}"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: FicFrame-linux-x86_64
-          path: |
-            release/FicFrame-*-linux-x86_64.run
-            release/FicFrame-*-linux-x86_64.tar.gz
-          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
 
   release:
     if: github.event_name == 'workflow_dispatch'
-    needs: [prepare, windows, linux]
+    needs: [prepare, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - uses: actions/download-artifact@v4
         with:
+          pattern: FicFrame-*
           path: artifacts
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: .
+      - name: Verify all packages and generate checksums
+        shell: bash
+        run: |
+          cd artifacts
+          packages=(
+            "FicFrame-$RELEASE_VERSION-windows-x64-setup.exe"
+            "FicFrame-$RELEASE_VERSION-windows-x64-portable.zip"
+            "FicFrame-$RELEASE_VERSION-linux-x86_64.run"
+            "FicFrame-$RELEASE_VERSION-linux-x86_64.tar.gz"
+          )
+          for package in "${packages[@]}"; do
+            if [[ ! -s "$package" ]]; then
+              echo "::error::Missing or empty release package: $package"
+              exit 1
+            fi
+          done
+          sha256sum "${packages[@]}" > SHA256SUMS
+          sha256sum --check SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           name: FicFrame ${{ needs.prepare.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          files: artifacts/*
+          body_path: release-notes.md
+          files: |
+            artifacts/FicFrame-${{ needs.prepare.outputs.version }}-windows-x64-setup.exe
+            artifacts/FicFrame-${{ needs.prepare.outputs.version }}-windows-x64-portable.zip
+            artifacts/FicFrame-${{ needs.prepare.outputs.version }}-linux-x86_64.run
+            artifacts/FicFrame-${{ needs.prepare.outputs.version }}-linux-x86_64.tar.gz
+            artifacts/SHA256SUMS
           generate_release_notes: true
           fail_on_unmatched_files: true
-          make_latest: true
+          prerelease: ${{ needs.prepare.outputs.prerelease == 'true' }}
+          make_latest: ${{ needs.prepare.outputs.prerelease == 'false' }}

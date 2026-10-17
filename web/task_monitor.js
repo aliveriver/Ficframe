@@ -65,6 +65,8 @@
       prompt_regenerate: "重建 Prompt",
       image: "生成图片",
       image_batch: "批量生成图片",
+      visual_preset_analysis: "分析视觉参考图",
+      image_reference_probe: "测试图片模型多图参考",
     })[kind] || "后台任务";
   }
 

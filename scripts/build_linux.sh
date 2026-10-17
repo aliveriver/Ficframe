@@ -37,7 +37,7 @@ esac
 rm -rf -- "$BUILD_ROOT"
 mkdir -p "$DIST_ROOT" "$WORK_ROOT" "$ARTIFACT_ROOT" "$TMPDIR" "$PYINSTALLER_CONFIG_DIR"
 
-uv run --extra build pyinstaller --noconfirm --clean \
+uv run --locked --python 3.11 --extra build pyinstaller --noconfirm --clean \
   --distpath "$DIST_ROOT" \
   --workpath "$WORK_ROOT" \
   "$REPO_ROOT/packaging/ficframe.spec"

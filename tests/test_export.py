@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 import unittest
 import zipfile
@@ -37,6 +38,69 @@ def make_shot(**overrides) -> Shot:
 
 
 class ExportTests(unittest.TestCase):
+    def test_dragged_image_anchor_survives_rendering_and_unrelated_text_insertions(self):
+        markdown = "# 第一章\n\n![shot_01](images/shot.png)\n\n原来的位置。\n\n想环绕的段落。\n\n最后一段。"
+        initial = render_html_document(markdown, "测试")
+        anchors = dict((text, key) for key, text in re.findall(r'<p data-layout-block="([^"]+)">([^<]*)</p>', initial))
+        layout = {"anchor_block": anchors["想环绕的段落。"], "position": "before", "alignment": "left", "wrap": "left", "width": "45%"}
+        for source in (markdown, "新增的前言。\n\n" + markdown):
+            with self.subTest(source=source):
+                document = render_html_document(source, "测试", image_layouts={"shot_01": layout})
+                self.assertLess(document.index("原来的位置。"), document.index('data-shot-id="shot_01"'))
+                self.assertLess(document.index('data-shot-id="shot_01"'), document.index("想环绕的段落。"))
+                self.assertIn("image-wrap-left", document)
+                self.assertIn(f'data-source-block="{anchors["原来的位置。"]}"', document)
+                self.assertEqual(document.count('data-shot-id="shot_01"'), 1)
+                self.assertEqual(document.count("想环绕的段落。"), 1)
+        layout["position"] = "after"
+        document = render_html_document(markdown, "测试", image_layouts={"shot_01": layout})
+        self.assertLess(document.index("想环绕的段落。"), document.index('data-shot-id="shot_01"'))
+        self.assertLess(document.index('data-shot-id="shot_01"'), document.index("最后一段。"))
+
+    def test_missing_or_malicious_anchor_falls_back_without_losing_text_or_images(self):
+        markdown = "![shot_01](images/shot.png)\n\n原来的位置。\n\n其他段落。"
+        for anchor in ('b_0000000000000000_1', '" onclick="alert(1)', 1, {}, None):
+            with self.subTest(anchor=anchor):
+                document = render_html_document(markdown, "测试", image_layouts={"shot_01": {"anchor_block": anchor}})
+                self.assertLess(document.index('data-shot-id="shot_01"'), document.index("原来的位置。"))
+                self.assertNotIn("onclick", document)
+                self.assertEqual(document.count('data-shot-id="shot_01"'), 1)
+
+    def test_repeated_paragraphs_have_distinct_anchors_and_multiple_images_are_not_dropped(self):
+        markdown = "![a](images/a.png)\n\n![b](images/b.png)\n\n重复。\n\n重复。"
+        initial = render_html_document(markdown, "测试")
+        keys = re.findall(r'<p data-layout-block="([^"]+)">重复。</p>', initial)
+        self.assertEqual(len(set(keys)), 2)
+        layouts = {shot_id: {"anchor_block": keys[1], "position": "before", "wrap": "right", "width": "35%"} for shot_id in ("a", "b")}
+        document = render_html_document(markdown, "测试", image_layouts=layouts)
+        self.assertLess(document.index("重复。"), document.index('data-shot-id="a"'))
+        self.assertLess(document.index('data-shot-id="a"'), document.index('data-shot-id="b"'))
+        self.assertEqual(document.count("<figure "), 2)
+        self.assertEqual(document.count("重复。"), 2)
+
+    def test_drag_anchor_and_wrap_are_kept_in_saved_portable_html_and_zip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            novel = "原来的位置。\n\n拖到这里。"
+            initial = render_html_document(novel, "测试")
+            key = re.findall(r'<p data-layout-block="([^"]+)">拖到这里。</p>', initial)[0]
+            image = root / "runs" / "run" / "images" / "shot_01.png"
+            image.parent.mkdir(parents=True)
+            image.write_bytes(b"test image")
+            shot = make_shot(source_excerpt="原来的位置。", source_text="原来的位置。", source_start=0, source_end=7,
+                             image_path=str(image), image_url="/runs/run/images/shot_01.png",
+                             html_layout={"anchor_block": key, "position": "after", "wrap": "right", "width": "42%"})
+            repository = RunRepository(root / "runs")
+            repository.save("run", {"shots": [to_dict(shot)]})
+            restored = Shot(**repository.load("run")["shots"][0])
+            self.assertEqual(restored.html_layout["anchor_block"], key)
+            bundle = build_export_bundle(repository.run_dir("run"), "run", novel, [], [restored])
+            self.assertLess(bundle.html.index("拖到这里。"), bundle.html.index('data-shot-id="shot_01"'))
+            self.assertIn("image-wrap-right", bundle.html)
+            with zipfile.ZipFile(bundle.zip_path) as archive:
+                exported = archive.read("illustrated_novel.html").decode("utf-8")
+            self.assertEqual(exported.replace("\r\n", "\n"), bundle.html)
+
     def test_html_layout_accepts_custom_width_and_rejects_unsafe_width(self) -> None:
         self.assertEqual(
             normalize_html_layout({"position": "left", "width": "420px"}),
