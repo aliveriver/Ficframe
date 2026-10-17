@@ -20,7 +20,7 @@ ficframe = "ficframe.cli:main"
 ficframe-desktop = "ficframe.desktop:main"
 
 [project.optional-dependencies]
-build = ["pyinstaller>=6.11"]
+build = ["pillow>=11.0", "pyinstaller>=6.11"]
 
 [tool.setuptools.packages.find]
 include = ["ficframe*"]

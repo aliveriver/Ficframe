@@ -68,11 +68,11 @@ Windows 仍会为快捷方式、卸载登记和安装期间的临时解压使用
 
 ## 图标占位与替换
 
-统一图标文件位于 `web/favicon.ico`，当前是有效的 FF 占位图，可直接替换为自己的 ICO：
+统一图标文件位于 `web/favicon.ico`，当前是包含 16、24、32、48、64、128、256 像素尺寸的有效 FF ICO 占位图，可直接替换为自己的 ICO：
 
 - Windows 主程序、安装器、开始菜单和桌面快捷方式使用该图标。
 - 浏览器标签页和页面左上角通过 `/favicon.ico` 使用同一文件；Windows / Linux 发布包都会携带它。
-- 建议 ICO 同时包含 16、24、32、48、64、128、256 像素尺寸。需要真正的 ICO 格式，不能只修改 PNG/JPG 的扩展名。
+- 自定义图标需要是真正的 ICO 格式，不能只修改 PNG/JPG 的扩展名。
 - 替换后重新构建发布包；源码运行时刷新页面即可，浏览器仍显示旧图标时可强制刷新。
 
 PyInstaller 的 EXE 图标和 Inno Setup 的安装器图标均已接入这一路径，无需再修改打包配置。相关配置见 [PyInstaller 图标参数](https://pyinstaller.org/en/stable/usage.html#cmdoption-i) 和 [Inno Setup SetupIconFile](https://jrsoftware.org/ishelp/topic_setup_setupiconfile.htm)。
