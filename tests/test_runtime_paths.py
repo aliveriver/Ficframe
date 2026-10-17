@@ -6,9 +6,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from ficframe.desktop import available_port
+from ficframe.desktop import available_port, configure_stdio
 from ficframe.runtime_paths import user_data_root, visual_presets_root
 
 
@@ -48,6 +48,15 @@ class RuntimePathTests(unittest.TestCase):
 
 
 class DesktopPortTests(unittest.TestCase):
+    def test_configure_stdio_uses_utf8_for_frozen_cli_output(self) -> None:
+        stdout = Mock()
+        stderr = Mock()
+        with patch("ficframe.desktop.sys.stdout", stdout), patch("ficframe.desktop.sys.stderr", stderr):
+            configure_stdio()
+
+        stdout.reconfigure.assert_called_once_with(encoding="utf-8", errors="replace")
+        stderr.reconfigure.assert_called_once_with(encoding="utf-8", errors="replace")
+
     def test_available_port_skips_an_occupied_port(self) -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
             occupied.bind(("127.0.0.1", 0))

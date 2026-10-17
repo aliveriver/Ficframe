@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import multiprocessing
 import socket
+import sys
 import threading
 import time
 import urllib.error
@@ -15,6 +16,14 @@ from .runtime_paths import user_data_root
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 PORT_SEARCH_SPAN = 100
+
+
+def configure_stdio() -> None:
+    """Keep CLI output usable when a frozen Windows app starts with a legacy code page."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
 
 
 def available_port(host: str, preferred: int, span: int = PORT_SEARCH_SPAN) -> int:
@@ -51,6 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     multiprocessing.freeze_support()
+    configure_stdio()
     args = build_parser().parse_args()
     port = available_port(args.host, args.port)
     url = f"http://{args.host}:{port}"
