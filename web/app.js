@@ -1218,6 +1218,9 @@ el.rulesToggleBtn.addEventListener("click", () => {
 el.configToggle.addEventListener("click", () => {
   el.configPanel.hidden = !el.configPanel.hidden;
 });
+if (new URLSearchParams(window.location.search).get("config") === "1") {
+  el.configPanel.hidden = false;
+}
 if (el.cleanStartBtn) {
   el.cleanStartBtn.addEventListener("click", () => {
     clearWorkspaceForRecording();

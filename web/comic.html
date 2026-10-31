@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>漫画工作台 · FicFrame</title>
+  <link rel="icon" href="/favicon.ico"><link rel="stylesheet" href="/assets/comic.css">
+  <script src="/assets/comic.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><img src="/favicon.ico" width="26" height="26" alt=""><h1>漫画工作台</h1></div>
+  <nav aria-label="工作区"><a href="/">返回小说配图</a><a href="/?config=1">API 管理</a></nav>
+  <div class="row"><span id="saveStatus" role="status">未打开工程</span><button id="save" class="primary">保存工程</button></div>
+</header>
+<div id="message" class="message" role="status" hidden></div>
+<dialog id="confirmDialog" aria-labelledby="confirmText"><p id="confirmText"></p><div class="row"><button id="confirmCancel">取消</button><button id="confirmAccept" class="primary">确认继续</button></div></dialog>
+<nav class="mobile-nav" aria-label="编辑区域"><a href="#materials">素材与工程</a><a href="#stage">画布</a><a href="#properties">属性与文字</a></nav>
+<main class="workbench">
+  <aside id="materials" class="sidebar materials" aria-label="工程与素材">
+    <section><h2>工程</h2><div class="row"><select id="projects" aria-label="工程列表"><option value="">选择漫画工程</option></select><button id="refreshProjects">刷新</button></div>
+      <div class="row"><button id="newProject">新建工程</button><label class="file-button">导入工程包<input id="importProject" type="file" accept=".zip,.json"></label></div>
+      <label>已有小说工程<select id="runs"><option value="">选择小说工程</option></select></label><button id="importRun">从小说工程导入</button>
+    </section>
+    <section><h2>原文与角色</h2><label>工程名称<input id="title" placeholder="未命名漫画"></label>
+      <label>原文<textarea id="source" rows="8" placeholder="粘贴小说原文，或导入文本文件"></textarea></label>
+      <label class="file-button">导入原文文件<input id="sourceFile" type="file" accept=".txt,.md,text/plain,text/markdown"></label>
+      <details><summary>角色 JSON</summary><p class="hint">保留角色卡字段；可设置 id、identity_core 与 states 状态节点。</p><textarea id="characters" rows="9" spellcheck="false" aria-label="角色 JSON"></textarea><button id="applyCharacters">应用角色 JSON</button></details>
+      <details><summary>角色身份与状态节点</summary><div id="characterForms"></div></details>
+      <label>画风快照<select id="style"><option value="">不使用画风</option></select></label>
+      <details><summary>素材上传</summary><label>素材用途<select id="assetRole"><option value="reference">参考图</option><option value="character">角色</option><option value="scene">场景</option></select></label><input id="assetFile" type="file" accept="image/*" aria-label="上传素材"><output id="assetPath"></output></details>
+    </section>
+    <section><div class="section-head"><h2>场景节点</h2><button id="addScene">新增场景</button></div><div id="sceneForms"></div><p class="hint">参考路径使用上传返回的 assets/...，每行一条。</p></section>
+    <section><h2>规划与生成</h2><div class="grid2"><label>页数<input id="planPages" type="number" value="2" min="1"></label><label>每页画格<input id="planPanels" type="number" value="4" min="1"></label></div>
+      <label>规划要求<textarea id="instructions" rows="3" placeholder="节奏、重点剧情、分镜要求"></textarea></label>
+      <label class="check"><input id="useLlm" type="checkbox" checked>使用语言模型</label>
+      <p class="hint">自动规划会替换现有分页与未锁定内容；已锁定的剧情、状态、提示词、布局由服务端保护。请先保存锁设置。</p>
+      <button id="plan">自动规划（替换）</button><button id="prompts">重建所选格提示词</button>
+      <div class="grid2"><label>生成尺寸<input id="size" value="1024x1024"></label><label>重试次数<input id="retries" type="number" min="0" max="10" value="1"></label></div>
+      <label>生成范围<select id="generateMode"><option value="selected">所选画格</option><option value="missing">所有缺图画格</option><option value="failed">所有失败画格</option></select></label><button id="generate" class="primary">生成图片</button>
+    </section>
+    <section><div class="section-head"><h2>后台任务</h2><button id="refreshTasks">刷新</button></div><div id="tasks" aria-live="polite"><p class="hint">暂无任务</p></div><button id="reload">重新读取工程</button><button id="check">检查工程</button><ul id="issues"></ul></section>
+    <section><h2>脚本与布局历史</h2><select id="history" aria-label="历史版本"></select><p class="hint">恢复脚本与布局，保留现有图片版本。</p><button id="restoreHistory">恢复所选历史</button></section>
+    <section><h2>导出</h2><label>格式<select id="exportFormat"><option value="png">PNG 分页</option><option value="pdf">PDF</option><option value="strip">长条漫画</option><option value="project">工程包</option></select></label>
+      <label>文字覆盖<select id="exportMode"><option value="">使用工程 / 页 / 格设置</option><option value="text">文字</option><option value="blank">空白气泡</option><option value="clean">纯画面</option></select></label>
+      <label class="check"><input id="exportCurrent" type="checkbox">仅当前页</label><button id="export">导出文件</button>
+    </section>
+  </aside>
+  <section id="stage" class="stage" aria-label="漫画画布">
+    <div class="canvas-toolbar"><div class="row"><h2 id="pageLabel">画布</h2><button id="addPage">新增页</button><details class="page-actions"><summary>页面操作</summary><div class="row"><button id="deletePage">删除页</button><button id="pageUp">页前移</button><button id="pageDown">页后移</button></div></details></div><div class="canvas-tools" role="group" aria-label="画布工具"><button id="selectTool" aria-pressed="true">选择 / 移动</button><button id="drawTool" aria-pressed="false">拖框建格</button><span id="canvasHint" class="hint">拖动画格移动，拖动角点缩放；松手自动保存</span></div></div>
+    <div class="canvas-scroll"><div id="empty" class="empty">新建或打开漫画工程，开始编排分镜。</div><div id="paper" class="paper" hidden><img id="preview" alt="服务端漫画分页预览" draggable="false"><div id="overlays" class="overlays"></div><p id="previewError" class="preview-error" hidden>预览尚未生成或加载失败。保存后可重试。</p></div></div>
+    <div class="page-strip" id="pages" aria-label="分页缩略图"></div>
+  </section>
+  <aside id="properties" class="sidebar properties" aria-label="属性编辑器">
+    <section id="projectSettings"><h2>工程与页面</h2><label>工程文字模式<select id="projectMode"></select></label><div id="textSettings" class="row"></div>
+      <div class="grid2"><label>页宽<input id="pageWidth" type="number" min="100" max="10000"></label><label>页高<input id="pageHeight" type="number" min="100" max="10000"></label><label>格间距<input id="gutter" type="number" min="0" max="500"></label><label>页面文字模式<select id="pageMode"></select></label></div>
+      <div class="row"><select id="template" aria-label="分页模板"><option value="4">四格</option><option value="6">六格</option><option value="top">顶部大格</option></select><button id="applyTemplate">应用模板</button></div>
+    </section>
+    <section><div class="section-head"><h2>画格</h2><button id="addPanel">新增格</button></div><div id="panelList" class="panel-list"></div>
+      <div class="row"><button id="deletePanel">删除格</button><button id="splitPanel">拆分格</button><button id="mergePanels">合并勾选格</button></div>
+      <div class="row"><button id="panelUp">上移</button><button id="panelDown">下移</button><select id="movePage" aria-label="目标页"></select><button id="movePanel">跨页移动</button></div>
+    </section>
+    <section id="panelProperties" hidden><h2>分镜属性</h2><div id="panelFields"></div>
+      <label>登场角色<select id="panelCharacters" multiple size="3"></select></label><label>场景节点<select id="scene"></select></label>
+      <label>画格文字模式<select id="panelMode"></select></label><fieldset><legend>锁保护</legend><div id="locks" class="grid2"></div></fieldset>
+      <details open><summary>角色状态绑定</summary><div id="bindings"></div><pre id="effectiveStates"></pre><ul id="review"></ul></details>
+      <details><summary>画格位置与图片裁切</summary><div id="rectFields" class="grid2"></div><div id="cropFields" class="grid2"></div><label>图片版本<select id="imageVersion"></select></label><label>已有候选素材<select id="candidateImage"></select></label><button id="useCandidate">用于当前画格</button><pre id="versionSnapshot"></pre></details>
+    </section>
+    <section id="balloonSection" hidden><div class="section-head"><h2>对白与文字</h2><button id="addBalloon">新增文字</button></div><select id="balloons" aria-label="选择文字气泡"></select><div class="row"><button id="balloonUp">文字前移</button><button id="balloonDown">文字后移</button></div><p class="hint">文字按此顺序阅读与叠放。字体使用内置 Noto，预览与导出一致。</p><div id="balloonFields"></div><button id="deleteBalloon">删除所选文字</button></section>
+    <section><details><summary>高级 JSON 编辑</summary><label>编辑对象<select id="advancedTarget"><option value="panel">所选画格</option><option value="page">当前页</option><option value="project">完整工程</option></select></label><p class="hint">用于场景参考图、角色身份核心等完整字段。应用时校验结构，工程 ID 与 revision 保持不变。</p><textarea id="advanced" rows="12" spellcheck="false" aria-label="高级 JSON"></textarea><div class="row"><button id="readAdvanced">读取当前对象</button><button id="applyAdvanced">应用 JSON</button></div></details></section>
+  </aside>
+</main>
+</body>
+</html>

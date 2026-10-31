@@ -4,6 +4,7 @@ version = "1.4.0"
 description = "A local toolkit for turning fan-fiction chapters and character notes into consistent image prompts."
 requires-python = ">=3.10"
 dependencies = [
+    "pillow>=11.0",
     "fastapi>=0.116",
     "httpx>=0.28",
     "python-dotenv>=1.2",

@@ -80,6 +80,9 @@ LOGS = setup_logging(ROOT)
 logger = get_logger("api")
 
 app = FastAPI(title="FicFrame API")
+from .comic_routes import create_router as create_comic_router
+import sys
+app.include_router(create_comic_router(sys.modules[__name__]))
 app.mount("/assets", StaticFiles(directory=WEB), name="assets")
 app.mount("/runs", StaticFiles(directory=RUNS), name="runs")
 

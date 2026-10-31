@@ -1,0 +1,9 @@
+Noto Sans SC variable TrueType font (unmodified)
+Bundled filename: NotoSansSC.ttf
+Upstream filename: NotoSansSC[wght].ttf
+Upstream: https://github.com/google/fonts/tree/main/ofl/notosanssc
+Font download: https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf
+License download: https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/notosanssc/OFL.txt
+Retrieved: 2026-10-31
+License: SIL Open Font License 1.1; see OFL.txt in this directory.
+Rendering selects the Regular variation. The font binary has not been modified.

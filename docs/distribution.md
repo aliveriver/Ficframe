@@ -9,6 +9,8 @@ FicFrame 的发布包内置 Python 解释器和全部运行依赖。最终用户
 
 macOS 不在当前发布范围内。
 
+漫画工作台使用 Pillow（已纳入主运行依赖）和随 `web/fonts/` 分发的 Noto Sans SC 中文字体。Windows/Linux 共用的 PyInstaller 配置已包含整个 `web/` 目录，字体与 SIL OFL 许可将一同打包；请勿在精简资源时移除。漫画工程持久化于 `data/outputs/comics/`，沿用便携数据迁移策略。
+
 ## 最终用户安装
 
 ### Windows 安装器
