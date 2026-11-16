@@ -108,6 +108,32 @@ class ComicAPITests(unittest.TestCase):
         self.assertEqual(repo.pipeline_path(run_id).read_bytes(),original)
         self.assertEqual(repo.novel_path(run_id).read_text(encoding='utf-8'),'原小说正文')
 
+    def test_character_preview_and_reference_binding_are_persisted(self):
+        project = self.create()
+        root = '/api/comics/' + project['id']
+        preview = self.client.post(root + '/characters/preview', json={'text': '# 小林\n- 外貌：黑发，白外套\n- 固定：始终带工具箱\n\n# 小雨\n- 外貌：短发，蓝色夹克'})
+        self.assertEqual(preview.status_code, 200, preview.text)
+        saved = self.client.get(root).json()
+        self.assertEqual([card['name'] for card in saved['characters']], ['小林', '小雨'])
+        self.assertTrue(saved['characters'][0]['states'])
+        image = io.BytesIO()
+        Image.new('RGB', (32, 32), 'purple').save(image, format='PNG')
+        bound = self.client.post(root + '/characters/references', files={'reference_images': ('xiaolin.png', image.getvalue(), 'image/png')}, data={'reference_bindings': '[{"filename":"xiaolin.png","character":"小林"}]'})
+        self.assertEqual(bound.status_code, 200, bound.text)
+        saved = bound.json()
+        self.assertEqual(len(saved['characters'][0]['reference_images']), 1)
+        self.assertTrue(saved['characters'][0]['reference_images'][0].startswith('assets/'))
+
+    def test_local_prompt_bank_endpoint_writes_identity_and_states(self):
+        project = self.create()
+        root = '/api/comics/' + project['id']
+        self.client.post(root + '/characters/preview', json={'text': '# 小林\n- 外貌：黑发，白外套'})
+        response = self.client.post(root + '/characters/prompt-bank/local', json={'characters': self.client.get(root).json()['characters'], 'scenes': []})
+        self.assertEqual(response.status_code, 200, response.text)
+        card = self.client.get(root).json()['characters'][0]
+        self.assertTrue(card['identity_core'])
+        self.assertTrue(card['states'])
+
     def test_history_restores_script_without_erasing_images(self):
         project = self.create()
         root = '/api/comics/'+project['id']

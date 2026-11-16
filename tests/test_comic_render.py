@@ -41,6 +41,14 @@ def zip_bytes(files):
 
 
 class ComicRenderTests(unittest.TestCase):
+    def test_non_rectangular_panel_shapes_render_with_clipping(self):
+        document = project()
+        panel = document['pages'][0]['panels'][0]
+        for shape in ('rounded', 'circle', 'diamond', 'hexagon'):
+            panel['shape'] = shape
+            image = render.render_page(document, document['pages'][0], {'assets/a.png': png()})
+            self.assertEqual(image.size, (300, 400))
+
     def setUp(self):
         self.project = project()
         self.page = self.project["pages"][0]

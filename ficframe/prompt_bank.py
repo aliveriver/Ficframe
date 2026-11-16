@@ -694,6 +694,11 @@ def reference_paths_for_card(card: CharacterCard, run_dir: Path) -> list[Path]:
     paths: list[Path] = []
     for reference in card.reference_images:
         url = str(reference).split(" (", 1)[0]
+        if url.startswith("assets/"):
+            path = run_dir / url
+            if path.exists():
+                paths.append(path)
+            continue
         if not url.startswith("/runs/"):
             continue
         parts = url.strip("/").split("/")

@@ -32,7 +32,7 @@
     for (const page of value.pages) {
       id(page);
       if (!(page.width >= 100 && page.height >= 100) || !Array.isArray(page.panels)) throw new Error('页面尺寸至少为 100，且须包含 panels 数组');
-      for (const panel of page.panels) { id(panel); if (!panel.rect || !Array.isArray(panel.balloons || [])) throw new Error('画格需要 rect 和 balloons 数组'); for (const balloon of panel.balloons || []) id(balloon); }
+      for (const panel of page.panels) { id(panel); if (!panel.rect || !Array.isArray(panel.balloons || [])) throw new Error('画格需要 rect 和 balloons 数组'); if (!['rectangle', 'rounded', 'circle', 'diamond', 'hexagon'].includes(panel.shape || 'rectangle')) throw new Error('画格形状无效'); for (const balloon of panel.balloons || []) id(balloon); }
     }
     return value;
   }
@@ -70,7 +70,7 @@
 
   function boot() {
     const $ = id => document.getElementById(id);
-    const state = { project: null, pageId: null, panelId: null, balloonId: null, checked: new Set(), version: 0, presets: [], busy: false, poll: null, taskSignature: '', refreshPending: false, charactersDirty: false, advancedDirty: false, epoch: 0 };
+    const state = { project: null, pageId: null, panelId: null, balloonId: null, checked: new Set(), version: 0, presets: [], busy: false, poll: null, taskSignature: '', refreshPending: false, charactersDirty: false, advancedDirty: false, epoch: 0, characterReferences: [] };
     const page = () => state.project?.pages.find(p => p.id === state.pageId);
     const panel = () => page()?.panels.find(p => p.id === state.panelId);
     const balloon = () => panel()?.balloons?.find(b => b.id === state.balloonId);
@@ -132,6 +132,78 @@
       for (const c of list) c.id ||= uid('char');
       if (new Set(list.map(c => c.id)).size !== list.length) throw new Error('角色 ID 不可重复');
       needProject(); state.project.characters = list; state.charactersDirty = false; dirty();
+    }
+    function characterText() { return $('characterSource').value.trim() || $('source').value || ''; }
+    function characterCards() { return state.project?.characters || []; }
+    function characterLabMessage(text, error = false) {
+      $('characterLabStatus').textContent = text || '';
+      $('characterLabStatus').classList.toggle('error', error);
+    }
+    function characterNames() { return characterCards().map(card => [card.name || card.id, card.name || card.id]); }
+    function renderCharacterDiff() {
+      const analysis = state.project?.character_difference_analysis;
+      if (!analysis) { $('characterDiff').textContent = ''; return; }
+      const pairs = (analysis.pairs || []).slice(0, 8);
+      $('characterDiff').textContent = pairs.length
+        ? ['角色差异分析', ...pairs.map(pair => `${pair.left || ''} / ${pair.right || ''} · ${pair.risk_level || '提示'}(${pair.risk_score || 0})\n共享：${(pair.shared_features || []).join('、') || '较少'}`)].join('\n\n')
+        : '角色差异分析：暂无明显混淆风险';
+    }
+    function renderCharacterSummary() {
+      const cards = characterCards();
+      const summary = cards.length
+        ? cards.map(card => `${card.name || card.id} · ${card.states?.length || 0} 个状态 · ${card.reference_images?.length || 0} 张参考图`).join('\n')
+        : '尚未识别角色';
+      $('characterSummary').textContent = summary;
+    }
+    function renderCharacterReferences() {
+      const root = $('characterReferenceTable');
+      const files = [...($('characterReferenceFiles').files || [])];
+      const previous = new Map(state.characterReferences.map(item => [item.filename, item]));
+      state.characterReferences = files.map(file => previous.get(file.name) || { filename: file.name, character: characterCards().length === 1 ? characterCards()[0].name : '', previewUrl: URL.createObjectURL(file) });
+      const saved = characterCards().flatMap(card => (card.reference_images || []).map((path, index) => ({
+        filename: `${card.name || card.id} · 参考图 ${index + 1}`,
+        character: card.name || card.id,
+        previewUrl: `${base()}/assets/${String(path).replace(/^assets\//, '').split('/').map(encoded).join('/')}`,
+        saved: true,
+      })));
+      if (!state.characterReferences.length && !saved.length) { root.innerHTML = '<p class="muted">尚未选择新的参考图</p>'; return; }
+      const options = [['', '未绑定'], ...characterNames()];
+      root.replaceChildren(
+        ...saved.map(item => {
+          const row = node('div', null, 'reference-row comic-reference-row saved-reference');
+          const image = node('img'); image.src = item.previewUrl; image.alt = item.filename;
+          row.append(image, node('div', item.filename, 'reference-name'), node('span', '已保存', 'muted'));
+          return row;
+        }),
+        ...state.characterReferences.map((item, index) => {
+        const row = node('div', null, 'reference-row comic-reference-row');
+        const image = node('img'); image.src = item.previewUrl; image.alt = item.filename;
+        const name = node('div', item.filename, 'reference-name');
+        const select = node('select'); setOptions(select, options, item.character);
+        select.onchange = () => { item.character = select.value; };
+        row.append(image, name, select); return row;
+        })
+      );
+    }
+    function applyCharacterLabResult(data, status) {
+      if (data.project?.pages) hydrate(data.project);
+      renderCharacterDiff(); renderCharacterReferences(); renderCharacterSummary(); characterLabMessage(status || data.status || '人设资料已更新');
+    }
+    async function characterLabRequest(path, body) {
+      needProject();
+      const result = await request(`${base()}${path}`, { method: 'POST', body: JSON.stringify(body) });
+      applyCharacterLabResult(result, result.status);
+    }
+    async function uploadCharacterReferences() {
+      needProject();
+      const files = [...($('characterReferenceFiles').files || [])];
+      if (!files.length) throw new Error('请先选择角色参考图');
+      const form = new FormData();
+      form.append('reference_bindings', JSON.stringify(state.characterReferences.map(item => ({ filename: item.filename, character: item.character }))));
+      files.forEach(file => form.append('reference_images', file));
+      const result = await request(`${base()}/characters/references`, { method: 'POST', body: form });
+      hydrate(result.project || result); $('characterReferenceFiles').value = ''; state.characterReferences = [];
+      renderCharacterReferences(); characterLabMessage('角色参考图已保存，可继续生成 Prompt Bank 或直接生成图片');
     }
     function advancedObject() { return $('advancedTarget').value === 'project' ? state.project : $('advancedTarget').value === 'page' ? page() : panel(); }
     function applyAdvanced() {
@@ -248,6 +320,7 @@
       n.tabIndex = 0; n.setAttribute('role', 'button'); n.setAttribute('aria-label', label); n.setAttribute('aria-pressed', String(selected));
       if (kind === 'panel') {
         n.dataset.panelId = owner.id;
+        n.dataset.shape = owner.shape || 'rectangle';
         const content = node('div', null, 'panel-content');
         const crop = node('img'); crop.src = $('preview').src; crop.alt = ''; crop.draggable = false;
         const r = normalizeRect(target.rect);
@@ -335,6 +408,8 @@
       const p = state.project, pg = page();
       modeOptions('projectMode', p?.lettering_mode || 'text', false); modeOptions('pageMode', pg?.lettering_mode || 'inherit');
       $('pageWidth').value = pg?.width || ''; $('pageHeight').value = pg?.height || ''; $('gutter').value = pg?.gutter ?? '';
+      $('pagePanelCount').value = pg?.panels?.length || 0;
+      $('pagePanelCountHint').textContent = pg ? `${pg.panels.length} 格 · ${pg.width} × ${pg.height}` : '打开工程后可编辑';
       $('textSettings').replaceChildren();
       for (const [key, label] of [['dialogue', '对白'], ['narration', '旁白'], ['sfx', '音效']]) field($('textSettings'), label, p?.text_settings?.[key] !== false, value => { if (!p) return; p.text_settings ||= {}; p.text_settings[key] = value; renderOverlays(); }, 'checkbox');
     }
@@ -350,6 +425,7 @@
     function renderPanel() {
       const p = panel(); $('panelProperties').hidden = !p; $('balloonSection').hidden = !p;
       if (!p) return;
+      setOptions($('panelShape'), [['rectangle', '矩形'], ['rounded', '圆角矩形'], ['circle', '圆形 / 椭圆'], ['diamond', '菱形'], ['hexagon', '六边形']], p.shape || 'rectangle');
       const fields = $('panelFields'); fields.replaceChildren();
       for (const [key, label, type] of [['description', '剧情', 'textarea'], ['source_ref', '原文定位（文本或 JSON）', 'textarea'], ['actions', '动作'], ['expression', '表情'], ['camera', '镜头'], ['angle', '角度'], ['time', '时间'], ['positive_prompt', '正向提示词', 'textarea'], ['negative_prompt', '负向提示词', 'textarea']]) {
         field(fields, label, typeof p[key] === 'object' ? JSON.stringify(p[key]) : p[key], value => { if (key === 'source_ref' && /^[\[{]/.test(value.trim())) { try { p[key] = JSON.parse(value); } catch (_) { p[key] = value; } } else p[key] = value; }, type);
@@ -439,8 +515,9 @@
     function renderAll() {
       renderCharacterForms(); renderSceneForms();
       setOptions($('history'), (state.project.history || []).map((entry, i) => [String(i), entry.label || entry.title || `${i + 1} · ${entry.action || '历史快照'} ${entry.created_at || entry.at || ''}`]));
-      $('title').value = state.project.title; $('source').value = state.project.source_text || ''; $('characters').value = JSON.stringify(state.project.characters, null, 2);
+      $('title').value = state.project.title; $('source').value = state.project.source_text || ''; $('characterSource').value = state.project.character_source_text || ''; $('characters').value = JSON.stringify(state.project.characters, null, 2);
       $('style').value = state.project.style?.id || ''; $('advanced').value = ''; renderPageSettings(); renderPages(); renderPanelList(); renderPanel(); renderPreview();
+      renderCharacterDiff(); renderCharacterReferences(); renderCharacterSummary();
     }
     async function submitTask(kind, body) {
       await exclusive(async () => { await flush(); await request(`${base()}/${kind}-task`, { method: 'POST', body: JSON.stringify(body) }); });
@@ -480,7 +557,7 @@
     bind('newProject', () => exclusive(async () => {
       if (state.project) await flush();
       const title = state.project ? '未命名漫画' : $('title').value || '未命名漫画';
-      const result = await request('/api/comics', { method: 'POST', body: JSON.stringify({ title: title || '未命名漫画', source_text: '', characters: [] }) });
+      const result = await request('/api/comics', { method: 'POST', body: JSON.stringify({ title: title || '未命名漫画', source_text: $('source').value || '', character_source_text: $('characterSource').value || '', characters: [] }) });
       const p = result.project || result; if (p.pages) hydrate(p); else await load(p.id || p.project_id, false); await listProjects(); await pollTasks();
     }));
     bind('importRun', () => exclusive(async () => { if (!$('runs').value) throw new Error('请选择小说工程'); await createProject($('runs').value); }));
@@ -497,7 +574,17 @@
     }, 'change');
     for (const [id, key] of [['title', 'title'], ['source', 'source_text']]) bind(id, () => { if (state.project) { state.project[key] = $(id).value; dirty(); } }, 'input');
     bind('characters', () => { state.charactersDirty = true; $('saveStatus').textContent = '角色 JSON 待应用'; }, 'input');
+    bind('characterSource', () => { if (state.project) { state.project.character_source_text = $('characterSource').value; dirty(); } }, 'input');
+    bind('characterSourceFile', async e => { const file = e.target.files[0]; if (!file) return; $('characterSource').value = await file.text(); if (state.project) { state.project.character_source_text = $('characterSource').value; dirty(); } e.target.value = ''; characterLabMessage(`已载入人设文件：${file.name}，点击“本地识别角色”开始拆分`); }, 'change');
     bind('applyCharacters', () => { applyCharacters(); renderCharacterForms(); renderPanel(); message('角色已应用，保存后生效。'); });
+    bind('comicPreviewCharacters', () => characterLabRequest('/characters/preview', { text: characterText() }));
+    bind('comicExtractCharacters', () => characterLabRequest('/characters/llm/extract', { text: characterText() }));
+    bind('comicEnhanceCharacters', () => characterLabRequest('/characters/llm/enhance', { characters: characterCards() }));
+    bind('comicLocalPromptBank', () => characterLabRequest('/characters/prompt-bank/local', { characters: characterCards(), scenes: state.project?.scenes || [], text: characterText() }));
+    bind('comicPromptBank', () => characterLabRequest('/characters/llm/prompt-bank', { characters: characterCards(), scenes: state.project?.scenes || [], text: characterText() }));
+    bind('comicCharacterDiff', () => characterLabRequest('/characters/llm/diff', { characters: characterCards() }));
+    bind('characterReferenceFiles', renderCharacterReferences, 'change');
+    bind('uploadCharacterReferences', uploadCharacterReferences);
     bind('style', () => exclusive(async () => { needProject(); const id = $('style').value; await flush(); const preset = state.presets.find(p => p.id === id); const result = await request(`${base()}/style`, { method: 'POST', body: JSON.stringify({ id, reference_mode: preset?.reference_mode || 'text' }) }); hydrate(result.project || result); }), 'change');
     bind('assetFile', e => exclusive(async () => {
       const file = e.target.files[0]; if (!file) return; await flush(); const form = new FormData(); form.append('file', file); form.append('role', $('assetRole').value);
@@ -534,6 +621,12 @@
     }
     bind('panelUp', () => movePanel(-1)); bind('panelDown', () => movePanel(1)); bind('movePanel', () => movePanel(null, $('movePage').value));
     bind('applyTemplate', () => operation('template', { template: $('template').value }));
+    bind('applyPagePanelCount', () => {
+      const count = Number($('pagePanelCount').value);
+      if (!page() || !Number.isInteger(count) || count < 1) throw new Error('请输入有效的本页画格数');
+      return operation('set_panel_count', { count, template: $('template').value });
+    });
+    bind('panelShape', () => { if (panel()) { panel().shape = $('panelShape').value; dirty(); renderOverlays(); } }, 'change');
     for (const [id, key] of [['pageWidth', 'width'], ['pageHeight', 'height'], ['gutter', 'gutter']]) bind(id, () => { if (page() && $(id).checkValidity() && $(id).value !== '') { page()[key] = Number($(id).value); dirty(); $('paper').style.aspectRatio = `${page().width} / ${page().height}`; } }, 'input');
     for (const [id, object] of [['projectMode', () => state.project], ['pageMode', page], ['panelMode', panel]]) bind(id, () => { const target = object(); if (target) { target.lettering_mode = $(id).value; dirty(); renderOverlays(); } }, 'change');
     bind('panelCharacters', () => { if (!panel()) return; panel().characters = [...$('panelCharacters').selectedOptions].map(o => o.value); dirty(); renderPanel(); }, 'change');
@@ -571,22 +664,6 @@
     $('preview').onerror = () => { $('previewError').hidden = false; }; $('preview').onload = () => { $('previewError').hidden = true; };
     document.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); $('save').click(); } });
     global.addEventListener('beforeunload', e => { if (state.version !== saver.savedVersion || state.charactersDirty || state.advancedDirty) { e.preventDefault(); e.returnValue = ''; } });
-    // Keep existing controls and handlers, but show one focused workspace at a time.
-    const materials = $('materials'), sections = [...materials.children];
-    const tabs = node('div', null, 'workspace-tabs'); tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', '工作面板');
-    const groups = [['工程', [0, 5, 6]], ['素材', [1, 2]], ['生成', [3, 4]]];
-    groups.forEach(([label, indices], index) => {
-      const tab = node('button', label); tab.setAttribute('role', 'tab'); tab.setAttribute('aria-selected', String(index === 0));
-      tab.onclick = () => { sections.forEach((section, i) => { section.hidden = !indices.includes(i); }); [...tabs.children].forEach(button => button.setAttribute('aria-selected', String(button === tab))); };
-      tabs.append(tab);
-    });
-    materials.prepend(tabs);
-    for (const index of [4, 5, 6, 7]) {
-      const section = sections[index]; if (!section) continue;
-      const heading = section.querySelector('h2'), details = node('details'), summary = node('summary', heading?.textContent || '更多操作');
-      if (heading) heading.remove(); details.append(summary); while (section.firstChild) details.append(section.firstChild); section.append(details);
-    }
-    tabs.children[0].click();
     $('characters').value = '[]'; renderPageSettings();
     Promise.allSettled([
       listProjects(),

@@ -32,6 +32,7 @@ MAX_PAGE_PIXELS = 32_000_000
 STRIP_MAX_HEIGHT = 8192
 _MODES = {"text", "blank", "clean"}
 _KINDS = {"dialogue", "narration", "sfx"}
+_SHAPES = {"rectangle", "rounded", "circle", "diamond", "hexagon"}
 
 
 def _number(value: Any, default: float = 0) -> float:
@@ -175,11 +176,50 @@ def _panel_size(page: dict, panel: dict) -> tuple[int, int, int, int]:
     return x + inset, y + inset, w - inset * 2, h - inset * 2
 
 
+def _shape_points(shape: str, width: int, height: int) -> list[tuple[int, int]]:
+    if shape == "diamond":
+        return [(width // 2, 0), (width - 1, height // 2), (width // 2, height - 1), (0, height // 2)]
+    if shape == "hexagon":
+        dx = max(1, round(width * .16))
+        return [(dx, 0), (width - dx - 1, 0), (width - 1, height // 2), (width - dx - 1, height - 1), (dx, height - 1), (0, height // 2)]
+    return []
+
+
+def _shape_mask(shape: str, width: int, height: int) -> Image.Image:
+    if shape not in _SHAPES:
+        raise ValueError("Unknown panel shape")
+    mask = Image.new("L", (width, height), 0)
+    draw = ImageDraw.Draw(mask)
+    if shape == "circle":
+        draw.ellipse((0, 0, width - 1, height - 1), fill=255)
+    elif shape == "rounded":
+        draw.rounded_rectangle((0, 0, width - 1, height - 1), radius=max(1, round(min(width, height) * .12)), fill=255)
+    elif shape in {"diamond", "hexagon"}:
+        draw.polygon(_shape_points(shape, width, height), fill=255)
+    else:
+        draw.rectangle((0, 0, width - 1, height - 1), fill=255)
+    return mask
+
+
+def _draw_shape_outline(draw: ImageDraw.ImageDraw, shape: str, width: int, height: int, stroke: int) -> None:
+    if shape == "circle":
+        draw.ellipse((0, 0, width - 1, height - 1), outline="black", width=stroke)
+    elif shape == "rounded":
+        draw.rounded_rectangle((0, 0, width - 1, height - 1), radius=max(1, round(min(width, height) * .12)), outline="black", width=stroke)
+    elif shape in {"diamond", "hexagon"}:
+        points = _shape_points(shape, width, height)
+        draw.line(points + [points[0]], fill="black", width=stroke, joint="curve")
+    else:
+        draw.rectangle((0, 0, width - 1, height - 1), outline="black", width=stroke)
+
+
 def inspect_text(project: dict, page: dict, mode: str | None = None) -> list[dict]:
     """Return overflow warnings with page/panel/balloon ids and wrapped lines."""
     _validate_project(project)
     warnings = []
     for panel in page.get("panels", []):
+        if panel.get("shape", "rectangle") not in _SHAPES:
+            raise ValueError("Unknown panel shape")
         _, _, pw, ph = _panel_size(page, panel)
         if _mode(project, page, panel, mode) != "text":
             continue
@@ -248,6 +288,9 @@ def render_page(project: dict, page: dict, asset_resolver: Any, mode: str | None
     _validate_project(project)
     canvas = Image.new("RGB", _size(page), "white")
     for panel in page.get("panels", []):
+        shape = panel.get("shape", "rectangle")
+        if shape not in _SHAPES:
+            raise ValueError("Unknown panel shape")
         x, y, width, height = _panel_size(page, panel)
         tile = Image.new("RGB", (width, height), "white")
         if panel.get("current_image"):
@@ -285,8 +328,9 @@ def render_page(project: dict, page: dict, asset_resolver: Any, mode: str | None
                     for text, lx, ly in layout["positions"]:
                         ink.text((lx, ly), text, font=layout["font"], fill="black")
                     tile.paste(layer, (bx, by), layer)
-        ImageDraw.Draw(tile).rectangle((0, 0, width - 1, height - 1), outline="black", width=max(1, round(min(width, height) / 400)))
-        canvas.paste(tile, (x, y))
+        stroke = max(1, round(min(width, height) / 400))
+        _draw_shape_outline(ImageDraw.Draw(tile), shape, width, height, stroke)
+        canvas.paste(tile, (x, y), _shape_mask(shape, width, height))
     return canvas
 
 

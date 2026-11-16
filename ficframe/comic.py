@@ -12,6 +12,7 @@ from .source_reference import build_novel_source_ref, build_description_source_r
 
 SCHEMA_VERSION = 1
 MODES = {'inherit', 'text', 'blank', 'clean'}
+PANEL_SHAPES = {'rectangle', 'rounded', 'circle', 'diamond', 'hexagon'}
 SCRIPT_FIELDS = ('description', 'characters', 'actions', 'expression', 'camera', 'angle', 'scene_id', 'time', 'source_ref', 'balloons')
 
 
@@ -23,6 +24,17 @@ def panels(project):
     return [panel for page in project['pages'] for panel in page['panels']]
 
 
+def detect_characters(text, characters):
+    """Match character names and aliases in a panel's source text."""
+    haystack = str(text or '')
+    matches = []
+    for card in characters or []:
+        names = [card.get('name', ''), *(card.get('aliases') or [])]
+        if any(name and name in haystack for name in names):
+            matches.append(card.get('id'))
+    return [value for value in matches if value]
+
+
 def panel_by_id(project, panel_id):
     return next(panel for panel in panels(project) if panel['id'] == panel_id)
 
@@ -31,7 +43,7 @@ def new_panel(description=''):
     return dict(id=uid('panel'), description=description, characters=[], actions='', expression='', camera='中景',
                 angle='平视', scene_id='', time='', source_ref=build_description_source_ref(description),
                 positive_prompt='', negative_prompt='', rect=dict(x=.04, y=.04, w=.92, h=.92),
-                crop=dict(x=.5, y=.5, zoom=1), lettering_mode='inherit', locks={}, state_bindings={},
+                shape='rectangle', crop=dict(x=.5, y=.5, zoom=1), lettering_mode='inherit', locks={}, state_bindings={},
                 effective_states={}, needs_review=[], balloons=[], image_versions=[], current_image=None)
 
 
@@ -41,8 +53,8 @@ def new_page():
 
 def template(page, kind='auto'):
     count = len(page['panels'])
-    target_count = 6 if str(kind) in {'six', '6'} else 4
-    if str(kind) in {'four','4','six','6','top','top-large'} and count < target_count:
+    target_count = 6 if str(kind) in {'six', '6'} else 3 if str(kind) in {'three', '3', 'grid-3'} else 4
+    if str(kind) in {'four','4','three','3','grid-3','six','6','top','top-large'} and count < target_count:
         page['panels'].extend(new_panel() for _ in range(target_count-count))
         count = target_count
     if not count:
@@ -52,7 +64,7 @@ def template(page, kind='auto'):
     for index, panel in enumerate(page['panels']):
         if panel.get('locks', {}).get('layout'):
             continue
-        columns = 1 if count == 1 else 2
+        columns = 1 if count == 1 else 3 if str(kind) in {'three', '3', 'grid-3'} else 2
         rows = math.ceil(count / columns)
         if str(kind) in {'top', 'top-large'} and count > 1:
             if index == 0:
@@ -61,6 +73,12 @@ def template(page, kind='auto'):
                 lower_rows = math.ceil((count - 1) / 2)
                 rect = dict(x=.03 + ((index - 1) % 2) * .47, y=.5 + ((index - 1) // 2) * .47 / lower_rows,
                             w=.47, h=.47 / lower_rows)
+        elif str(kind) in {'feature-left', 'hero-left'} and count > 1:
+            if index == 0:
+                rect = dict(x=.03, y=.03, w=.57, h=.94)
+            else:
+                small_count = count - 1
+                rect = dict(x=.63, y=.03 + ((index - 1) * .94 / small_count), w=.34, h=.94 / small_count - .02)
         else:
             rect = dict(x=.03 + (index % columns) * .94 / columns, y=.03 + (index // columns) * .94 / rows,
                         w=.94 / columns, h=.94 / rows)
@@ -73,13 +91,15 @@ def normalize_characters(characters):
         card.setdefault('id', uid('char'))
         # Old identity prompts can contain baseline clothing. Require an explicit
         # identity-only fragment instead of guessing which words are garments.
-        card.setdefault('identity_core', ', '.join(card.get('fixed_traits') or []))
+        card.setdefault('identity_core', ', '.join(card.get('fixed_traits') or card.get('visual_traits') or []) or card.get('identity_prompt', ''))
         card.setdefault('states', [])
         if not card['states']:
             variable = card.get('variable_states') or {}
             for item in card.get('appearance_states') or []:
-                card['states'].append(dict(id=uid('state'), label=item.get('label', '外貌状态'),
-                                           outfit=item.get('prompt', ''), props='', injuries='', confirmed=False))
+                label = item.get('label', '外貌状态')
+                card['states'].append(dict(id=uid('state'), label=label,
+                                           outfit=item.get('prompt', ''), props=item.get('props', ''), injuries=item.get('injuries', ''),
+                                           confirmed=label.lower() in {'default', '默认', '基础状态'} or not card['states']))
             if variable:
                 card['states'].insert(0, dict(id=uid('state'), label='资料默认状态', outfit=variable.get('outfit', ''),
                                              props=variable.get('props', ''), injuries=variable.get('injuries', ''), confirmed=True))
@@ -126,6 +146,9 @@ def validate(project):
                 raise ValueError('嵌字模式无效')
         for panel in page['panels']:
             unique(panel['id'])
+            panel['shape'] = panel.get('shape', 'rectangle')
+            if panel['shape'] not in PANEL_SHAPES:
+                raise ValueError('画格形状无效')
             reference = panel.get('source_ref')
             if isinstance(reference,str):
                 reference = {'kind':'novel','quote':reference}
@@ -221,6 +244,25 @@ def operation(project, request):
     elif action == 'add_panel':
         page['panels'].append(new_panel())
         template(page)
+    elif action == 'set_panel_count':
+        try:
+            target_count = int(request.get('count', 0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError('本页画格数必须是整数') from exc
+        if not 1 <= target_count <= 100:
+            raise ValueError('本页画格数必须在 1–100 之间')
+        locked_count = sum(bool(panel.get('locks', {}).get('layout')) for panel in page['panels'])
+        if target_count < locked_count:
+            raise ValueError(f'本页有 {locked_count} 个布局锁定画格，无法减少到 {target_count} 格')
+        while len(page['panels']) < target_count:
+            page['panels'].append(new_panel())
+        if len(page['panels']) > target_count:
+            removable = [panel for panel in reversed(page['panels']) if not panel.get('locks', {}).get('layout')]
+            remove_count = len(page['panels']) - target_count
+            removed = set(id(panel) for panel in removable[:remove_count])
+            page['panels'] = [panel for panel in page['panels'] if id(panel) not in removed]
+        layout_kind = request.get('template', 'auto')
+        template(page, layout_kind if layout_kind in {'top', 'top-large', 'feature-left', 'hero-left'} else 'auto')
     elif action == 'template':
         template(page, request.get('template', 'four'))
     else:
@@ -347,6 +389,18 @@ def plan_script(project, page_count, per_page, instructions='', provider=None):
             for key in SCRIPT_FIELDS:
                 if key in candidate and key not in {'source_ref','balloons'}:
                     panel[key] = deepcopy(candidate[key])
+            cards_by_id = {card['id']: card for card in project.get('characters', [])}
+            cards_by_name = {card.get('name'): card for card in project.get('characters', [])}
+            requested_characters = candidate.get('characters')
+            if isinstance(requested_characters, list):
+                resolved = []
+                for value in requested_characters:
+                    card = cards_by_id.get(value) or cards_by_name.get(value)
+                    if card and card['id'] not in resolved:
+                        resolved.append(card['id'])
+                panel['characters'] = resolved
+            if not panel.get('characters'):
+                panel['characters'] = detect_characters(panel.get('description', ''), project.get('characters', []))
             if 'balloons' in candidate:
                 panel['balloons'] = [dict(id=uid('balloon'), kind=b.get('kind','dialogue'), speaker=b.get('speaker',''),
                     text=b.get('text',''), rect=dict(x=.06,y=min(.1+i*.2,.7),w=.8,h=.18), font_size=28,

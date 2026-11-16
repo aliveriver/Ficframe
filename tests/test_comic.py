@@ -31,6 +31,28 @@ def fixture():
 
 
 class ComicRulesTests(unittest.TestCase):
+    def test_panel_count_operation_supports_custom_count_and_layout_template(self):
+        project = new_project()
+        operation(project, dict(action='set_panel_count', page_id=project['pages'][0]['id'], count=3, template='three'))
+        self.assertEqual(len(project['pages'][0]['panels']), 3)
+        self.assertEqual(project['pages'][0]['panels'][0]['rect']['w'], project['pages'][0]['panels'][1]['rect']['w'])
+
+    def test_panel_count_cannot_remove_layout_locked_panels(self):
+        project = new_project()
+        page = project['pages'][0]
+        page['panels'][0]['locks']['layout'] = True
+        page['panels'].append(new_panel())
+        page['panels'][1]['locks']['layout'] = True
+        with self.assertRaisesRegex(ValueError, '布局锁定'):
+            operation(project, dict(action='set_panel_count', page_id=page['id'], count=1))
+
+    def test_panel_shape_defaults_and_is_validated(self):
+        project = new_project()
+        self.assertEqual(project['pages'][0]['panels'][0]['shape'], 'rectangle')
+        project['pages'][0]['panels'][0]['shape'] = 'triangle'
+        with self.assertRaisesRegex(ValueError, '形状'):
+            validate(project)
+
     def test_cross_page_state_and_reorder(self):
         project = fixture()
         p = panels(project)

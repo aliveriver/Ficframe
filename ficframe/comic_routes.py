@@ -13,6 +13,12 @@ from fastapi.responses import FileResponse, Response
 from .comic import new_project, normalize_characters, operation, panels, plan_script, recompute, validate
 from .comic_repository import ComicRepository, RevisionConflict
 from .comic_workflow import generate, rebuild_prompts
+from .characters import build_character_cards
+from .character_diff import analyze_character_differences
+from .llm_pipeline import enhance_character_cards_with_llm, extract_character_cards_with_llm_detailed
+from .models import to_dict
+from .payloads import parse_character_payload, parse_scene_payload
+from .prompt_bank import analyze_reference_visuals, build_character_prompt_bank
 from .run_repository import RunRepository
 from .task_manager import TaskManager
 
@@ -50,6 +56,31 @@ def create_router(api):
         except (ValueError, KeyError, StopIteration, TypeError) as exc:
             raise HTTPException(400,str(exc) or '画格或页面不存在') from exc
 
+    def comic_character_payload(project, cards):
+        normalized = normalize_characters([to_dict(card) for card in cards])
+        existing = {item['name']: item for item in project.get('characters', [])}
+        for card in normalized:
+            old = existing.get(card.get('name'), {})
+            if old.get('reference_images') and not card.get('reference_images'):
+                card['reference_images'] = deepcopy(old['reference_images'])
+            if old.get('id'):
+                card['id'] = old['id']
+            for state in card.get('states', []):
+                old_state = next((item for item in old.get('states', []) if item.get('label') == state.get('label')), None)
+                if old_state:
+                    state['id'] = old_state.get('id', state['id'])
+        return normalized
+
+    def apply_character_cards(project, cards, difference_analysis=None):
+        project['characters'] = comic_character_payload(project, cards)
+        if difference_analysis is not None:
+            project['character_difference_analysis'] = difference_analysis
+        recompute(project)
+
+    def character_result(project, cards, status, difference_analysis=None):
+        normalized = comic_character_payload(project, cards)
+        return {'project': project, 'characters': normalized, 'difference_analysis': difference_analysis or project.get('character_difference_analysis', {}), 'status': status}
+
     def copy_run_asset(repo, project_id, run_id, reference):
         prefix = f'/runs/{run_id}/'
         if not isinstance(reference,str) or not reference.startswith(prefix):
@@ -76,6 +107,7 @@ def create_router(api):
             source = api.get_run_repository().load(source_id) if source_id else {}
             text = api.get_run_repository().novel_path(source_id).read_text(encoding='utf-8') if source_id else request.get('source_text','')
             project = new_project(request.get('title',''),text,source.get('characters') or request.get('characters',[]))
+            project['character_source_text'] = request.get('character_source_text', '') or source.get('character_source_text', '')
             if source_id:
                 project['source_project'] = source_id
                 for card in project['characters']:
@@ -155,6 +187,125 @@ def create_router(api):
                 snapshot['reference_images'].append(repository().add_asset(project_id,path.name,path.read_bytes()))
             project['style'] = snapshot
         return transact(project_id,apply)
+
+    @router.post('/api/comics/{project_id}/characters/preview')
+    def preview_characters(project_id: str, request: dict):
+        project = load(project_id)
+        text = str(request.get('text') or project.get('character_source_text') or project.get('source_text') or '')
+        cards = build_character_cards(text)
+        analysis = analyze_character_differences(cards, None)
+        with repository().transaction(project_id) as current:
+            current['character_source_text'] = text
+            apply_character_cards(current, cards, analysis)
+        return character_result(load(project_id), cards, f'识别到 {len(cards)} 个角色 · 本地规则', analysis)
+
+    @router.post('/api/comics/{project_id}/characters/llm/extract')
+    def extract_characters(project_id: str, request: dict):
+        project = load(project_id)
+        text = str(request.get('text') or project.get('character_source_text') or project.get('source_text') or '')
+        provider = api.require_llm_provider()
+        local_cards = build_character_cards(text)
+        cards, status = extract_character_cards_with_llm_detailed(text, provider, purpose=f'comic:{project_id}:extract-characters')
+        cards = cards or local_cards
+        analysis = analyze_character_differences(cards, None)
+        with repository().transaction(project_id) as current:
+            current['character_source_text'] = text
+            apply_character_cards(current, cards, analysis)
+        return character_result(load(project_id), cards, status, analysis)
+
+    @router.post('/api/comics/{project_id}/characters/llm/enhance')
+    def enhance_characters(project_id: str, request: dict):
+        project = load(project_id)
+        cards = parse_character_payload(request.get('characters') or project.get('characters', []))
+        cards = enhance_character_cards_with_llm(cards, api.require_llm_provider(), purpose=f'comic:{project_id}:enhance-characters')
+        with repository().transaction(project_id) as current:
+            apply_character_cards(current, cards)
+        return character_result(load(project_id), cards, f'已增强 {len(cards)} 个角色')
+
+    @router.post('/api/comics/{project_id}/characters/prompt-bank/local')
+    def local_prompt_bank(project_id: str, request: dict):
+        project = load(project_id)
+        cards = parse_character_payload(request.get('characters') or project.get('characters', []))
+        scenes = parse_scene_payload(request.get('scenes') or project.get('scenes', []))
+        result = build_character_prompt_bank(cards, scenes, None, purpose=f'comic:{project_id}:local-prompt-bank')
+        with repository().transaction(project_id) as current:
+            apply_character_cards(current, cards)
+        return character_result(load(project_id), cards, f'已使用本地规则生成 {len(cards)} 个角色 Prompt Bank')
+
+    @router.post('/api/comics/{project_id}/characters/llm/prompt-bank')
+    def prompt_bank(project_id: str, request: dict):
+        project = load(project_id)
+        cards = parse_character_payload(request.get('characters') or project.get('characters', []))
+        scenes = parse_scene_payload(request.get('scenes') or project.get('scenes', []))
+        provider = api.require_llm_provider()
+        reference_count = sum(len(card.reference_images) for card in cards)
+        if reference_count and provider.config.vlm.api_key:
+            analyze_reference_visuals(cards, repository().run_dir(project_id), provider, purpose=f'comic:{project_id}:reference-visuals')
+        result = build_character_prompt_bank(cards, scenes, provider, purpose=f'comic:{project_id}:prompt-bank')
+        with repository().transaction(project_id) as current:
+            apply_character_cards(current, cards)
+        status = f'已生成 {len(cards)} 个角色 Prompt Bank'
+        if reference_count and provider.config.vlm.api_key:
+            status = f'已分析 {reference_count} 张人设图并生成 {len(cards)} 个角色 Prompt Bank'
+        elif reference_count:
+            status = f'已保留 {reference_count} 张人设图并生成 {len(cards)} 个文本 Prompt Bank，未配置 VLM'
+        return character_result(load(project_id), cards, status, {'mode': result.mode, 'error': result.llm_error})
+
+    @router.post('/api/comics/{project_id}/characters/llm/prompt-bank/references')
+    def prompt_bank_with_references(project_id: str, request: dict):
+        project = load(project_id)
+        cards = parse_character_payload(request.get('characters') or project.get('characters', []))
+        scenes = parse_scene_payload(request.get('scenes') or project.get('scenes', []))
+        provider = api.require_llm_provider()
+        if provider.config.vlm.api_key:
+            analyze_reference_visuals(cards, repository().run_dir(project_id), provider, purpose=f'comic:{project_id}:reference-visuals')
+        result = build_character_prompt_bank(cards, scenes, provider, purpose=f'comic:{project_id}:prompt-bank-references')
+        with repository().transaction(project_id) as current:
+            apply_character_cards(current, cards)
+        status = f'已生成 {len(cards)} 个角色 Prompt Bank'
+        if provider.config.vlm.api_key:
+            status = f'已分析角色参考图并生成 {len(cards)} 个角色 Prompt Bank'
+        else:
+            status = f'已绑定角色参考图，但未配置 VLM，已生成 {len(cards)} 个文本 Prompt Bank'
+        return character_result(load(project_id), cards, status, {'mode': result.mode, 'error': result.llm_error})
+
+    @router.post('/api/comics/{project_id}/characters/references')
+    async def upload_character_references(
+        project_id: str,
+        reference_bindings: str = Form('[]'),
+        reference_images: list[UploadFile] | None = File(None),
+    ):
+        load(project_id)
+        try:
+            bindings = json.loads(reference_bindings or '[]')
+            if not isinstance(bindings, list):
+                raise ValueError('角色参考图绑定格式无效')
+            binding_map = {str(item.get('filename')): str(item.get('character') or '') for item in bindings if isinstance(item, dict)}
+            with repository().transaction(project_id) as project:
+                names = {str(card.get('name')): card for card in project.get('characters', [])}
+                for upload in reference_images or []:
+                    filename = Path(upload.filename or 'reference.png').name
+                    path = repository().add_asset(project_id, filename, await upload.read(), upload.content_type)
+                    target = binding_map.get(filename, '')
+                    if not target and len(names) == 1:
+                        target = next(iter(names))
+                    if target not in names:
+                        continue
+                    names[target].setdefault('reference_images', [])
+                    if path not in names[target]['reference_images']:
+                        names[target]['reference_images'].append(path)
+            return load(project_id)
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @router.post('/api/comics/{project_id}/characters/llm/diff')
+    def character_diff(project_id: str, request: dict):
+        project = load(project_id)
+        cards = parse_character_payload(request.get('characters') or project.get('characters', []))
+        analysis = analyze_character_differences(cards, api.require_llm_provider(), purpose=f'comic:{project_id}:character-diff')
+        with repository().transaction(project_id) as current:
+            current['character_difference_analysis'] = analysis
+        return character_result(load(project_id), cards, '已完成角色差异分析', analysis)
 
     @router.post('/api/comics/{project_id}/assets')
     async def upload(project_id:str,file:UploadFile=File(...),role:str=Form('candidate')):
